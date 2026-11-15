@@ -899,3 +899,284 @@ body.welcome-open #hud > * {
   opacity: 0.75;
   font-size: 11px;
 }
+
+/* ---------- Top row: a slim stats bar, and a separate clock + weather card ---------- */
+.top-row {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 328px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+.top-row > * {
+  pointer-events: auto;
+}
+
+.top-row .topbar {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 48px;
+  gap: 14px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+}
+
+.top-row .brand {
+  min-width: 0;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.top-row .mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, transparent 42%, #1b1b1b 42% 58%, transparent 58%),
+    linear-gradient(#3cb172, #3cb172) 6px 16px / 7px 7px no-repeat,
+    linear-gradient(#3b82d6, #3b82d6) 13px 9px / 7px 7px no-repeat,
+    #e8eef3;
+}
+
+.top-row .brand h1 {
+  font-size: 17px;
+}
+
+.top-row .stats {
+  gap: 16px;
+}
+
+.top-row .stats dt {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.top-row .stats dd {
+  font-size: 15px;
+  margin-top: 0;
+  line-height: 1.15;
+}
+
+.bar-tools {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.top-row .icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+}
+
+#btn-mute .snd-off,
+#btn-mute[aria-pressed="true"] .snd-on,
+#btn-pause .ico-play,
+#btn-pause.paused .ico-pause {
+  display: none;
+}
+
+#btn-mute[aria-pressed="true"] .snd-off,
+#btn-pause.paused .ico-play {
+  display: block;
+}
+
+#btn-pause.paused {
+  background: var(--gold);
+  color: var(--ink);
+  border-color: transparent;
+}
+
+.top-row .settings {
+  top: calc(100% + 8px);
+  right: 0;
+}
+
+.clock-card {
+  flex: 0 0 312px;
+  display: grid;
+  gap: 7px;
+  padding: 9px 12px 10px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+}
+
+.clock-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.clock-when {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.clock-time {
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.clock-day {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+.clock-card .clock-controls {
+  gap: 3px;
+}
+
+.clock-card .speed {
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.clock-card .icon-btn {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.day-track {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  padding-top: 7px;
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+.day-track::before,
+.day-track span {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 4px;
+  border-radius: 4px;
+}
+
+.day-track::before {
+  right: 0;
+  background: rgba(243, 239, 228, 0.12);
+}
+
+.day-track span {
+  width: 0;
+  background: linear-gradient(90deg, #f3c56b, var(--gold));
+}
+
+.day-track small {
+  opacity: 0.5;
+}
+
+.wx {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.wx-icon {
+  font-size: 22px;
+  line-height: 1;
+  width: 26px;
+  text-align: center;
+}
+
+.wx-text,
+.wx-side {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.wx-text b {
+  font-size: 13px;
+}
+
+.wx-text span,
+.wx-forecast {
+  font-size: 11px;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wx-side {
+  justify-items: end;
+  text-align: right;
+  max-width: 150px;
+}
+
+.wx-snow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(243, 239, 228, 0.1);
+  white-space: nowrap;
+}
+
+.wx-snow.deep {
+  background: rgba(158, 204, 236, 0.28);
+  color: #dff1ff;
+}
+
+/* Things that sat under the old, taller bar. */
+.toasts {
+  top: 72px;
+}
+
+.place-hint {
+  top: 148px;
+}
+
+@media (max-width: 1100px) {
+  .top-row {
+    right: 12px;
+    flex-wrap: wrap;
+  }
+  .clock-card {
+    flex: 0 0 312px;
+    margin-left: auto;
+  }
+  .toasts {
+    top: 72px;
+  }
+  .place-hint {
+    top: 196px;
+  }
+}

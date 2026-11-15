@@ -10,52 +10,83 @@
       <canvas id="view"></canvas>
 
       <div id="hud">
-        <header class="topbar">
-          <div class="brand">
-            <span class="mark" aria-hidden="true"></span>
-            <div>
+        <div class="top-row">
+          <header class="topbar">
+            <div class="brand">
+              <span class="mark" aria-hidden="true"></span>
               <h1>Skilandia</h1>
-              <p id="dayline">Day 1 · 8:30 AM</p>
             </div>
-          </div>
-          <dl class="stats">
-            <div>
-              <dt>Cash</dt>
-              <dd id="stat-money">$2,200</dd>
+            <dl class="stats">
+              <div>
+                <dt>Cash</dt>
+                <dd id="stat-money">$2,200</dd>
+              </div>
+              <div>
+                <dt>Skiers</dt>
+                <dd id="stat-skiers">0</dd>
+              </div>
+              <div>
+                <dt>Mood</dt>
+                <dd id="stat-mood">—</dd>
+              </div>
+              <div>
+                <dt>Tickets</dt>
+                <dd id="stat-tickets">0</dd>
+              </div>
+              <div>
+                <dt>Lifetime</dt>
+                <dd id="stat-earned">$0</dd>
+              </div>
+            </dl>
+            <div class="bar-tools">
+              <button type="button" id="btn-mute" class="ghost icon-btn" aria-pressed="false" title="Sound on (click to mute)" aria-label="Mute sound">
+                <svg class="snd-on" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>
+                <svg class="snd-off" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>
+              </button>
+              <button type="button" id="btn-settings" class="ghost icon-btn" aria-expanded="false" title="Settings" aria-label="Settings">⚙</button>
             </div>
-            <div>
-              <dt>Skiers</dt>
-              <dd id="stat-skiers">0</dd>
+            <div id="settings" class="settings hidden" role="dialog" aria-label="Settings">
+              <h2>Settings</h2>
+              <label class="switch">
+                <input type="checkbox" id="opt-move-fee" checked />
+                <span>Charge a fee to move buildings <small>(25% of the price)</small></span>
+              </label>
             </div>
-            <div>
-              <dt>Mood</dt>
-              <dd id="stat-mood">—</dd>
+          </header>
+
+          <section class="clock-card" aria-label="Day, speed and weather">
+            <div class="clock-row">
+              <div class="clock-when">
+                <span id="clock-time" class="clock-time">8:30 AM</span>
+                <span id="clock-day" class="clock-day">Day 1</span>
+              </div>
+              <div class="clock-controls" role="group" aria-label="Game speed">
+                <button type="button" id="btn-pause" class="ghost icon-btn" title="Pause (Space)" aria-label="Pause">
+                  <svg class="ico-pause" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                  <svg class="ico-play" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M7 5l12 7-12 7z"/></svg>
+                </button>
+                <button type="button" class="ghost speed on" data-speed="1" title="Normal speed (1)">1×</button>
+                <button type="button" class="ghost speed" data-speed="2" title="Fast (2)">2×</button>
+                <button type="button" class="ghost speed" data-speed="3" title="Fastest (3)">3×</button>
+              </div>
             </div>
-            <div>
-              <dt>Tickets today</dt>
-              <dd id="stat-tickets">0</dd>
+            <div class="day-track" aria-hidden="true">
+              <span id="clock-fill"></span>
+              <small>8:30</small><small>4:00</small>
             </div>
-            <div>
-              <dt>Lifetime take</dt>
-              <dd id="stat-earned">$0</dd>
+            <div class="wx">
+              <span id="wx-icon" class="wx-icon" aria-hidden="true">☀</span>
+              <div class="wx-text">
+                <b id="wx-cond">Clear skies</b>
+                <span id="wx-meta">-6°C · wind 8 km/h</span>
+              </div>
+              <div class="wx-side">
+                <span id="wx-snow" class="wx-snow">0 cm fresh</span>
+                <span id="wx-forecast" class="wx-forecast">Fine for the rest of the day</span>
+              </div>
             </div>
-          </dl>
-          <div class="clock-controls">
-            <button type="button" id="btn-pause" class="ghost" title="Pause">Pause</button>
-            <button type="button" class="ghost speed on" data-speed="1">1×</button>
-            <button type="button" class="ghost speed" data-speed="2">2×</button>
-            <button type="button" class="ghost speed" data-speed="3">3×</button>
-            <button type="button" id="btn-mute" class="ghost" title="Mute">Sound</button>
-            <button type="button" id="btn-settings" class="ghost icon-btn" aria-expanded="false" title="Settings" aria-label="Settings">⚙</button>
-          </div>
-          <div id="settings" class="settings hidden" role="dialog" aria-label="Settings">
-            <h2>Settings</h2>
-            <label class="switch">
-              <input type="checkbox" id="opt-move-fee" checked />
-              <span>Charge a fee to move buildings <small>(25% of the price)</small></span>
-            </label>
-          </div>
-        </header>
+          </section>
+        </div>
 
         <aside class="panel" id="panel">
           <section>

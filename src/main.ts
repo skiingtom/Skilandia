@@ -71,7 +71,14 @@ const mountainsEl = document.querySelector("#mountains")!;
 const staffSection = document.querySelector("#staff-section")!;
 const staffList = document.querySelector("#staff-list")!;
 const staffLock = document.querySelector("#staff-lock")!;
-const dayEl = document.querySelector("#dayline")!;
+const clockTime = document.querySelector("#clock-time")!;
+const clockDay = document.querySelector("#clock-day")!;
+const clockFill = document.querySelector<HTMLElement>("#clock-fill")!;
+const wxIcon = document.querySelector("#wx-icon")!;
+const wxCond = document.querySelector("#wx-cond")!;
+const wxMeta = document.querySelector("#wx-meta")!;
+const wxSnow = document.querySelector<HTMLElement>("#wx-snow")!;
+const wxForecast = document.querySelector<HTMLElement>("#wx-forecast")!;
 const goalsEl = document.querySelector("#goals")!;
 const complaintsEl = document.querySelector("#complaints")!;
 const selTitle = document.querySelector("#sel-title")!;
@@ -140,6 +147,21 @@ function shortMoney(n: number): string {
   return `${sign}$${(a / 1e6).toFixed(a < 1e7 ? 2 : 1)}M`;
 }
 
+/** The clock card: time, day, how far through the open day, and the weather report. */
+function paintClock(): void {
+  clockTime.textContent = game.timeOfDay();
+  clockDay.textContent = `Day ${game.day}`;
+  clockFill.style.width = `${(game.dayFraction() * 100).toFixed(1)}%`;
+  const w = game.weatherReport();
+  wxIcon.textContent = w.icon;
+  wxCond.textContent = w.condition;
+  wxMeta.textContent = `${w.tempC}°C · wind ${w.windKmh} km/h`;
+  wxSnow.textContent = w.freshCm > 0 ? `${w.freshCm} cm fresh` : "No new snow";
+  wxSnow.classList.toggle("deep", w.freshCm >= 10);
+  wxForecast.textContent = w.forecast;
+  wxForecast.title = w.forecast;
+}
+
 function paintHud(force = false): void {
   moneyEl.textContent = shortMoney(game.money);
   const load = game.loadLimits();
@@ -150,7 +172,7 @@ function paintHud(force = false): void {
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
   earnedEl.textContent = shortMoney(game.lifetimeEarned);
-  dayEl.textContent = game.clockLabel();
+  paintClock();
   paintMountains();
   paintStaff();
   goalsEl.innerHTML = game
@@ -193,7 +215,10 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".speed").forEach((btn) => {
     btn.classList.toggle("on", Number(btn.dataset.speed) === game.speed && !game.paused);
   });
-  document.querySelector("#btn-pause")!.textContent = game.paused ? "Resume" : "Pause";
+  const pauseBtn = document.querySelector<HTMLButtonElement>("#btn-pause")!;
+  pauseBtn.classList.toggle("paused", game.paused);
+  pauseBtn.title = game.paused ? "Resume (Space)" : "Pause (Space)";
+  pauseBtn.setAttribute("aria-label", game.paused ? "Resume" : "Pause");
   const drafting = game.tool === "cut" || game.tool === "road";
   cutBanner.classList.toggle("hidden", !drafting);
   cutText.textContent =
@@ -510,7 +535,10 @@ document.querySelector("#btn-pause")!.addEventListener("click", () => {
 
 document.querySelector("#btn-mute")!.addEventListener("click", () => {
   const muted = audio.toggle();
-  document.querySelector("#btn-mute")!.textContent = muted ? "Muted" : "Sound";
+  const muteBtn = document.querySelector<HTMLButtonElement>("#btn-mute")!;
+  muteBtn.setAttribute("aria-pressed", String(muted));
+  muteBtn.title = muted ? "Sound off (click to unmute)" : "Sound on (click to mute)";
+  muteBtn.setAttribute("aria-label", muted ? "Unmute sound" : "Mute sound");
 });
 
 document.querySelector("#btn-cancel-cut")!.addEventListener("click", () => {

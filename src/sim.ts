@@ -139,6 +139,8 @@ export class Game {
   ticketPrice = START_TICKET;
   day = 1;
   dayT = 0;
+  /** New snow on the ground (cm): piles up in a storm, settles and gets skied off after. */
+  freshSnowCm = 0;
   speed = 1;
   paused = false;
   managing = false;
@@ -385,6 +387,56 @@ export class Game {
     const w = this.weather();
     const sky = w.snow > 0.15 ? "❄ Snowing" : w.cover > 0.45 ? "☁ Cloudy" : w.cover > 0.2 ? "⛅ Sunny spells" : "☀ Clear";
     return `Day ${this.day} · ${h}:${m.toString().padStart(2, "0")} ${ap} · ${sky}`;
+  }
+
+  /** Clock time for a point in the open day (0..52 game seconds), e.g. "2:15 PM". */
+  timeOfDay(dayT = this.dayT): string {
+    const minutes = 8 * 60 + 30 + (dayT / 52) * (7.5 * 60);
+    const h24 = Math.floor(minutes / 60);
+    const m = Math.floor(minutes % 60);
+    return `${((h24 + 11) % 12) + 1}:${m.toString().padStart(2, "0")} ${h24 >= 12 ? "PM" : "AM"}`;
+  }
+
+  /** The weather at another point in game time (days from now, can be fractional). */
+  private weatherAt(daysAhead: number): { cover: number; snow: number; wind: number } {
+    const [day, dayT] = [this.day, this.dayT];
+    const t = day + dayT / 52 + daysAhead;
+    this.day = Math.floor(t);
+    this.dayT = (t - this.day) * 52;
+    const w = this.weather();
+    this.day = day;
+    this.dayT = dayT;
+    return w;
+  }
+
+  /**
+   * What the weather panel shows: conditions now, temperature at the base,
+   * wind, fresh snow on the ground and a short forecast for the rest of the
+   * day (looking into tomorrow morning once the afternoon is on).
+   */
+  weatherReport(): { icon: string; condition: string; tempC: number; windKmh: number; freshCm: number; forecast: string } {
+    const w = this.weather();
+    const icon = w.snow > 0.15 ? "❄" : w.cover > 0.45 ? "☁" : w.cover > 0.2 ? "⛅" : "☀";
+    const condition =
+      w.snow > 0.7 ? "Heavy snow" : w.snow > 0.15 ? "Snowing" : w.cover > 0.7 ? "Overcast" : w.cover > 0.45 ? "Cloudy" : w.cover > 0.2 ? "Sunny spells" : "Clear skies";
+    // Coldest first thing, warmest mid-afternoon; cloud keeps it milder, snow colder.
+    const f = this.dayFraction();
+    const tempC = Math.round(-9 + 6 * Math.sin(Math.PI * Math.min(1, f * 1.15)) + (w.cover - 0.5) * 3 - w.snow * 2 + (noise2(this.day * 0.71, 3) - 0.5) * 6);
+    const windKmh = Math.round(4 + w.wind * 30 + w.snow * 15);
+    const snowing = w.snow > 0.15;
+    let forecast = snowing ? "Snowing into tomorrow" : w.cover > 0.45 ? "Staying cloudy" : "Fine for the rest of the day";
+    // Look ahead in steps of about 20 game minutes.
+    const step = 1 / 22;
+    const left = 1 - f;
+    for (let k = 1; k <= 14; k++) {
+      const a = k * step;
+      const next = this.weatherAt(a);
+      if ((next.snow > 0.15) === snowing) continue;
+      const when = a <= left ? `by ${this.timeOfDay((f + a) * 52)}` : a - left < 0.35 ? "overnight" : "tomorrow morning";
+      forecast = snowing ? `Clearing ${when}` : `Snow ${when === "overnight" || when === "tomorrow morning" ? when : `from ${this.timeOfDay((f + a) * 52)}`}`;
+      break;
+    }
+    return { icon, condition, tempC, windKmh, freshCm: Math.round(this.freshSnowCm), forecast };
   }
 
   /** How far through the open day we are: 0 at 8:30 AM, 1 at 4 PM. */
@@ -1803,7 +1855,10 @@ export class Game {
         this.heliTakeToday = 0;
         this.toast(`Day ${this.day} in Skilandia.`);
       }
-      const nowSnowing = this.weather().snow > 0.15;
+      const wNow = this.weather();
+      // A day is 52 game seconds: a half-day storm leaves 20-30 cm, which settles and gets skied off over a day or two.
+      this.freshSnowCm = Math.max(0, this.freshSnowCm + capped * (wNow.snow * 1.1 - 0.05 - this.freshSnowCm * 0.004));
+      const nowSnowing = wNow.snow > 0.15;
       if (nowSnowing !== snowing) this.toast(nowSnowing ? "❄ Snow is falling. Fresh powder on the way!" : "☀ The snow has stopped. The sun is breaking through.");
       // Skiers only come when it looks like the resort can take them:
       // arrivals close the gap to demand over about a minute, then stop.
