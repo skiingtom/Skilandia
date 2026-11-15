@@ -116,6 +116,10 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 - Sugar shacks can sit beside trails
 - After your first peak, hire ski patrol and a crew
 
+## Unreal Engine 5 version
+
+A port to Unreal Engine 5 is under way in [`Unreal/`](Unreal/README.md): the simulation runs in C++ (checked by `Unreal/CoreTests/run.sh`, the same playthrough as `npm test`) and the mountain is playable with keyboard tools. Menus, art and audio are next.
+
 ## Develop
 
 ```bash
