@@ -105,6 +105,8 @@ export interface Skier {
   lesson: boolean;
   /** Already flown a heli-ski trip today. */
   heliDone: boolean;
+  /** Game time the skier joined their current lift line (lines are first come, first served). */
+  joinT: number;
   dist: number;
   wait: number;
   runsLeft: number;
@@ -146,6 +148,14 @@ export const WORLD_H = 820 * MAP_SCALE;
 export const VERTICAL_M = 128 * MAP_SCALE;
 export const UNIT_M = 0.62;
 
+/**
+ * Money scale. Hills hold thousands of skiers, so ticket money is large;
+ * every price, wage, running cost and unlock goal is multiplied by this so
+ * the game keeps the same pace. (Per-person prices — tickets, lessons,
+ * heli seats — are not scaled.)
+ */
+export const ECON = 10;
+
 export const MOUNTAINS: {
   id: MountainId;
   name: string;
@@ -153,6 +163,9 @@ export const MOUNTAINS: {
   profitToUnlock: number;
   buyCost: number;
   staffRequired: boolean;
+  /** Most skiers the mountain can hold at once. Each mountain triples the last. */
+  capacity: number;
+  maxLifts: number;
 }[] = [
   {
     id: 0,
@@ -161,22 +174,28 @@ export const MOUNTAINS: {
     profitToUnlock: 0,
     buyCost: 0,
     staffRequired: false,
+    capacity: 2000,
+    maxLifts: 10,
   },
   {
     id: 1,
     name: "Cedar Ridge",
     blurb: "A real mountain. Ski patrol and staff are required.",
-    profitToUnlock: 6500,
-    buyCost: 8500,
+    profitToUnlock: 6500 * ECON,
+    buyCost: 8500 * ECON,
     staffRequired: true,
+    capacity: 6000,
+    maxLifts: 20,
   },
   {
     id: 2,
     name: "Twin Peaks",
     blurb: "The finale: two mountains, one huge ski resort.",
-    profitToUnlock: 22000,
-    buyCost: 28000,
+    profitToUnlock: 22000 * ECON,
+    buyCost: 28000 * ECON,
     staffRequired: true,
+    capacity: 18000,
+    maxLifts: 40,
   },
 ];
 
@@ -251,7 +270,7 @@ export const STAFF_WAGE_PER_MIN: Record<StaffRole, number> = {
   instructor: 15,
 };
 
-export const START_MONEY = 2200;
+export const START_MONEY = 2200 * ECON;
 export const START_TICKET = 42;
 
 export const DIFF = [
@@ -398,10 +417,9 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
 
 export function liftCost(type: LiftType, length: number): number {
   const s = LIFT_SPECS[type];
-  return Math.round((s.baseCost + s.costPerUnit * length) / 10) * 10;
+  return Math.round(((s.baseCost + s.costPerUnit * length) * ECON) / 100) * 100;
 }
 
-export const MAX_LIFTS = 6;
 
 export const TRAIL_KINDS: TrailKind[] = ["slope", "slalom", "moguls", "park", "glades"];
 
@@ -437,16 +455,21 @@ export const MOVE_FEE = 0.25;
 
 /** Running costs per minute (fuel, pilots, insurance), charged whether busy or not. */
 export const OPERATING_COST_PER_MIN: Partial<Record<BuildingType, number>> = {
-  heli: 180,
+  heli: 150 * ECON,
 };
 
 /** Heli-skiing: seats per flight, fare per seat, fuel per flight, minutes are game seconds. */
 export const HELI = {
-  seats: 4,
-  fare: 340,
-  fuelPerFlight: 140,
+  seats: 8,
+  fare: 650,
+  fuelPerFlight: 600,
   /** Seconds the drop-and-ski trip lasts (out of sight, off the map). */
-  tripTime: 34,
+  tripTime: 30,
   /** Seconds the pilot waits for a full load before going with fewer. */
   maxWait: 10,
 };
+
+for (const k of Object.keys(COSTS) as BuildingType[]) COSTS[k] *= ECON;
+for (const k of Object.keys(INCOME_PER_MIN) as BuildingType[]) INCOME_PER_MIN[k] *= ECON;
+for (const k of Object.keys(STAFF_WAGE_PER_MIN) as StaffRole[]) STAFF_WAGE_PER_MIN[k] *= ECON;
+for (const k of Object.keys(FEATURE_SPEC) as FeatureType[]) FEATURE_SPEC[k].cost *= ECON;

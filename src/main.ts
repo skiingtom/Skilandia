@@ -14,7 +14,6 @@ import {
   DIFF,
   INCOME_PER_MIN,
   LIFT_SPECS,
-  MAX_LIFTS,
   MOUNTAINS,
   STAFF_LABEL,
   STAFF_ROLES,
@@ -132,7 +131,7 @@ let lastToastId = 0;
 
 function paintHud(force = false): void {
   moneyEl.textContent = `$${Math.round(game.money).toLocaleString()}`;
-  skiersEl.textContent = String(game.skiers.length);
+  skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${game.capacity().toLocaleString()}`;
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
   earnedEl.textContent = `$${Math.round(game.lifetimeEarned).toLocaleString()}`;
@@ -169,7 +168,7 @@ function paintHud(force = false): void {
       return;
     }
     if (tool.startsWith("lift:")) {
-      btn.disabled = game.lifts.length >= MAX_LIFTS;
+      btn.disabled = game.lifts.length >= game.maxLifts();
       return;
     }
     const type = tool as BuildingType;

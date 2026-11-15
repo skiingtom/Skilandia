@@ -814,3 +814,7 @@ body.welcome-open #hud > * {
   font-size: 16px;
   line-height: 1;
 }
+
+.stats dd {
+  white-space: nowrap;
+}

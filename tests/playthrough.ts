@@ -8,7 +8,7 @@ import { MAP_SCALE as K, TRAIL_KIND_SPEC, HELI } from "../src/types";
 // Run with: npm test
 const g = new Game();
 g.startManaging();
-g.money = 400000;
+g.money = 10_000_000;
 const problems: string[] = [];
 const ok = (cond: boolean, msg: string) => {
   if (!cond && problems.length < 30) problems.push(msg);
@@ -75,6 +75,8 @@ ok(!!pad, "heli base not built");
 
 let maxWaitSeen = 0;
 const stuck = new Map<number, { state: string; t: number }>();
+const liftIdle = new Map<number, number>();
+let peakSkiers = 0;
 let heliRiders = 0;
 let flightsSeen = 0;
 let wasFlying = false;
@@ -83,10 +85,21 @@ for (let i = 0; i < 36000; i++) {
   // 30 game minutes at 1x
   g.tick(0.05);
   ok(Number.isFinite(g.money), `money became ${g.money}`);
+  peakSkiers = Math.max(peakSkiers, g.skiers.length);
+  ok(g.skiers.length <= g.capacity(), `over capacity: ${g.skiers.length} > ${g.capacity()}`);
   if (g.heli.flying && !wasFlying) flightsSeen++;
   wasFlying = g.heli.flying;
+  // A lift with people in line must keep boarding them (a long line is fine, a stalled one isn't).
+  for (const l of g.lifts) {
+    const inLine = g.skiers.some((s) => s.liftId === l.id && s.state === "queue");
+    const boarding = g.skiers.some((s) => s.liftId === l.id && s.state === "riding");
+    const st = liftIdle.get(l.id) ?? 0;
+    liftIdle.set(l.id, inLine && !boarding ? st + 0.05 : 0);
+    ok((liftIdle.get(l.id) ?? 0) < 30, `${l.name} has a line but nobody has boarded for 30s`);
+  }
   for (const s of g.skiers) {
     ok(Number.isFinite(s.x) && Number.isFinite(s.y), `skier ${s.id} has NaN position in ${s.state}`);
+    ok(s.mood >= 0 && s.mood <= 100, `skier ${s.id} mood out of range: ${s.mood}`);
     if (s.state === "skiing" && s.trailId != null && s.trailId >= 0) {
       const t = g.trails.find((tr) => tr.id === s.trailId)!;
       const d = nearestOnTrail(t, s.x, s.y).d;
@@ -98,13 +111,16 @@ for (let i = 0; i < 36000; i++) {
     else {
       prev.t += 0.05;
       if (!["riding", "skiing", "heli", "queue"].includes(s.state)) maxWaitSeen = Math.max(maxWaitSeen, prev.t);
-      ok(prev.t < 150, `skier ${s.id} stuck in ${s.state} for ${prev.t.toFixed(0)}s`);
+      if (s.state !== "queue") ok(prev.t < 150, `skier ${s.id} stuck in ${s.state} for ${prev.t.toFixed(0)}s`);
     }
   }
 }
 console.log({
   days: g.day,
   skiers: g.skiers.length,
+  peakSkiers,
+  capacity: g.capacity(),
+  lineWait: Math.round(g.liftWait()),
   tickets: g.totalTickets,
   heliFlights: flightsSeen,
   heliFare: HELI.fare,

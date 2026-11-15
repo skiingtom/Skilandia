@@ -85,7 +85,9 @@ export class World3D {
   private liftVis = new Map<number, LiftVis>();
   private liftPreview = new THREE.Group();
   private liftPreviewKey = "";
-  private skiers: THREE.Group[] = [];
+  /** Everyone on the hill, drawn as instanced meshes (body, head, skis). */
+  private crowd = makeCrowd(MAX_SKIERS_DRAWN);
+  private jacketColors = new Map<string, THREE.Color>();
   private ghost = new THREE.Group();
   private draft: THREE.Mesh;
   private draftKey = "";
@@ -151,12 +153,7 @@ export class World3D {
     this.scene.add(this.liftPreview);
     this.helicopter.visible = false;
     this.scene.add(this.helicopter);
-    for (let i = 0; i < 80; i++) {
-      const s = makeSkierMesh("#c45c4a");
-      s.visible = false;
-      this.scene.add(s);
-      this.skiers.push(s);
-    }
+    this.scene.add(this.crowd.group);
 
     window.addEventListener("keydown", (e) => {
       this.keys.add(e.key.toLowerCase());
@@ -222,7 +219,6 @@ export class World3D {
       this.buildingGroup,
       this.trailGroup,
       this.liftGroup,
-      ...this.skiers.filter((k) => k.visible),
     ];
     const hits = this.raycaster.intersectObjects(objs, true);
     if (!hits.length) return null;
@@ -744,36 +740,49 @@ export class World3D {
   }
 
   private syncSkiers(game: Game): void {
-    for (let i = 0; i < this.skiers.length; i++) {
-      const mesh = this.skiers[i];
-      const s = game.skiers[i];
-      if (!s) {
-        mesh.visible = false;
-        continue;
-      }
-      mesh.visible = true;
-      const p = to3(s.x, s.y, 1.4, this.mid);
+    const { body, head, skis } = this.crowd;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const one = new THREE.Vector3(1, 1, 1);
+    const up = new THREE.Vector3(0, 1, 0);
+    const p = new THREE.Vector3();
+    let n = 0;
+    for (const s of game.skiers) {
+      if (n >= MAX_SKIERS_DRAWN) break;
+      if (s.state === "heli") continue; // off the map
+      const g = to3(s.x, s.y, 0, this.mid);
+      p.copy(g);
       if (s.state === "riding" && s.liftId != null) {
         const vis = this.liftVis.get(s.liftId);
         if (vis && !vis.spec.surface) {
-          if (vis.type === "gondola") {
-            mesh.visible = false; // inside the cabin
-          } else {
-            const c = vis.at(s.rideT, 1);
-            p.x = to3(s.x, s.y, 0, this.mid).x + vis.side.x * vis.gauge * 0.5;
-            p.z = to3(s.x, s.y, 0, this.mid).z + vis.side.z * vis.gauge * 0.5;
-            p.y = c.y - vis.hang + 0.2;
-          }
+          if (vis.type === "gondola") continue; // inside the cabin
+          const c = vis.at(s.rideT, 1);
+          p.x += vis.side.x * vis.gauge * 0.5;
+          p.z += vis.side.z * vis.gauge * 0.5;
+          p.y = c.y - vis.hang - 1.2;
         }
       }
       if (s.air > 0 && s.state === "skiing") p.y += Math.sin(Math.min(1, s.air / 0.75) * Math.PI) * 5;
-      mesh.position.copy(p);
-      mesh.userData = { kind: "skier", id: s.id };
-      const body = mesh.children[0] as THREE.Mesh;
-      if (body && body.material instanceof THREE.MeshLambertMaterial) {
-        body.material.color.set(s.color);
-      }
+      // Face roughly downhill while skiing, up the hill otherwise.
+      q.setFromAxisAngle(up, ((s.id * 2.399) % (Math.PI * 2)) * (s.state === "skiing" ? 0.15 : 1));
+      m.compose(p, q, one);
+      skis.setMatrixAt(n, m);
+      p.y += 2.2;
+      m.compose(p, q, one);
+      body.setMatrixAt(n, m);
+      p.y += 1.4;
+      m.compose(p, q, one);
+      head.setMatrixAt(n, m);
+      let c = this.jacketColors.get(s.color);
+      if (!c) this.jacketColors.set(s.color, (c = new THREE.Color(s.color)));
+      body.setColorAt(n, c);
+      n++;
     }
+    for (const mesh of [body, head, skis]) {
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    if (body.instanceColor) body.instanceColor.needsUpdate = true;
   }
 
   private syncDraft(game: Game): void {
@@ -1190,20 +1199,26 @@ function makeVillageProps(mid: MountainId): THREE.Group {
   return g;
 }
 
-function makeSkierMesh(color: string): THREE.Group {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color }));
-  body.position.y = 2.2;
-  body.castShadow = true;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.55, 8, 8), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }));
-  head.position.y = 3.6;
-  const ski = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 3.4), new THREE.MeshLambertMaterial({ color: "#2a3038" }));
-  ski.position.set(-0.4, 0.2, 0.2);
-  const ski2 = ski.clone();
-  ski2.position.x = 0.4;
-  g.add(body, head, ski, ski2);
-  g.userData = { kind: "skier" };
-  return g;
+/** Enough for the biggest mountain (Twin Peaks holds 18,000). */
+const MAX_SKIERS_DRAWN = 20000;
+
+function makeCrowd(max: number): { group: THREE.Group; body: THREE.InstancedMesh; head: THREE.InstancedMesh; skis: THREE.InstancedMesh } {
+  const group = new THREE.Group();
+  const body = new THREE.InstancedMesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
+  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.55, 6, 5), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }), max);
+  const skiGeo = mergeGeometries([
+    new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(-0.4, 0.2, 0.2),
+    new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(0.4, 0.2, 0.2),
+  ])!;
+  const skis = new THREE.InstancedMesh(skiGeo, new THREE.MeshLambertMaterial({ color: "#2a3038" }), max);
+  for (const m of [body, head, skis]) {
+    m.count = 0;
+    m.frustumCulled = false; // instances span the whole mountain
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    group.add(m);
+  }
+  body.setColorAt(0, new THREE.Color("#ffffff"));
+  return { group, body, head, skis };
 }
 
 interface LiftVis {

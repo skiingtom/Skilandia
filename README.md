@@ -11,6 +11,16 @@ A ski-resort builder. Fly over Little Hawk Hill, sell tickets, cut runs, build l
 
 F11 toggles fullscreen.
 
+## Mountains
+
+| Mountain | Holds at once | Lifts allowed |
+|---|---|---|
+| Little Hawk Hill | 2,000 skiers | 10 |
+| Cedar Ridge | 6,000 skiers | 20 |
+| Twin Peaks | 18,000 skiers | 40 |
+
+How many show up depends on how good the resort is (runs, variety, food, lodging, price) and how long the lift lines are. Fed-up skiers leave long lines and go home.
+
 ## Controls
 
 - **Open the mountain** on the welcome screen to start
@@ -35,7 +45,7 @@ F11 toggles fullscreen.
 
 - Select a building to move it. Moving costs 25% of its price unless you switch the fee off under ⚙ Settings
 - **Ski school** sells lessons to beginners (some graduate to blues). It needs instructors, who are paid from day one
-- **Heli-ski base** ($45,000) flies expert skiers off the map to the backcountry, four at a time, for $340 a seat. It costs $180/min to run plus fuel for each flight
+- **Heli-ski base** ($450,000) flies expert skiers off the map to the backcountry, eight at a time, for $650 a seat. It costs $1,500/min to run plus $600 fuel a flight; a busy one clears about $7,700/min
 - Sugar shacks can sit beside trails
 - After you buy the next mountain, hire ski patrol and a crew
 

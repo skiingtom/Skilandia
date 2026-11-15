@@ -31,7 +31,7 @@ import {
   LIFT_SPECS,
   Lift,
   LiftType,
-  MAX_LIFTS,
+  ECON,
   Skier,
   START_MONEY,
   START_TICKET,
@@ -79,7 +79,7 @@ function pick<T>(arr: T[]): T {
 }
 
 export function trailCost(length: number, kind: TrailKind = "slope"): number {
-  return Math.round((60 + length * 0.6) * TRAIL_KIND_SPEC[kind].costMul);
+  return Math.round(((60 + length * 0.6) * TRAIL_KIND_SPEC[kind].costMul * ECON) / 10) * 10;
 }
 
 export function classifyGrade(dropM: number, lengthM: number): Difficulty {
@@ -145,6 +145,22 @@ export class Game {
   /** The heli-ski helicopter: on the pad loading, or away on a drop. */
   heli: { flying: boolean; t: number; riders: number[]; wait: number } = { flying: false, t: 0, riders: [], wait: 0 };
   heliFlightsToday = 0;
+  /**
+   * Per-tick indexes so thousands of skiers stay cheap: skiers by id, each
+   * lift's line in order, everyone's place in their line, line lengths, and
+   * the runs each lift serves.
+   */
+  private byId = new Map<number, Skier>();
+  private lines = new Map<number, Skier[]>();
+  private lineSpot = new Map<number, number>();
+  private lineLen = new Map<number, number>();
+  private served = new Map<number, Trail[]>();
+  private heliSpot = new Map<number, number>();
+  /** Ticket money is shown as one float every couple of seconds, not per skier. */
+  private boothTake = 0;
+  /** Game seconds since start; orders lift lines. */
+  private clock = 0;
+  private boothT = 0;
   heliTakeToday = 0;
   upkeepToday = 0;
   fx: Fx[] = [];
@@ -314,12 +330,36 @@ export class Game {
     return Math.round(34 + this.amenityScore() * 38 + this.variety().score * 22);
   }
 
+  /** Roughly how long, in seconds, the average lift line takes right now. */
+  liftWait(): number {
+    // Average over the people in line: each waits about (their line / that lift's haul rate).
+    let queued = 0;
+    let total = 0;
+    for (const l of this.lifts) {
+      const spec = LIFT_SPECS[l.type];
+      const q = this.lines.get(l.id)?.length ?? 0;
+      const perSec = (spec.seats * spec.speed) / spec.spacing;
+      queued += q;
+      total += q * (q / perSec);
+    }
+    return queued > 0 ? total / queued : 0;
+  }
+
+  capacity(): number {
+    return MOUNTAINS[this.currentMountain].capacity;
+  }
+
+  maxLifts(): number {
+    return MOUNTAINS[this.currentMountain].maxLifts;
+  }
+
   attraction(): number {
     const fair = this.fairPrice();
     const priceFactor =
       this.ticketPrice <= fair ? 1 : clamp(1 - (this.ticketPrice - fair) / (fair + 8), 0.18, 1);
-    const queue = this.skiers.filter((s) => s.state === "queue").length;
-    const queueFactor = queue > 9 ? 0.72 : queue > 6 ? 0.88 : 1;
+    // Word gets around about long lift lines.
+    const wait = this.liftWait();
+    const queueFactor = wait > 180 ? 0.45 : wait > 90 ? 0.7 : wait > 45 ? 0.88 : 1;
     return clamp(0.32 + this.variety().score * 0.42 + this.amenityScore() * 0.34, 0.15, 1.15) * priceFactor * queueFactor;
   }
 
@@ -417,8 +457,8 @@ export class Game {
       return;
     }
     if (tool.startsWith("lift:")) {
-      if (this.lifts.length >= MAX_LIFTS) {
-        this.toast(`${MAX_LIFTS} lifts is the limit for one mountain.`, true);
+      if (this.lifts.length >= this.maxLifts()) {
+        this.toast(`${this.maxLifts()} lifts is the limit for this mountain.`, true);
         return;
       }
       this.tool = tool;
@@ -602,7 +642,7 @@ export class Game {
     const noun = liftNoun(type);
     const offProperty = (p: Vec2) => p.x < 14 || p.x > WORLD_W - 14 || p.y < 30 || p.y > WORLD_H - 12;
     if (offProperty(a) || offProperty(b)) return out("That's off the property.");
-    if (this.lifts.length >= MAX_LIFTS) return out(`${MAX_LIFTS} lifts is the limit for one mountain.`);
+    if (this.lifts.length >= this.maxLifts()) return out(`${this.maxLifts()} lifts is the limit for this mountain.`);
     if (length < spec.minLength) return out(`Too short — a ${noun} needs at least ${Math.round(spec.minLength * UNIT_M)} m.`);
     if (length > spec.maxLength) return out(`Too long — a ${noun} tops out at ${Math.round(spec.maxLength * UNIT_M)} m.`);
     if (eB - eA < 0.012) {
@@ -1015,12 +1055,13 @@ export class Game {
       liftId: null,
       rideT: 0,
       heliDone: false,
+      joinT: 0,
       likes: likes(),
       air: 0,
       lesson: false,
       dist: 0,
       wait: 0,
-      runsLeft: 2 + ((Math.random() * 3) | 0),
+      runsLeft: 6 + ((Math.random() * 9) | 0),
       runsDone: 0,
       mood: 70,
       paid: freeTicket,
@@ -1053,19 +1094,35 @@ export class Game {
         this.heliTakeToday = 0;
         this.toast(`Day ${this.day} on Little Hawk Hill.`);
       }
-      this.spawnAcc += capped * (0.042 + this.attraction() * 0.14);
+      // Arrivals scale with the mountain's size and how appealing it is.
+      // A great, uncrowded resort fills toward capacity; long lines slow it.
+      this.spawnAcc += capped * this.capacity() * 0.0024 * this.attraction();
+      const cap = this.capacity();
       while (this.spawnAcc > 1) {
         this.spawnAcc -= 1;
-        if (this.skiers.length < 70) this.spawnSkier(false);
+        if (this.skiers.length < cap) this.spawnSkier(false);
+      }
+      this.boothT += capped;
+      if (this.boothT > 2 && this.boothTake > 0) {
+        const b = this.booth();
+        this.float(b.x, b.y, `+$${Math.round(this.boothTake).toLocaleString()}`);
+        this.sfx.push("cash");
+        this.boothTake = 0;
+        this.boothT = 0;
       }
       this.collectBuildingIncome(capped);
       this.collectRemoteIncome(capped);
       this.payWages(capped);
       this.payUpkeep(capped);
     }
+    this.clock += capped;
+    this.buildIndexes();
     this.stepLift(capped);
     this.stepHeli(capped);
-    for (const s of this.skiers) this.stepSkier(s, capped);
+    for (const s of this.skiers) {
+      this.stepSkier(s, capped);
+      s.mood = clamp(s.mood, 0, 100);
+    }
     this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && s.y < 12 * K && s.wait <= 0));
     this.peakSkiers = Math.max(this.peakSkiers, this.skiers.length);
     this.thoughtAcc += capped;
@@ -1088,14 +1145,14 @@ export class Game {
 
   shopRatePerMin(): number {
     if (!this.buildings.length) return 0;
-    const busy = clamp(this.skiers.length / 16, 0, 1);
+    const busy = clamp(this.skiers.length / 200, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
     return Math.round(this.buildings.reduce((n, b) => n + INCOME_PER_MIN[b.type] * this.buildingFactor(b.type), 0) * util);
   }
 
   private collectBuildingIncome(dt: number): void {
     if (!this.buildings.length) return;
-    const busy = clamp(this.skiers.length / 16, 0, 1);
+    const busy = clamp(this.skiers.length / 200, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
     for (const b of this.buildings) {
       const gain = (INCOME_PER_MIN[b.type] / 60) * util * this.buildingFactor(b.type) * dt;
@@ -1169,7 +1226,7 @@ export class Game {
       h.t += dt;
       if (h.t >= HELI.tripTime) {
         for (const id of h.riders) {
-          const s = this.skiers.find((k) => k.id === id);
+          const s = this.byId.get(id);
           if (!s) continue;
           s.x = pad.x + (Math.random() - 0.5) * 16;
           s.y = pad.y + (Math.random() - 0.5) * 16;
@@ -1258,7 +1315,7 @@ export class Game {
     const lodgings = this.empireCount("hotel") + this.empireCount("condo") + this.empireCount("shop");
     const trails = this.trails.length + Object.values(this.snapshots).reduce((n, s) => n + (s?.trails.length ?? 0), 0);
     return {
-      patrol: Math.max(1, Math.ceil(this.skiers.length / 10) + this.owned.length - 1),
+      patrol: Math.max(1, Math.ceil(this.skiers.length / 150) + this.owned.length - 1),
       food: Math.max(foodBuildings > 0 ? 1 : 0, foodBuildings),
       lift: Math.max(this.owned.length, Math.ceil((this.lifts.length + Object.entries(this.snapshots).reduce((n, [k, sn]) => n + (Number(k) === this.currentMountain ? 0 : sn?.lifts.length ?? 0), 0)) / 2)),
       delivery: Math.max(foodBuildings + lodgings > 0 ? 1 : 0, Math.ceil((foodBuildings + lodgings) / 2)),
@@ -1458,10 +1515,8 @@ export class Game {
         const before = c.t;
         c.t += dtT;
         if (before < 0.04 && c.t >= 0.04 && c.riders.length === 0) {
-          const line = this.skiers
-            .filter((s) => s.state === "queue" && s.liftId === lift.id)
-            .sort((p, q) => p.id - q.id);
-          for (const s of line.slice(0, spec.seats)) {
+          const line = this.lines.get(lift.id) ?? [];
+          for (const s of line.splice(0, spec.seats)) {
             c.riders.push(s.id);
             s.state = "riding";
             s.wait = 0;
@@ -1471,13 +1526,13 @@ export class Game {
         }
         if (c.t >= 0.97 && c.riders.length) {
           for (const id of c.riders) {
-            const s = this.skiers.find((k) => k.id === id);
+            const s = this.byId.get(id);
             if (!s) continue;
             s.x = lift.top.x + (Math.random() * 10 - 5);
             s.y = lift.top.y + (Math.random() * 6 - 3);
             s.state = "toTrail";
             s.trailId =
-              lift.type === "carpet" && this.trailsFrom(lift).length === 0
+              lift.type === "carpet" && this.servedBy(lift).length === 0
                 ? -lift.id
                 : this.chooseTrail(s, lift)?.id ?? null;
             s.dist = 0;
@@ -1498,11 +1553,11 @@ export class Game {
     let bestScore = Infinity;
     for (const l of this.lifts) {
       const spec = LIFT_SPECS[l.type];
-      const served = this.trailsFrom(l);
+      const served = this.servedBy(l);
       const bunny = l.type === "carpet" && served.length === 0;
       if (bunny && s.skill > 0) continue;
       const fit = bunny ? 1 : served.reduce((m, t) => Math.max(m, trailScore(s.skill, t.difficulty)), 0);
-      const line = this.skiers.filter((k) => k.liftId === l.id && (k.state === "queue" || k.state === "toLift")).length;
+      const line = this.lineLen.get(l.id) ?? 0;
       const perSec = (spec.seats * spec.speed) / spec.spacing;
       const score =
         Math.hypot(s.x - l.bottom.x, s.y - l.bottom.y) * 0.45 +
@@ -1545,6 +1600,7 @@ export class Game {
       return;
     }
     s.state = "toLift";
+    s.joinT = this.clock;
     s.liftId = null;
   }
 
@@ -1553,7 +1609,7 @@ export class Game {
     const ranked = [...this.trails].sort((a, b) => score(b) - score(a));
     const options = ranked.filter((t) => trailScore(s.skill, t.difficulty) > 0.15);
     if (!options.length) return ranked[0] ?? null;
-    const from = lift ? this.trailsFrom(lift) : [];
+    const from = lift ? this.servedBy(lift) : [];
     const hikeOk = options.filter((t) => from.includes(t));
     if (hikeOk.length) return hikeOk[(Math.random() * Math.min(3, hikeOk.length)) | 0];
     // Nothing served from this lift: take the closest trailhead rather than roam the mountain.
@@ -1594,8 +1650,7 @@ export class Game {
         this.totalTickets += 1;
         this.incomeToday += this.ticketPrice;
         this.lifetimeEarned += this.ticketPrice;
-        this.float(s.x, s.y, `+$${this.ticketPrice}`);
-        this.sfx.push("cash");
+        this.boothTake += this.ticketPrice;
       }
       if (this.wantsHeli(s)) {
         s.state = "heliWait";
@@ -1634,9 +1689,16 @@ export class Game {
       const q = this.queueSlot(s);
       this.walkToward(s, q.x, q.y, 30 * dt);
       s.wait += dt;
-      if (s.wait > 28) {
-        s.mood -= 8;
-        s.wait = 20;
+      // Patience wears thin after ~40s in line; fed-up skiers go home.
+      if (s.wait > 40) {
+        s.mood -= 4;
+        s.wait = 30;
+      }
+      if (s.mood < 15) {
+        s.state = "leaving";
+        s.liftId = null;
+        s.bubble = "Line's too long";
+        s.bubbleT = 2.4;
       }
       return;
     }
@@ -1747,7 +1809,6 @@ export class Game {
             this.incomeToday += fee;
             this.shopIncomeToday += fee;
             this.lifetimeEarned += fee;
-            this.float(b.x, b.y, `+$${fee} lesson`);
             s.mood += 6;
             if (Math.random() < 0.35) {
               s.skill = 1;
@@ -1771,7 +1832,7 @@ export class Game {
         this.goToLift(s);
         return;
       }
-      const i = this.skiers.filter((k) => k.state === "heliWait").findIndex((k) => k.id === s.id);
+      const i = this.heliSpot.get(s.id) ?? 0;
       this.walkToward(s, pad.x - 14 + (i % 4) * 6, pad.y - 18 - Math.floor(i / 4) * 6, 46 * WALK * dt);
       s.wait += dt;
       if (s.wait > 60) {
@@ -1787,6 +1848,49 @@ export class Game {
       this.walkToward(s, (200 + (s.id % 7) * 30) * K, 10 * K, 48 * WALK * dt);
       s.wait = 0;
     }
+  }
+
+  /** Rebuild the per-tick indexes (O(skiers)). */
+  private buildIndexes(): void {
+    this.byId.clear();
+    this.lines.clear();
+    this.lineSpot.clear();
+    this.lineLen.clear();
+    this.heliSpot.clear();
+    this.served.clear();
+    let heli = 0;
+    const waiting = new Map<number, Skier[]>();
+    for (const s of this.skiers) {
+      this.byId.set(s.id, s);
+      if (s.state === "heliWait") this.heliSpot.set(s.id, heli++);
+      if (s.liftId == null) continue;
+      if (s.state === "queue" || (s.state === "toLift" && s.paid)) {
+        let w = waiting.get(s.liftId);
+        if (!w) waiting.set(s.liftId, (w = []));
+        w.push(s);
+      }
+    }
+    // First come, first served: order each line by when people joined it.
+    for (const [liftId, w] of waiting) {
+      w.sort((a, b) => a.joinT - b.joinT || a.id - b.id);
+      this.lineLen.set(liftId, w.length);
+      const line: Skier[] = [];
+      w.forEach((s, i) => {
+        this.lineSpot.set(s.id, i);
+        if (s.state === "queue") line.push(s);
+      });
+      this.lines.set(liftId, line);
+    }
+  }
+
+  /** Runs served from a lift's top (cached per tick). */
+  private servedBy(l: Lift): Trail[] {
+    let list = this.served.get(l.id);
+    if (!list) {
+      list = this.trailsFrom(l);
+      this.served.set(l.id, list);
+    }
+    return list;
   }
 
   /** Skiers who can handle it hit the jumps and features on their run. */
@@ -1817,17 +1921,17 @@ export class Game {
 
   private queueSlot(s: Skier): Vec2 {
     const lift = this.lifts.find((l) => l.id === s.liftId) ?? this.lifts[0];
-    const queued = this.skiers.filter((k) => k.liftId === lift.id && (k.state === "queue" || (k.state === "toLift" && k.paid)));
-    queued.sort((a, b) => a.id - b.id);
-    const i = Math.max(0, queued.findIndex((k) => k.id === s.id));
+    const i = this.lineSpot.get(s.id) ?? (this.lineLen.get(lift.id) ?? 0);
     // Line up behind the bottom station, facing up the lift.
     let dx = lift.top.x - lift.bottom.x;
     let dy = lift.top.y - lift.bottom.y;
     const l = Math.hypot(dx, dy) || 1;
     dx /= l;
     dy /= l;
-    const back = 10 + Math.floor(i / 4) * 9;
-    const side = ((i % 4) - 1.5) * 7;
+    // The corral gets wider as the line grows, so big crowds stay near the station.
+    const cols = Math.max(8, Math.ceil(Math.sqrt(this.lineLen.get(lift.id) ?? 0) * 1.3));
+    const back = 10 + Math.floor(i / cols) * 4;
+    const side = ((i % cols) - (cols - 1) / 2) * 3.2;
     return { x: lift.bottom.x - dx * back - dy * side, y: lift.bottom.y - dy * back + dx * side };
   }
 
