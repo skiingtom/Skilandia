@@ -884,3 +884,18 @@ body.welcome-open #hud > * {
 .clock-controls {
   flex-shrink: 0;
 }
+
+.mountains .tier {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border-radius: 12px;
+  background: rgba(226, 184, 87, 0.14);
+  border: 1px solid rgba(226, 184, 87, 0.35);
+}
+
+.mountains .tier small {
+  opacity: 0.75;
+  font-size: 11px;
+}

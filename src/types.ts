@@ -1,3 +1,5 @@
+import { TERRAIN_CELL_M, TERRAIN_COLS, TERRAIN_ROWS } from "./terrain-data";
+
 export type Difficulty = 0 | 1 | 2 | 3;
 export type MountainId = 0 | 1 | 2;
 export type BuildingType =
@@ -142,11 +144,51 @@ export interface Goal {
 }
 
 /** The maps were 640 x 820; everything scales from that. */
-export const MAP_SCALE = 2.5;
-export const WORLD_W = 640 * MAP_SCALE;
-export const WORLD_H = 820 * MAP_SCALE;
-export const VERTICAL_M = 128 * MAP_SCALE;
-export const UNIT_M = 0.62;
+/**
+ * One big real landscape, built from a topographic map (src/terrain-data.ts).
+ * 1 world unit = 1 metre; x runs east, y runs north.
+ */
+export const MAP_SCALE = 1;
+export const UNIT_M = 1;
+export const WORLD_W = TERRAIN_COLS * TERRAIN_CELL_M;
+export const WORLD_H = TERRAIN_ROWS * TERRAIN_CELL_M;
+/** Elevation 0 in normalised units is this many metres above sea level... */
+export const BASE_ELEV_M = 500;
+/** ...and elevation 1 is this much higher. */
+export const VERTICAL_M = 2300;
+
+/** Where the resort starts: the valley floor by the lake. */
+export const BASE = { x: 13650, y: 7672 };
+
+/**
+ * The goal: conquer the mountain. Each peak is conquered when a lift's top
+ * station reaches its summit. Positions are approximate (from the map
+ * labels); the sim snaps each one to the true high point nearby.
+ */
+export const PEAKS: { id: string; name: string; x: number; y: number }[] = [
+  { id: "sproatt", name: "Mount Sproatt", x: 590 * 14, y: (1188 - 535) * 14 },
+  { id: "whistler", name: "Whistler Mountain", x: 962 * 14, y: (1188 - 1052) * 14 },
+  { id: "piccolo", name: "Piccolo Summit", x: 1030 * 14, y: (1188 - 1150) * 14 },
+  { id: "blackcomb", name: "Blackcomb Peak", x: 1383 * 14, y: (1188 - 873) * 14 },
+  { id: "spearhead", name: "The Spearhead", x: 1418 * 14, y: (1188 - 840) * 14 },
+  { id: "decker", name: "Decker Mountain", x: 1462 * 14, y: (1188 - 968) * 14 },
+  { id: "rainbow", name: "Rainbow Mountain", x: 468 * 14, y: (1188 - 106) * 14 },
+  { id: "wedge", name: "Wedge Mountain", x: 1768 * 14, y: (1188 - 478) * 14 },
+];
+
+/** A lift top this close to a summit (and nearly as high) conquers it. */
+export const CONQUER_RADIUS_M = 350;
+export const CONQUER_DROP_M = 150;
+
+/**
+ * Resort tiers. You start small; conquering peaks grows how many skiers the
+ * resort can hold (each tier at least triples) and how many lifts it can run.
+ */
+export const TIERS: { name: string; peaksNeeded: number; capacity: number; maxLifts: number; villageRadius: number }[] = [
+  { name: "Local hill", peaksNeeded: 0, capacity: 2000, maxLifts: 10, villageRadius: 500 },
+  { name: "Ski area", peaksNeeded: 1, capacity: 6000, maxLifts: 25, villageRadius: 800 },
+  { name: "Destination resort", peaksNeeded: 4, capacity: 18000, maxLifts: 60, villageRadius: 1200 },
+];
 
 /**
  * Money scale. Hills hold thousands of skiers, so ticket money is large;
@@ -156,48 +198,6 @@ export const UNIT_M = 0.62;
  */
 export const ECON = 10;
 
-export const MOUNTAINS: {
-  id: MountainId;
-  name: string;
-  blurb: string;
-  profitToUnlock: number;
-  buyCost: number;
-  staffRequired: boolean;
-  /** Most skiers the mountain can hold at once. Each mountain triples the last. */
-  capacity: number;
-  maxLifts: number;
-}[] = [
-  {
-    id: 0,
-    name: "Little Hawk Hill",
-    blurb: "The starter hill. Family-run — no payroll yet.",
-    profitToUnlock: 0,
-    buyCost: 0,
-    staffRequired: false,
-    capacity: 2000,
-    maxLifts: 10,
-  },
-  {
-    id: 1,
-    name: "Cedar Ridge",
-    blurb: "A real mountain. Ski patrol and staff are required.",
-    profitToUnlock: 6500 * ECON,
-    buyCost: 8500 * ECON,
-    staffRequired: true,
-    capacity: 6000,
-    maxLifts: 20,
-  },
-  {
-    id: 2,
-    name: "Twin Peaks",
-    blurb: "The finale: two mountains, one huge ski resort.",
-    profitToUnlock: 22000 * ECON,
-    buyCost: 28000 * ECON,
-    staffRequired: true,
-    capacity: 18000,
-    maxLifts: 40,
-  },
-];
 
 export const COSTS: Record<BuildingType, number> = {
   lodge: 2900,
@@ -296,7 +296,7 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
 };
 
 /** Height in world units of one unit of elevation, as drawn (true classifier scale × 1.3). */
-export const TERRAIN_SCALE = (VERTICAL_M / UNIT_M) * 1.3;
+export const TERRAIN_SCALE = (VERTICAL_M / UNIT_M) * 1.15;
 
 export interface LiftSpec {
   label: string;
@@ -346,7 +346,7 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     spacing: 30,
     baseCost: 1400,
     costPerUnit: 3,
-    minLength: 90,
+    minLength: 150,
     maxLength: 1300,
     surface: true,
     maxGrade: 0.45,
@@ -357,12 +357,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Double chair",
     short: "Double",
     seats: 2,
-    speed: 60,
+    speed: 75,
     spacing: 30,
     baseCost: 3500,
     costPerUnit: 5,
-    minLength: 120,
-    maxLength: 1900,
+    minLength: 200,
+    maxLength: 2200,
     surface: false,
     maxGrade: 9,
     towerH: 15,
@@ -372,12 +372,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Quad chair",
     short: "Quad",
     seats: 4,
-    speed: 80,
+    speed: 95,
     spacing: 36,
     baseCost: 6000,
     costPerUnit: 7,
-    minLength: 150,
-    maxLength: 2300,
+    minLength: 250,
+    maxLength: 2800,
     surface: false,
     maxGrade: 9,
     towerH: 17,
@@ -387,12 +387,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Covered six-pack",
     short: "Six-pack",
     seats: 6,
-    speed: 95,
+    speed: 115,
     spacing: 42,
     baseCost: 10000,
     costPerUnit: 9,
-    minLength: 180,
-    maxLength: 2600,
+    minLength: 300,
+    maxLength: 3500,
     surface: false,
     maxGrade: 9,
     towerH: 19,
@@ -402,12 +402,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "8-person gondola",
     short: "Gondola",
     seats: 8,
-    speed: 110,
+    speed: 140,
     spacing: 54,
     baseCost: 16000,
     costPerUnit: 12,
-    minLength: 220,
-    maxLength: 3200,
+    minLength: 400,
+    maxLength: 6500,
     surface: false,
     maxGrade: 9,
     towerH: 24,

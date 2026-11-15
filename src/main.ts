@@ -1,7 +1,7 @@
 import { AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { World3D } from "./scene";
-import { Game } from "./sim";
+import { Game, SUMMITS } from "./sim";
 import {
   BUILDING_LABEL,
   BUILDING_MAX,
@@ -14,7 +14,7 @@ import {
   DIFF,
   INCOME_PER_MIN,
   LIFT_SPECS,
-  MOUNTAINS,
+  TIERS,
   STAFF_LABEL,
   STAFF_ROLES,
   Tool,
@@ -84,8 +84,6 @@ const cutCost = document.querySelector("#cut-cost")!;
 const finishBtn = document.querySelector<HTMLButtonElement>("#btn-finish-trail")!;
 const toastsEl = document.querySelector("#toasts")!;
 const placeHint = document.querySelector("#place-hint")!;
-const loadingEl = document.querySelector<HTMLElement>("#loading")!;
-const loadingName = document.querySelector("#loading-name")!;
 const cutText = document.querySelector("#cut-text")!;
 const moveBtn = document.querySelector<HTMLButtonElement>("#btn-move-building")!;
 const settingsBtn = document.querySelector<HTMLButtonElement>("#btn-settings")!;
@@ -230,46 +228,28 @@ function paintHud(force = false): void {
   }
 }
 
-/**
- * Mountains are separate areas: going to another one shows a loading
- * screen while its terrain is built and the old one is unloaded.
- */
-function travelTo(id: 0 | 1 | 2): void {
-  if (id === game.currentMountain) return;
-  const owned = game.owned.includes(id);
-  if (!owned && !game.mountainStatus(id).canBuy) {
-    game.buyMountain(id); // explains what's missing
-    paintHud();
-    return;
-  }
-  loadingName.textContent = MOUNTAINS[id].name;
-  loadingEl.classList.remove("hidden");
-  // Let the loading screen paint before the heavy work.
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      if (owned) game.switchMountain(id);
-      else game.buyMountain(id);
-      world.loadMountain(game.currentMountain);
-      paintHud(true);
-      requestAnimationFrame(() => loadingEl.classList.add("hidden"));
-    }),
-  );
-}
-
+/** Peaks panel: the resort tier, and every summit to conquer (click to fly there). */
 function paintMountains(): void {
-  mountainsEl.innerHTML = MOUNTAINS.map((m) => {
-    const st = game.mountainStatus(m.id);
-    let note = m.blurb;
-    if (st.owned) note = m.id === game.currentMountain ? "Managing this hill" : "Owned · click to travel there";
-    else if (!st.canUnlock) note = `Earn $${st.missing.toLocaleString()} more to list it`;
-    else note = `For sale · $${m.buyCost.toLocaleString()}`;
-    return `<button type="button" class="mtn${st.owned && m.id === game.currentMountain ? " on" : ""}" data-mountain="${m.id}">
-      ${m.name}<small>${note}</small></button>`;
-  }).join("");
+  const tier = game.tier();
+  const next = TIERS[tier + 1];
+  const head = `<div class="tier"><b>${TIERS[tier].name}</b><small>${game.conquered.size}/${SUMMITS.length} peaks · holds ${game.capacity().toLocaleString()} skiers${
+    next ? ` · ${next.peaksNeeded - game.conquered.size} more peak${next.peaksNeeded - game.conquered.size === 1 ? "" : "s"} to grow` : ""
+  }</small></div>`;
+  const peaks = [...SUMMITS]
+    .sort((a, b) => a.elevation - b.elevation)
+    .map((p) => {
+      const done = game.conquered.has(p.id);
+      return `<button type="button" class="mtn${done ? " on" : ""}" data-peak="${p.id}">
+      ${done ? "🚩 " : ""}${p.name}<small>${p.elevation.toLocaleString()} m · ${done ? "conquered" : "run a lift to the top"}</small></button>`;
+    })
+    .join("");
+  const html = head + peaks;
+  if (mountainsEl.innerHTML === html) return;
+  mountainsEl.innerHTML = html;
   mountainsEl.querySelectorAll<HTMLButtonElement>(".mtn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const id = Number(btn.dataset.mountain) as 0 | 1 | 2;
-      travelTo(id);
+      const p = SUMMITS.find((k) => k.id === btn.dataset.peak);
+      if (p) world.focusPoint(p.x, p.y, 3200);
     });
   });
 }
@@ -279,10 +259,10 @@ function paintStaff(): void {
   const school = game.empireCount("school") > 0;
   staffSection.classList.toggle("locked", !required && !school);
   staffLock.textContent = required
-    ? "After Little Hawk you must staff the place. Short crews slow shop take and sour the mood."
+    ? "You're a real ski area now: staff the place. Short crews slow shop take and sour the mood."
     : school
-      ? "The ski school needs instructors (paid from day one). Full payroll starts when you buy the next mountain."
-      : "Payroll starts when you buy the next mountain. A ski school needs instructors right away.";
+      ? "The ski school needs instructors (paid from day one). Full payroll starts once you conquer your first peak."
+      : "Payroll starts once you conquer your first peak. A ski school needs instructors right away.";
   const need = game.staffNeeds();
   const roles = required ? STAFF_ROLES : school ? (["instructor"] as const) : [];
   staffList.innerHTML = roles.map((role) => {

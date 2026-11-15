@@ -1,103 +1,97 @@
 /**
- * Headless playthrough: build one of everything, run the sim for a long
- * time, and check invariants every tick.
+ * Headless playthrough on the real map: build one of everything around the
+ * starter T-bar, run the sim for 30 game minutes checking invariants every
+ * tick, then make sure every peak can be conquered and the game can be won.
+ *
+ * Run with: npm test
  */
-import { Game, nearestOnTrail } from "../src/sim";
-import { MAP_SCALE as K, TRAIL_KIND_SPEC, HELI } from "../src/types";
+import { elevationM } from "../src/height";
+import { Game, SUMMITS, nearestOnTrail } from "../src/sim";
+import { BASE, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
 
-// Run with: npm test
 const g = new Game();
 g.startManaging();
-g.money = 10_000_000;
+g.money = 1e9;
 const problems: string[] = [];
 const ok = (cond: boolean, msg: string) => {
   if (!cond && problems.length < 30) problems.push(msg);
 };
 
-const cut = (kind: string, pts: number[][]) => {
-  const before = g.trees.length;
+// --- the starter resort
+const tbar = g.lifts[0];
+ok(g.lifts.length === 1 && tbar.type === "tbar", "should start with one T-bar");
+ok(g.trails.length >= 2, "should start with runs beside the T-bar");
+const lift = { a: tbar.bottom, b: tbar.top };
+const len = Math.hypot(lift.b.x - lift.a.x, lift.b.y - lift.a.y);
+const ux = (lift.b.x - lift.a.x) / len;
+const uy = (lift.b.y - lift.a.y) / len;
+/** A point along the T-bar line (t: 0 bottom..1 top), pushed sideways by `side` metres. */
+const along = (t: number, side: number): Vec2 => ({
+  x: lift.a.x + (lift.b.x - lift.a.x) * t - uy * side,
+  y: lift.a.y + (lift.b.y - lift.a.y) * t + ux * side,
+});
+
+const cut = (kind: string, pts: Vec2[]) => {
   g.setTool(`trail:${kind}` as never);
-  for (const [x, y] of pts) g.click(x * K, y * K);
+  for (const p of pts) g.click(p.x, p.y);
   const r = g.finishTrail();
-  console.log(`cut ${kind}:`, r, g.toasts.at(-1)?.text, `(trees ${before} -> ${g.trees.length})`);
+  console.log(`cut ${kind}:`, r, r === "ok" ? "" : g.toasts.at(-1)?.text);
   return r;
 };
 
-// Glades through open snow should fail; through forest should work and keep trees.
-cut("glades", [[330, 140], [340, 135]]);
-const forest = (() => {
-  // find a dense forest column on the gentle side
-  let best = { x: 0, n: 0 };
-  for (let x = 120; x < 300; x += 10) {
-    const n = g.trees.filter((t) => Math.abs(t.x - x * K) < 30 && t.y > 300 * K && t.y < 560 * K).length;
-    if (n > best.n) best = { x, n };
+cut("park", [along(1, 220), along(0.6, 260), along(0.25, 240), along(0.02, 200)]);
+cut("slalom", [along(1, -220), along(0.6, -260), along(0.2, -240), along(0.02, -200)]);
+cut("moguls", [along(0.95, 380), along(0.5, 400), along(0.05, 360)]);
+// Glades: through the forest further out.
+const gladesOk = cut("glades", [along(0.95, -420), along(0.6, -460), along(0.25, -440), along(0.05, -380)]);
+ok(gladesOk === "ok", "glades should cut through forest");
+
+const park = g.trails.find((t) => t.kind === "park");
+ok(!!park, "park run was not created");
+if (park) {
+  // Upper part of the park, well above the village.
+  const a = park.points[0];
+  const b = park.points[1];
+  for (const [type, u] of [["jump", 0.1], ["rail", 0.3], ["box", 0.45], ["halfpipe", 0.75]] as const) {
+    g.setTool(`feature:${type}`);
+    const r = g.click(a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u);
+    ok(r === "ok", `${type} in the park failed: ${g.toasts.at(-1)?.text}`);
   }
-  return best.x;
-})();
-const gTrees = g.trees.length;
-cut("glades", [[forest, 600], [forest, 450], [forest + 10, 300]]);
-const glade = g.trails.find((t) => t.kind === "glades");
-ok(!!glade, "glades run was not created");
-if (glade) {
-  const inside = g.trees.filter((t) => nearestOnTrail(glade, t.x, t.y).d < TRAIL_KIND_SPEC.glades.width / 2).length;
-  console.log("glade trees still standing inside corridor:", inside, "cleared:", gTrees - g.trees.length);
-  ok(inside > 10, "glades should keep trees standing");
 }
-cut("park", [[345, 625], [420, 470], [430, 300], [380, 180]]);
-cut("moguls", [[560, 540], [555, 300]]);
-cut("slalom", [[230, 600], [235, 400], [260, 200]]);
+ok(!!g.canPlaceFeature("jump", BASE.x + 3000, BASE.y - 3000), "off-run jump should be rejected");
 
-// Features: jump off-run must fail now; on glades it's fine.
-g.setTool("feature:jump");
-console.log("jump off-run:", g.canPlaceFeature("jump", 60 * K, 500 * K));
-ok(!!g.canPlaceFeature("jump", 60 * K, 500 * K), "off-run jump should be rejected");
-if (glade) {
-  const p = glade.points[1];
-  console.log("jump in glades:", g.canPlaceFeature("jump", p.x, p.y) ?? "ok");
-  g.click(p.x, p.y);
-}
-
-// Lifts
-g.setTool("lift:quad");
-g.click(420 * K, 140 * K);
-console.log("quad:", g.click(450 * K, 640 * K), g.toasts.at(-1)?.text);
-
-// Buildings: heli, school, lodge, food, restroom
-for (const [type, x, y] of [["heli", 250, 110], ["school", 400, 90], ["lodge", 330, 175], ["restroom", 450, 150], ["coffee", 200, 150]] as const) {
-  g.setTool(type);
-  const r = g.click(x * K, y * K);
-  console.log(type, r, g.toasts.at(-1)?.text);
+// Village buildings around the base
+const spots: [string, number, number][] = [
+  ["lodge", 150, 120], ["restroom", -150, 60], ["coffee", 200, -40], ["school", -220, -120], ["heli", 260, 260],
+];
+for (const [type, dx, dy] of spots) {
+  g.setTool(type as never);
+  const r = g.click(BASE.x + dx, BASE.y + dy);
+  ok(r === "ok", `${type} in the village failed: ${g.toasts.at(-1)?.text}`);
 }
 g.hire("instructor");
 g.hire("instructor");
-const pad = g.helipad();
-ok(!!pad, "heli base not built");
+ok(!!g.helipad(), "heli base not built");
 
-let maxWaitSeen = 0;
+// --- 30 game minutes
 const stuck = new Map<number, { state: string; t: number }>();
 const liftIdle = new Map<number, number>();
 let peakSkiers = 0;
-let heliRiders = 0;
-let flightsSeen = 0;
+let flights = 0;
 let wasFlying = false;
-const money0 = g.money;
 for (let i = 0; i < 36000; i++) {
-  // 30 game minutes at 1x
   g.tick(0.05);
   ok(Number.isFinite(g.money), `money became ${g.money}`);
   peakSkiers = Math.max(peakSkiers, g.skiers.length);
   ok(g.skiers.length <= g.capacity(), `over capacity: ${g.skiers.length} > ${g.capacity()}`);
-  // Skiers only come when the resort can handle them.
   ok(g.skiers.length <= g.loadLimits().comfortable + 25, `more skiers (${g.skiers.length}) than the resort can handle (${g.loadLimits().comfortable})`);
   if (i % 200 === 0) ok(g.liftWait() < 90, `lift lines got long: ${g.liftWait().toFixed(0)}s`);
-  if (g.heli.flying && !wasFlying) flightsSeen++;
+  if (g.heli.flying && !wasFlying) flights++;
   wasFlying = g.heli.flying;
-  // A lift with people in line must keep boarding them (a long line is fine, a stalled one isn't).
   for (const l of g.lifts) {
     const inLine = g.skiers.some((s) => s.liftId === l.id && s.state === "queue");
     const boarding = g.skiers.some((s) => s.liftId === l.id && s.state === "riding");
-    const st = liftIdle.get(l.id) ?? 0;
-    liftIdle.set(l.id, inLine && !boarding ? st + 0.05 : 0);
+    liftIdle.set(l.id, inLine && !boarding ? (liftIdle.get(l.id) ?? 0) + 0.05 : 0);
     ok((liftIdle.get(l.id) ?? 0) < 30, `${l.name} has a line but nobody has boarded for 30s`);
   }
   for (const s of g.skiers) {
@@ -106,43 +100,55 @@ for (let i = 0; i < 36000; i++) {
     if (s.state === "skiing" && s.trailId != null && s.trailId >= 0) {
       const t = g.trails.find((tr) => tr.id === s.trailId)!;
       const d = nearestOnTrail(t, s.x, s.y).d;
-      ok(d <= TRAIL_KIND_SPEC[t.kind].width / 2 + 1, `skier ${s.id} is ${d.toFixed(1)} off ${t.kind} run ${t.name}`);
+      ok(d <= TRAIL_KIND_SPEC[t.kind].width / 2 + 1, `skier ${s.id} is ${d.toFixed(1)} m off ${t.kind} run ${t.name}`);
     }
-    if (s.state === "heli") heliRiders++;
     const prev = stuck.get(s.id);
     if (!prev || prev.state !== s.state) stuck.set(s.id, { state: s.state, t: 0 });
     else {
       prev.t += 0.05;
-      if (!["riding", "skiing", "heli", "queue"].includes(s.state)) maxWaitSeen = Math.max(maxWaitSeen, prev.t);
       if (s.state !== "queue") ok(prev.t < 150, `skier ${s.id} stuck in ${s.state} for ${prev.t.toFixed(0)}s`);
     }
   }
 }
 console.log({
-  days: g.day,
+  runs: g.trails.length,
   skiers: g.skiers.length,
   peakSkiers,
-  capacity: g.capacity(),
-  lineWait: Math.round(g.liftWait()),
+  comfortable: g.loadLimits().comfortable,
   tickets: g.totalTickets,
-  heliFlights: flightsSeen,
-  heliFare: HELI.fare,
-  moneyDelta: Math.round(g.money - money0),
-  upkeepPerMin: g.upkeepPerMin(),
-  longestNonRideState: maxWaitSeen.toFixed(1),
+  heliFlights: flights,
   mood: Math.round(g.mood),
+  forestVersion: g.forestVersion,
 });
-ok(flightsSeen > 0, "heli never flew");
+ok(g.totalTickets > 100, "hardly anyone came");
 
-// Mountain switching keeps everything
-g.lifetimeEarned = 1e6;
-g.money += 1e6;
-console.log("buy Cedar:", g.buyMountain(1));
+// --- conquer every peak with a gondola from somewhere below it
+for (const p of SUMMITS) {
+  // Bottom station: out from the summit toward the base, as far as a gondola reaches.
+  const dx = BASE.x - p.x;
+  const dy = BASE.y - p.y;
+  const d = Math.hypot(dx, dy);
+  let built = false;
+  for (const reach of [6000, 5000, 4000, 3000, 2000]) {
+    const r = Math.min(reach, d - 50);
+    const bottom = { x: p.x + (dx / d) * r, y: p.y + (dy / d) * r };
+    const top = { x: p.x + (dx / d) * 40, y: p.y + (dy / d) * 40 };
+    g.setTool("lift:gondola");
+    g.click(bottom.x, bottom.y);
+    if (g.click(top.x, top.y) === "ok") {
+      built = true;
+      break;
+    }
+    g.cancel();
+  }
+  ok(built, `couldn't run a gondola to ${p.name}: ${g.toasts.at(-1)?.text}`);
+  ok(g.conquered.has(p.id), `${p.name} (${p.elevation} m, ground at ${Math.round(elevationM(p.x, p.y))} m) wasn't conquered`);
+}
+console.log(`conquered ${g.conquered.size}/${SUMMITS.length}, tier ${TIERS[g.tier()].name}, won: ${g.won}`);
+ok(g.won, "conquering every peak should win the game");
+ok(g.capacity() === TIERS[TIERS.length - 1].capacity, "should reach the top tier");
 for (let i = 0; i < 2000; i++) g.tick(0.05);
-g.switchMountain(0);
-console.log("back on Little Hawk: trails", g.trails.length, "features", g.features.length, "heli", !!g.helipad(), "upkeep/min", g.upkeepPerMin());
-for (let i = 0; i < 2000; i++) g.tick(0.05);
-ok(Number.isFinite(g.money), "money NaN after switching");
+ok(Number.isFinite(g.money), "money NaN after conquering");
 
 console.log(problems.length ? `PROBLEMS (${problems.length}):\n` + problems.join("\n") : "ALL CHECKS PASSED");
 if (problems.length) process.exit(1);

@@ -1,4 +1,4 @@
-import { elevation, lerp, nearSegment, noise2, pointOnPolyline, polylineLength, slopeAt } from "./height";
+import { elevation, elevationM, gradeAt, lerp, nearSegment, noise2, pointOnPolyline, polylineLength } from "./height";
 import {
   BUILDING_LABEL,
   BUILDING_MAX,
@@ -17,7 +17,11 @@ import {
   MOVE_FEE,
   TRAIL_KIND_SPEC,
   TrailKind,
-  MOUNTAINS,
+  BASE,
+  CONQUER_DROP_M,
+  CONQUER_RADIUS_M,
+  PEAKS,
+  TIERS,
   MountainId,
   PLACE_ANYWHERE,
   PLACE_MOUNTAIN,
@@ -46,9 +50,23 @@ import {
   liftCost,
 } from "./types";
 
-const K = MAP_SCALE;
-/** Positions were authored for the original 640 x 820 maps. */
-const P = (x: number, y: number): Vec2 => ({ x: x * K, y: y * K });
+void MAP_SCALE;
+
+/** Each peak snapped to the true high point near its map label. */
+export const SUMMITS = PEAKS.map((p) => {
+  let best = { x: p.x, y: p.y, m: -1 };
+  for (let dx = -250; dx <= 250; dx += 10) {
+    for (let dy = -250; dy <= 250; dy += 10) {
+      const m = elevationM(p.x + dx, p.y + dy);
+      if (m > best.m) best = { x: p.x + dx, y: p.y + dy, m };
+    }
+  }
+  return { id: p.id, name: p.name, x: best.x, y: best.y, elevation: Math.round(best.m) };
+});
+
+/** Forest grid: one possible tree per cell. */
+const TREE_CELL = 12;
+const TREELINE_M = 1800;
 const WALK = 1.8;
 const SKI = 2;
 
@@ -84,9 +102,10 @@ export function trailCost(length: number, kind: TrailKind = "slope"): number {
 
 export function classifyGrade(dropM: number, lengthM: number): Difficulty {
   const grade = dropM / Math.max(12, lengthM);
-  if (grade < 0.16) return 0;
-  if (grade < 0.28) return 1;
-  if (grade < 0.42) return 2;
+  // Real-world-ish pitches: green < 25%, blue < 40%, black < 60%.
+  if (grade < 0.25) return 0;
+  if (grade < 0.4) return 1;
+  if (grade < 0.6) return 2;
   return 3;
 }
 
@@ -102,15 +121,6 @@ export function measureTrail(
   const base = classifyGrade(drop * VERTICAL_M, length * UNIT_M);
   const difficulty = Math.min(3, base + TRAIL_KIND_SPEC[kind].diffBump) as Difficulty;
   return { length, drop, difficulty, cost: trailCost(length, kind) };
-}
-
-interface Snapshot {
-  trails: Trail[];
-  lifts: Lift[];
-  buildings: Building[];
-  trees: Vec2[];
-  features: Feature[];
-  ticketPrice: number;
 }
 
 export interface Selection {
@@ -134,7 +144,6 @@ export class Game {
   liftHover: Vec2 | null = null;
   buildings: Building[] = [];
   skiers: Skier[] = [];
-  trees: Vec2[] = [];
   features: Feature[] = [];
   /** Kind of run the Trail tool cuts. */
   trailKind: TrailKind = "slope";
@@ -184,40 +193,63 @@ export class Game {
   usedTrailNames = new Set<string>();
   thoughtAcc = 0;
   currentMountain: MountainId = 0;
-  owned: MountainId[] = [0];
+  /** Peaks conquered so far (by id). */
+  conquered = new Set<string>();
+  won = false;
+  /** Bumped whenever the forest changes (a run, lift, building or feature clears it). */
+  forestVersion = 0;
   lifetimeEarned = 0;
   wagesToday = 0;
   staff: Record<StaffRole, number> = { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0, instructor: 0 };
-  private snapshots: Partial<Record<MountainId, Snapshot>> = {};
 
   constructor() {
-    this.lifts = [this.makeLift("tbar", "Little Hawk T-Bar", P(328, 118), P(312, 628))];
-    this.trails = [
-      this.makeTrail("Sunnyside", [
-        P(328, 618),
-        P(392, 500),
-        P(438, 360),
-        P(412, 220),
-        P(356, 128),
-      ]),
-      this.makeTrail("Little Elk", [
-        P(298, 612),
-        P(248, 490),
-        P(236, 340),
-        P(268, 210),
-        P(304, 126),
-      ]),
-      this.makeTrail("Blue Spruce", [
-        P(500, 650),
-        P(550, 480),
-        P(530, 320),
-        P(460, 200),
-        P(372, 128),
-      ]),
-    ];
-    this.seedTrees();
+    this.layoutStarter();
     for (let i = 0; i < 7; i++) this.spawnSkier(true);
-    this.saveCurrent();
+  }
+
+  /**
+   * Find a spot for the starter T-bar on the gentle slopes above the base
+   * village, and two short runs back down beside it.
+   */
+  private layoutStarter(): void {
+    const money = this.money;
+    this.money = Infinity;
+    const baseM = elevationM(BASE.x, BASE.y);
+    let best: { a: Vec2; b: Vec2; score: number } | null = null;
+    for (let ang = 0; ang < 360; ang += 10) {
+      const dx = Math.cos((ang * Math.PI) / 180);
+      const dy = Math.sin((ang * Math.PI) / 180);
+      for (const start of [120, 220, 320]) {
+        const a = { x: BASE.x + dx * start, y: BASE.y + dy * start };
+        for (const len of [450, 600, 750, 900]) {
+          const b = { x: a.x + dx * len, y: a.y + dy * len };
+          const check = this.checkLift("tbar", a, b);
+          if (check.error) continue;
+          // Want a solid rise on gentle-ish ground, close to the village.
+          const grade = check.rise / len;
+          const score = Math.min(check.rise, 180) - Math.abs(grade - 0.2) * 300 - start * 0.1 - (elevationM(a.x, a.y) - baseM) * 0.2;
+          if (!best || score > best.score) best = { a, b, score };
+        }
+      }
+    }
+    if (!best) throw new Error("No room for the starter T-bar");
+    this.lifts = [this.makeLift("tbar", "Valley T-Bar", best.a, best.b)];
+    // Two runs from the top back to the bottom, swinging out either side of the lift.
+    const { a, b } = best;
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const ux = (b.x - a.x) / len;
+    const uy = (b.y - a.y) / len;
+    const names = ["Easy Street", "Valley Run"];
+    [-1, 1].forEach((side, i) => {
+      const off = (d: number) => ({ x: -uy * d * side, y: ux * d * side });
+      const pts: Vec2[] = [];
+      for (const [t, d] of [[1, 30], [0.75, 110], [0.5, 140], [0.25, 110], [0.02, 45]] as const) {
+        const o = off(d);
+        pts.push({ x: a.x + (b.x - a.x) * t + o.x, y: a.y + (b.y - a.y) * t + o.y });
+      }
+      this.trails.push(this.makeTrail(names[i], pts));
+    });
+    this.money = money;
   }
 
   private makeTrail(name: string, points: Vec2[], kind: TrailKind = "slope"): Trail {
@@ -227,56 +259,77 @@ export class Game {
   }
 
   /**
-   * Thick forest everywhere it can grow: a jittered grid thinned by a
-   * patchy density field, kept off cliffs, the summit, the village, runs
-   * and lift lines. Cutting a run or a lift clears its corridor.
+   * The forest is procedural: one possible tree per 12 m cell, jittered, kept
+   * where a patchy density field says so, thinning out toward the treeline
+   * and absent on cliffs and in the village. Runs, lifts, buildings and park
+   * features clear it; glades only thin it. Nothing is stored per tree, so
+   * the whole 28 km map can be forested.
    */
-  private seedTrees(): void {
-    this.trees = [];
-    const mid = this.currentMountain;
-    const cell = 13;
-    for (let gy = 0; gy * cell < WORLD_H; gy++) {
-      for (let gx = 0; gx * cell < WORLD_W; gx++) {
-        const jx = noise2(gx * 7.13 + mid * 3, gy * 3.71);
-        const jy = noise2(gx * 2.91, gy * 6.37 + mid * 5);
-        const x = (gx + jx) * cell;
-        const y = (gy + jy) * cell;
-        if (x < 10 || x > WORLD_W - 10 || y > WORLD_H - 10) continue;
-        const nx = x / WORLD_W;
-        const ny = y / WORLD_H;
-        const h = elevation(x, y, mid);
-        // Patchy forest with glades; thinner toward treeline.
-        const density = noise2(nx * 9 + mid * 7, ny * 11) * 0.75 + noise2(nx * 31, ny * 29 + mid) * 0.35;
-        const treeline = 1 - smoothstep(0.62, 0.86, h);
-        if (density * treeline < 0.42) continue;
-        if (ny < 0.2 && Math.abs(nx - 0.5) < 0.3) continue; // village & base area
-        if (h < 0.04) continue;
-        if (slopeAt(x, y, mid) * (VERTICAL_M / UNIT_M) > 0.62) continue; // cliffs
-        if (this.villageOk(x, y)) continue;
-        this.trees.push({ x, y });
+  treesIn(x0: number, y0: number, x1: number, y1: number, cleared = true): Vec2[] {
+    const out: Vec2[] = [];
+    const gx0 = Math.max(0, Math.floor(x0 / TREE_CELL));
+    const gy0 = Math.max(0, Math.floor(y0 / TREE_CELL));
+    const gx1 = Math.min(Math.floor(WORLD_W / TREE_CELL), Math.ceil(x1 / TREE_CELL));
+    const gy1 = Math.min(Math.floor(WORLD_H / TREE_CELL), Math.ceil(y1 / TREE_CELL));
+    const near = cleared ? this.clearersIn(x0 - 40, y0 - 40, x1 + 40, y1 + 40) : null;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const t = forestCell(gx, gy);
+        if (!t) continue;
+        if (this.inVillage(t.x, t.y)) continue;
+        if (near && this.isCleared(t.x, t.y, near)) continue;
+        out.push(t);
       }
     }
-    this.clearTrees();
+    return out;
   }
 
-  /**
-   * Remove trees from runs, lift lines, buildings and park features.
-   * Glades are thinned, not cleared: about half the trees stay standing
-   * (decided per tree, so repeated calls don't keep thinning).
-   */
+  /** Runs, lifts, buildings and features near a box (to keep clearing checks cheap). */
+  private clearersIn(x0: number, y0: number, x1: number, y1: number) {
+    const hit = (ax: number, ay: number, bx: number, by: number) =>
+      Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1;
+    return {
+      trails: this.trails.filter((t) => {
+        let mx = Infinity, my = Infinity, Mx = -Infinity, My = -Infinity;
+        for (const p of t.points) {
+          mx = Math.min(mx, p.x); my = Math.min(my, p.y); Mx = Math.max(Mx, p.x); My = Math.max(My, p.y);
+        }
+        return hit(mx, my, Mx, My);
+      }),
+      lifts: this.lifts.filter((l) => hit(l.bottom.x, l.bottom.y, l.top.x, l.top.y)),
+      buildings: this.buildings.filter((b) => hit(b.x, b.y, b.x, b.y)),
+      features: this.features.filter((f) => hit(f.x, f.y, f.x, f.y)),
+    };
+  }
+
+  private isCleared(x: number, y: number, near: ReturnType<Game["clearersIn"]>): boolean {
+    for (const tr of near.trails) {
+      const d = distToTrail(tr, x, y);
+      if (tr.kind === "glades") {
+        if (d < TRAIL_KIND_SPEC.glades.width / 2 && (d < 2.5 || treeHash(x, y) < 0.5)) return true;
+      } else if (d < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9) return true;
+    }
+    for (const l of near.lifts) if (nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, x, y, 16)) return true;
+    for (const b of near.buildings) if (Math.hypot(b.x - x, b.y - y) < (b.type === "heli" ? 40 : 22)) return true;
+    for (const f of near.features) if (Math.hypot(f.x - x, f.y - y) < (f.type === "halfpipe" ? 40 : 12)) return true;
+    return false;
+  }
+
+  /** Trees standing inside a corridor along a path (for glades and the "trees cleared" count). */
+  private treesAlong(points: Vec2[], halfWidth: number, cleared = true): number {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of points) {
+      x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+    }
+    const probe = { points } as Trail;
+    return this.treesIn(x0 - halfWidth, y0 - halfWidth, x1 + halfWidth, y1 + halfWidth, cleared).filter(
+      (t) => distToTrail(probe, t.x, t.y) < halfWidth,
+    ).length;
+  }
+
+  /** Called whenever something clears or thins the forest. */
   private clearTrees(): void {
-    this.trees = this.trees.filter((t) => {
-      for (const tr of this.trails) {
-        const d = distToTrail(tr, t.x, t.y);
-        if (tr.kind === "glades") {
-          if (d < TRAIL_KIND_SPEC.glades.width / 2 && (d < 2.5 || treeHash(t.x, t.y) < 0.5)) return false;
-        } else if (d < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9) return false;
-      }
-      if (this.nearLift(t.x, t.y, 16)) return false;
-      if (this.buildings.some((b) => Math.hypot(b.x - t.x, b.y - t.y) < 22)) return false;
-      if (this.features.some((f) => Math.hypot(f.x - t.x, f.y - t.y) < (f.type === "halfpipe" ? 40 : 12))) return false;
-      return true;
-    });
+    this.forestVersion++;
   }
 
   id(): number {
@@ -348,8 +401,43 @@ export class Game {
     return queued > 0 ? total / queued : 0;
   }
 
+  /** Current resort tier: grows as peaks are conquered. */
+  tier(): number {
+    let t = 0;
+    TIERS.forEach((tier, i) => {
+      if (this.conquered.size >= tier.peaksNeeded) t = i;
+    });
+    return t;
+  }
+
   capacity(): number {
-    return MOUNTAINS[this.currentMountain].capacity;
+    return TIERS[this.tier()].capacity;
+  }
+
+  /** A peak is conquered when a lift's top station reaches its summit. */
+  private checkConquest(): void {
+    const before = this.tier();
+    for (const p of SUMMITS) {
+      if (this.conquered.has(p.id)) continue;
+      const reached = this.lifts.some(
+        (l) =>
+          Math.hypot(l.top.x - p.x, l.top.y - p.y) <= CONQUER_RADIUS_M &&
+          elevationM(l.top.x, l.top.y) >= p.elevation - CONQUER_DROP_M,
+      );
+      if (!reached) continue;
+      this.conquered.add(p.id);
+      this.toast(`🚩 ${p.name} (${p.elevation.toLocaleString()} m) conquered! ${this.conquered.size}/${SUMMITS.length} peaks.`);
+      this.sfx.push("build");
+    }
+    const after = this.tier();
+    if (after > before) {
+      const t = TIERS[after];
+      this.toast(`Your resort is now a ${t.name.toLowerCase()}: room for ${t.capacity.toLocaleString()} skiers and ${t.maxLifts} lifts.`);
+    }
+    if (!this.won && this.conquered.size === SUMMITS.length) {
+      this.won = true;
+      this.toast("You conquered the mountain! Every peak has a lift.");
+    }
   }
 
   /**
@@ -391,7 +479,7 @@ export class Game {
   }
 
   maxLifts(): number {
-    return MOUNTAINS[this.currentMountain].maxLifts;
+    return TIERS[this.tier()].maxLifts;
   }
 
   attraction(): number {
@@ -413,27 +501,19 @@ export class Game {
   }
 
   goals(): Goal[] {
-    const ridge = MOUNTAINS[1];
-    const twin = MOUNTAINS[2];
+    const n = this.conquered.size;
+    const total = SUMMITS.length;
     return [
       { id: "lodge", text: `Build a lodge ($${COSTS.lodge.toLocaleString()})`, done: this.has("lodge") },
-      { id: "shack", text: "Place a sugar shack on a run", done: this.empireCount("shack") > 0 },
       { id: "black", text: "Cut a black-diamond run", done: this.trails.some((t) => t.difficulty >= 2) },
-      {
-        id: "ridge",
-        text: `Earn $${ridge.profitToUnlock.toLocaleString()} then buy Cedar Ridge`,
-        done: this.owned.includes(1),
-      },
+      { id: "peak1", text: `Run a lift to your first peak (${TIERS[1].capacity.toLocaleString()}-skier ski area)`, done: n >= TIERS[1].peaksNeeded },
       {
         id: "patrol",
-        text: "Hire ski patrol (required after the starter hill)",
-        done: this.staff.patrol > 0 || !this.staffRequired(),
+        text: "Hire ski patrol (needed once you're a ski area)",
+        done: !this.staffRequired() ? false : this.staff.patrol > 0,
       },
-      {
-        id: "twin",
-        text: `Grow into Twin Peaks ($${twin.profitToUnlock.toLocaleString()} earned)`,
-        done: this.owned.includes(2),
-      },
+      { id: "peak4", text: `Conquer ${TIERS[2].peaksNeeded} peaks (${TIERS[2].capacity.toLocaleString()}-skier destination resort)`, done: n >= TIERS[2].peaksNeeded },
+      { id: "all", text: `Conquer the mountain: lifts to all ${total} peaks (${n}/${total})`, done: n >= total },
     ];
   }
 
@@ -468,7 +548,8 @@ export class Game {
     if (this.skiers.length >= this.demand() * 0.9) {
       if (load.limitedBy === "lifts") out.push("The lifts are maxed out. Add or upgrade lifts to draw more skiers.");
       else if (load.limitedBy === "runs") out.push("The runs are crowded. Cut more trails to draw more skiers.");
-      else out.push(`${MOUNTAINS[this.currentMountain].name} is full. Buy the next mountain to grow.`);
+      else if (this.tier() < TIERS.length - 1) out.push("The resort is full. Run a lift to another peak to grow it.");
+      else out.push("The resort is at full size.");
     }
     if (!out.length) out.push("The hill feels friendly. Keep an eye on mix and price.");
     return out.slice(0, 3);
@@ -627,7 +708,7 @@ export class Game {
   canPlaceFeature(type: FeatureType, x: number, y: number): string | null {
     const spec = FEATURE_SPEC[type];
     if (x < 14 || x > WORLD_W - 14 || y > WORLD_H - 12) return "That's off the property.";
-    if (this.villageOk(x, y) || y < 170 * K) return "Build features up on the hill.";
+    if (this.inVillage(x, y)) return "Build features up on the hill.";
     const spot = this.featureSpot(x, y);
     if (spec.parkOnly && (!spot.trail || spot.trail.kind !== "park")) {
       return `${spec.label}s go inside a terrain park. Cut a park run first.`;
@@ -777,7 +858,8 @@ export class Game {
     for (let i = 0; i < 20 && used.has(name); i++) name = `${pick(LIFT_PREFIX)} ${spec.short}`;
     const lift = this.makeLift(type, name, a, b);
     this.lifts.push(lift);
-    this.trees = this.trees.filter((t) => !nearSegment(a.x, a.y, b.x, b.y, t.x, t.y, 14));
+    this.clearTrees();
+    this.checkConquest();
     this.float(a.x, a.y, `-${check.cost}`, "#d9785f");
     this.toast(`${name} is spinning. ${spec.label}, ${Math.round(check.length * UNIT_M)} m.`);
     this.liftStart = null;
@@ -827,7 +909,7 @@ export class Game {
     const topE = elevation(l.top.x, l.top.y, this.currentMountain);
     return this.trails.filter((t) => {
       const p = t.points[0];
-      return Math.hypot(p.x - l.top.x, p.y - l.top.y) < 220 && elevation(p.x, p.y, this.currentMountain) < topE + 0.04;
+      return Math.hypot(p.x - l.top.x, p.y - l.top.y) < 250 && elevation(p.x, p.y, this.currentMountain) < topE + 0.04;
     });
   }
 
@@ -836,8 +918,17 @@ export class Game {
     return measureTrail(this.draft, this.currentMountain, this.trailKind);
   }
 
+  /** The base village: a circle around the base that grows with the resort tier. */
+  villageRadius(): number {
+    return TIERS[this.tier()].villageRadius;
+  }
+
+  inVillage(x: number, y: number): boolean {
+    return Math.hypot(x - BASE.x, y - BASE.y) < this.villageRadius();
+  }
+
   private villageOk(x: number, y: number): boolean {
-    return y > 46 * K && y < 168 * K && x > 150 * K && x < 500 * K;
+    return this.inVillage(x, y) && gradeAt(x, y) < 0.25;
   }
 
   canPlace(type: BuildingType, x: number, y: number, opts: { ignoreId?: number; cost?: number } = {}): string | null {
@@ -850,8 +941,10 @@ export class Game {
     if (!moving && this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
     const anywhere = PLACE_ANYWHERE.includes(type);
     const midMountain = PLACE_MOUNTAIN.includes(type);
-    if (!anywhere && !midMountain && !this.villageOk(x, y)) return "Build down in the base village.";
-    if (midMountain && !anywhere && y < 170 * K) return "Put this on the mountain, not in the village.";
+    if (!anywhere && !midMountain && !this.villageOk(x, y)) {
+      return this.inVillage(x, y) ? "Too steep to build here." : "Build in the base village.";
+    }
+    if (midMountain && !anywhere && this.inVillage(x, y)) return "Put this on the mountain, not in the village.";
     if (x < 12 || x > WORLD_W - 12 || y < 24 || y > WORLD_H - 12) return "That's off the property.";
     const minGap = type === "shack" ? 22 : type === "heli" ? 60 : 38;
     if (others.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
@@ -915,8 +1008,8 @@ export class Game {
     const sel = this.selected;
     if (!sel || sel.kind === "hill") {
       return {
-        title: "Little Hawk Hill",
-        body: `${MOUNTAINS[this.currentMountain].name}. Lifetime take $${Math.round(this.lifetimeEarned).toLocaleString()}. Tickets plus shops; sugar shacks can sit beside the runs.`,
+        title: "Skilandia",
+        body: `${TIERS[this.tier()].name} · ${this.conquered.size}/${SUMMITS.length} peaks conquered. Lifetime take $${Math.round(this.lifetimeEarned).toLocaleString()}. Run lifts to the high peaks to grow the resort.`,
       };
     }
     if (sel.kind === "trail") {
@@ -983,7 +1076,7 @@ export class Game {
 
   private clickCut(x: number, y: number): "ok" | "shake" | "none" {
     if (this.draft.length === 0) {
-      if (y < 240 * K) {
+      if (elevationM(x, y) < elevationM(BASE.x, BASE.y) + 40) {
         this.toast("Start the cut higher on the mountain.", true);
         return "shake";
       }
@@ -1014,9 +1107,8 @@ export class Game {
       return "shake";
     }
     if (kind === "glades") {
-      const probe = { points: this.draft } as Trail;
-      const inside = this.trees.filter((t) => distToTrail(probe, t.x, t.y) < TRAIL_KIND_SPEC.glades.width / 2).length;
-      if (inside < info.length / 12) {
+      const inside = this.treesAlong(this.draft, TRAIL_KIND_SPEC.glades.width / 2);
+      if (inside < info.length / 20) {
         this.toast("Glades need forest. Draw this one through the trees.", true);
         return "shake";
       }
@@ -1029,9 +1121,12 @@ export class Game {
     const name = this.freshTrailName(kind);
     const trail = this.makeTrail(name, this.draft.map((p) => ({ ...p })), kind);
     this.trails.push(trail);
-    const before = this.trees.length;
+    const half = TRAIL_KIND_SPEC[kind].width / 2 + 9;
+    this.trails.pop();
+    const before = this.treesAlong(trail.points, half);
+    this.trails.push(trail);
+    const felled = before - this.treesAlong(trail.points, half);
     this.clearTrees();
-    const felled = before - this.trees.length;
     this.float(this.draft[0].x, this.draft[0].y, `-${info.cost}`, "#d9785f");
     this.toast(`${DIFF[info.difficulty].name} ${TRAIL_KIND_SPEC[kind].label.toLowerCase()} “${name}” is open. ${felled} trees cleared.`);
     this.draft = [];
@@ -1095,8 +1190,8 @@ export class Game {
       name: pick(NAMES),
       skill,
       color: pick(JACKETS),
-      x: (220 + Math.random() * 200) * K,
-      y: (18 + Math.random() * 16) * K,
+      x: BASE.x - 260 + Math.random() * 200,
+      y: BASE.y + 140 + Math.random() * 60,
       state: "arriving",
       trailId: null,
       liftId: null,
@@ -1139,7 +1234,7 @@ export class Game {
         this.upkeepToday = 0;
         this.heliFlightsToday = 0;
         this.heliTakeToday = 0;
-        this.toast(`Day ${this.day} on Little Hawk Hill.`);
+        this.toast(`Day ${this.day} in Skilandia.`);
       }
       // Skiers only come when it looks like the resort can take them:
       // arrivals close the gap to demand over about a minute, then stop.
@@ -1160,7 +1255,6 @@ export class Game {
         this.boothT = 0;
       }
       this.collectBuildingIncome(capped);
-      this.collectRemoteIncome(capped);
       this.payWages(capped);
       this.payUpkeep(capped);
     }
@@ -1172,7 +1266,7 @@ export class Game {
       this.stepSkier(s, capped);
       s.mood = clamp(s.mood, 0, 100);
     }
-    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && s.y < 12 * K && s.wait <= 0));
+    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && Math.hypot(s.x - this.exit().x, s.y - this.exit().y) < 12 && s.wait <= 0));
     this.peakSkiers = Math.max(this.peakSkiers, this.skiers.length);
     this.thoughtAcc += capped;
     if (this.thoughtAcc > 4.5) {
@@ -1221,22 +1315,6 @@ export class Game {
     }
   }
 
-  private collectRemoteIncome(dt: number): void {
-    const factor = 0.55 * this.staffCoverage();
-    for (const id of this.owned) {
-      if (id === this.currentMountain) continue;
-      const snap = this.snapshots[id];
-      if (!snap) continue;
-      for (const b of snap.buildings) {
-        const gain = (INCOME_PER_MIN[b.type] / 60) * factor * this.buildingFactor(b.type) * dt;
-        this.money += gain;
-        this.shopIncomeToday += gain;
-        this.incomeToday += gain;
-        this.lifetimeEarned += gain;
-      }
-    }
-  }
-
   /** A ski school only runs lessons with instructors on staff. */
   private buildingFactor(type: BuildingType): number {
     if (type !== "school") return 1;
@@ -1244,11 +1322,10 @@ export class Game {
     return Math.min(1, this.staff.instructor / need);
   }
 
-  /** Running costs for buildings that have them, on every mountain you own. */
+  /** Running costs for buildings that have them. */
   upkeepPerMin(): number {
     let n = 0;
-    const all = [this.buildings, ...this.owned.filter((id) => id !== this.currentMountain).map((id) => this.snapshots[id]?.buildings ?? [])];
-    for (const list of all) for (const b of list) n += OPERATING_COST_PER_MIN[b.type] ?? 0;
+    for (const b of this.buildings) n += OPERATING_COST_PER_MIN[b.type] ?? 0;
     return n;
   }
 
@@ -1334,21 +1411,17 @@ export class Game {
     }
   }
 
+  /** Payroll and the bigger buildings start once the resort is a ski area (first peak). */
   staffRequired(): boolean {
-    return this.owned.length > 1;
+    return this.tier() >= 1;
   }
 
   expansionUnlocked(): boolean {
-    return this.owned.length > 1;
+    return this.tier() >= 1;
   }
 
   empireCount(type: BuildingType): number {
-    let n = this.count(type);
-    for (const id of this.owned) {
-      if (id === this.currentMountain) continue;
-      n += this.snapshots[id]?.buildings.filter((b) => b.type === type).length ?? 0;
-    }
-    return n;
+    return this.count(type);
   }
 
   staffNeeds(): Record<StaffRole, number> {
@@ -1362,13 +1435,13 @@ export class Game {
       this.empireCount("shack") +
       this.empireCount("restaurant");
     const lodgings = this.empireCount("hotel") + this.empireCount("condo") + this.empireCount("shop");
-    const trails = this.trails.length + Object.values(this.snapshots).reduce((n, s) => n + (s?.trails.length ?? 0), 0);
+    const trails = this.trails.length;
     return {
-      patrol: Math.max(1, Math.ceil(this.skiers.length / 150) + this.owned.length - 1),
+      patrol: Math.max(1, Math.ceil(this.skiers.length / 150) + this.tier()),
       food: Math.max(foodBuildings > 0 ? 1 : 0, foodBuildings),
-      lift: Math.max(this.owned.length, Math.ceil((this.lifts.length + Object.entries(this.snapshots).reduce((n, [k, sn]) => n + (Number(k) === this.currentMountain ? 0 : sn?.lifts.length ?? 0), 0)) / 2)),
+      lift: Math.max(1, Math.ceil(this.lifts.length / 2)),
       delivery: Math.max(foodBuildings + lodgings > 0 ? 1 : 0, Math.ceil((foodBuildings + lodgings) / 2)),
-      maintenance: Math.max(1, Math.ceil(trails / 5) + this.owned.length),
+      maintenance: Math.max(1, Math.ceil(trails / 5) + 1),
       instructor,
     };
   }
@@ -1397,7 +1470,7 @@ export class Game {
       return;
     }
     if (!this.staffRequired()) {
-      this.toast("Little Hawk is family-run. Staff starts when you buy the next mountain.", true);
+      this.toast("The local hill is family-run. Payroll starts once you conquer your first peak.", true);
       return;
     }
     this.staff[role] += 1;
@@ -1410,139 +1483,6 @@ export class Game {
     this.toast(`Let a ${STAFF_LABEL[role].toLowerCase()} go.`);
   }
 
-  mountainStatus(id: MountainId): { owned: boolean; canUnlock: boolean; canBuy: boolean; missing: number } {
-    const spec = MOUNTAINS[id];
-    const owned = this.owned.includes(id);
-    const canUnlock = this.lifetimeEarned >= spec.profitToUnlock;
-    const canBuy = !owned && canUnlock && this.money >= spec.buyCost && (id === 0 || this.owned.includes((id - 1) as MountainId));
-    const missing = Math.max(0, spec.profitToUnlock - this.lifetimeEarned);
-    return { owned, canUnlock, canBuy, missing };
-  }
-
-  buyMountain(id: MountainId): boolean {
-    const spec = MOUNTAINS[id];
-    const st = this.mountainStatus(id);
-    if (st.owned) {
-      this.switchMountain(id);
-      return true;
-    }
-    if (id > 0 && !this.owned.includes((id - 1) as MountainId)) {
-      this.toast("Grow the current mountain first.", true);
-      return false;
-    }
-    if (!st.canUnlock) {
-      this.toast(`Earn $${st.missing.toLocaleString()} more profit before ${spec.name} is for sale.`, true);
-      return false;
-    }
-    if (this.money < spec.buyCost) {
-      this.toast(`Need $${(spec.buyCost - this.money).toLocaleString()} more to buy ${spec.name}.`, true);
-      return false;
-    }
-    this.money -= spec.buyCost;
-    this.saveCurrent();
-    this.owned.push(id);
-    this.currentMountain = id;
-    this.installMountain(id);
-    this.toast(`${spec.name} is yours. Hire ski patrol and a crew — this is a real ski area now.`);
-    return true;
-  }
-
-  switchMountain(id: MountainId): void {
-    if (!this.owned.includes(id) || id === this.currentMountain) return;
-    this.saveCurrent();
-    this.currentMountain = id;
-    const snap = this.snapshots[id];
-    if (!snap) return;
-    this.trails = snap.trails;
-    this.lifts = snap.lifts;
-    this.buildings = snap.buildings;
-    this.trees = snap.trees;
-    this.features = snap.features;
-    this.ticketPrice = snap.ticketPrice;
-    this.skiers = [];
-    this.draft = [];
-    this.tool = "select";
-    this.selected = null;
-    this.liftStart = null;
-    for (let i = 0; i < 8; i++) this.spawnSkier(true);
-    this.toast(`Now managing ${MOUNTAINS[id].name}.`);
-  }
-
-  private saveCurrent(): void {
-    this.snapshots[this.currentMountain] = {
-      trails: this.trails,
-      lifts: this.lifts,
-      buildings: this.buildings,
-      trees: this.trees,
-      features: this.features,
-      ticketPrice: this.ticketPrice,
-    };
-  }
-
-  private installMountain(id: MountainId): void {
-    this.buildings = [];
-    this.features = [];
-    this.skiers = [];
-    this.draft = [];
-    this.tool = "select";
-    this.selected = null;
-    this.liftStart = null;
-    this.ticketPrice = START_TICKET;
-    if (id === 1) {
-      this.lifts = [this.makeLift("double", "Cedar Double", P(330, 112), P(300, 660))];
-      this.trails = [
-        this.makeTrail("Cabin Run", [
-          P(318, 648),
-          P(400, 480),
-          P(430, 300),
-          P(360, 130),
-        ]),
-        this.makeTrail("Hemlock", [
-          P(288, 650),
-          P(220, 470),
-          P(210, 280),
-          P(290, 124),
-        ]),
-        this.makeTrail("Upper Pitch", [
-          P(250, 700),
-          P(180, 520),
-          P(150, 330),
-          P(240, 140),
-        ]),
-      ];
-    } else {
-      this.lifts = [this.makeLift("quad", "Saddle Quad", P(320, 108), P(318, 640))];
-      this.trails = [
-        this.makeTrail("West Peak", [
-          P(200, 700),
-          P(170, 500),
-          P(190, 300),
-          P(260, 130),
-        ]),
-        this.makeTrail("East Peak", [
-          P(460, 710),
-          P(500, 500),
-          P(470, 300),
-          P(380, 128),
-        ]),
-        this.makeTrail("Saddle Green", [
-          P(330, 620),
-          P(350, 400),
-          P(340, 220),
-          P(320, 122),
-        ]),
-        this.makeTrail("Chute", [
-          P(150, 720),
-          P(120, 480),
-          P(160, 260),
-          P(250, 132),
-        ]),
-      ];
-    }
-    this.seedTrees();
-    for (let i = 0; i < 10; i++) this.spawnSkier(true);
-    this.saveCurrent();
-  }
 
   private nearestFood(x: number, y: number): Building | undefined {
     const foods = this.buildings.filter((b) => ["coffee", "sandwich", "shack", "restaurant"].includes(b.type));
@@ -1667,8 +1607,13 @@ export class Game {
     return [...pool].sort((a, b) => Math.hypot(a.points[0].x - at.x, a.points[0].y - at.y) - Math.hypot(b.points[0].x - at.x, b.points[0].y - at.y))[0] ?? null;
   }
 
-  private booth(): Vec2 {
-    return P(352, 92);
+  booth(): Vec2 {
+    return { x: BASE.x - 60, y: BASE.y + 90 };
+  }
+
+  /** Where skiers park and leave from. */
+  exit(): Vec2 {
+    return { x: BASE.x - 160, y: BASE.y + 200 };
   }
 
   private stepSkier(s: Skier, dt: number): void {
@@ -1894,7 +1839,8 @@ export class Game {
     }
     if (s.state === "heli") return; // off the map, skiing the backcountry
     if (s.state === "leaving") {
-      this.walkToward(s, (200 + (s.id % 7) * 30) * K, 10 * K, 48 * WALK * dt);
+      const exit = this.exit();
+      this.walkToward(s, exit.x, exit.y, 48 * WALK * dt);
       s.wait = 0;
     }
   }
@@ -2069,4 +2015,22 @@ export function nearestOnTrail(t: Trail, x: number, y: number): { along: number;
 function treeHash(x: number, y: number): number {
   const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
   return n - Math.floor(n);
+}
+
+/** How forested a spot is (0..1): patchy, thinning out toward the treeline. */
+export function forestDensity(x: number, y: number): number {
+  const density = noise2(x / 360, y / 300) * 0.75 + noise2(x / 90, y / 110) * 0.35;
+  const m = elevationM(x, y);
+  const treeline = 1 - smoothstep(TREELINE_M - 250, TREELINE_M + 100 + (noise2(x / 500, y / 500) - 0.5) * 200, m);
+  return density * treeline;
+}
+
+/** One possible tree per forest cell: where it stands, or null for a clearing. */
+function forestCell(gx: number, gy: number): Vec2 | null {
+  const x = (gx + noise2(gx * 7.13, gy * 3.71)) * TREE_CELL;
+  const y = (gy + noise2(gx * 2.91, gy * 6.37)) * TREE_CELL;
+  if (x < 4 || y < 4 || x > WORLD_W - 4 || y > WORLD_H - 4) return null;
+  if (forestDensity(x, y) < 0.42) return null;
+  if (gradeAt(x, y) > 0.9) return null; // cliffs
+  return { x, y };
 }

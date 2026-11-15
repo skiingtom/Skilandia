@@ -3,7 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { elevation, gradeAt, lerp, noise2 } from "./height";
 import { Game } from "./sim";
-import { classifyGrade } from "./sim";
+import { SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
   BuildingType,
   DIFF,
@@ -11,6 +11,7 @@ import {
   Feature,
   FeatureType,
   HELI,
+  BASE,
   MAP_SCALE,
   TRAIL_KIND_SPEC,
   INCOME_PER_MIN,
@@ -39,7 +40,7 @@ export const TERRAIN_H = [H, H, H];
 /** Slope-overlay colours by difficulty band (green, blue, black, double black). */
 const BAND_COLORS = ["#3fb878", "#3d84d8", "#3a3f47", "#b8324b"].map((c) => new THREE.Color(c));
 
-const K = MAP_SCALE;
+void MAP_SCALE;
 
 /**
  * Each mountain is its own area, loaded on its own and centred in the scene,
@@ -78,11 +79,12 @@ export class World3D {
   private ndc = new THREE.Vector2();
   private keys = new Set<string>();
   /** Only the mountain being managed is loaded. */
-  private terrain: THREE.Mesh | null = null;
+  private terrain: THREE.Group | null = null;
   private pickProxy: THREE.Mesh | null = null;
   private backdrop: THREE.Group | null = null;
   private loadedId: MountainId | null = null;
   private featureGroup = new THREE.Group();
+  private peakGroup = new THREE.Group();
   private trees: THREE.InstancedMesh;
   private helicopter = makeHelicopter();
   private rotorSpin = 0;
@@ -119,18 +121,19 @@ export class World3D {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.92;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 2, 40000);
-    this.camera.position.set(320 * K, 340 * K, -560 * K);
+    this.camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 2, 90000);
+    this.camera.position.set(0, 3000, 6000);
     this.scene.background = new THREE.Color("#9cc4dc");
-    this.scene.fog = new THREE.Fog("#a9cbe0", 1300 * K, 6200 * K);
+    this.scene.fog = new THREE.Fog("#a9cbe0", 9000, 60000);
 
     this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(0, 70 * K, -20 * K);
+    this.controls.target.set(0, 400, 0);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.06;
     this.controls.maxPolarAngle = Math.PI * 0.46;
     this.controls.minDistance = 70;
-    this.controls.maxDistance = 3000 * K;
+    this.controls.maxDistance = 30000;
+    this.controls.minDistance = 40;
     this.controls.mouseButtons.LEFT = -1 as unknown as THREE.MOUSE;
     this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
     this.controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
@@ -142,7 +145,7 @@ export class World3D {
     this.loadMountain(0);
     this.trees = this.makeEmptyTrees();
     this.scene.add(this.trees);
-    this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup);
+    this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
     this.draft = new THREE.Mesh(
@@ -178,9 +181,11 @@ export class World3D {
     if (on === this.slopeApplied) return;
     this.slopeApplied = on;
     if (!this.terrain) return;
-    const geo = this.terrain.geometry;
-    const src = (on ? geo.userData.overlay : geo.userData.natural) as THREE.Float32BufferAttribute;
-    geo.setAttribute("color", src);
+    for (const tile of this.terrain.children) {
+      if (!(tile instanceof THREE.Mesh) || !tile.geometry.userData.natural) continue;
+      const geo = tile.geometry;
+      geo.setAttribute("color", (on ? geo.userData.overlay : geo.userData.natural) as THREE.Float32BufferAttribute);
+    }
   }
 
   /**
@@ -221,11 +226,21 @@ export class World3D {
     return this.slopeView;
   }
 
-  private aimSun(id: MountainId): void {
-    const o = MOUNT_OFF[id];
-    this.sun.target.position.set(o.x, 60 * K, o.z);
-    this.sun.position.set(o.x + 640 * K, 360 * K, o.z - 160 * K);
+  /** The sun (and its shadow box) follows what you're looking at. */
+  private aimSun(_id: MountainId): void {
+    const t = this.controls.target;
+    this.sun.target.position.copy(t);
+    this.sun.position.set(t.x + 1400, t.y + 1300, t.z + 700);
     this.sun.target.updateMatrixWorld();
+  }
+
+  /** Fly the camera to look at a map position. */
+  focusPoint(x: number, y: number, dist = 1600): void {
+    const p = to3(x, y, 0, this.mid);
+    this.controls.target.copy(p);
+    this.camera.position.set(p.x + dist * 0.35, p.y + dist * 0.55, p.z + dist * 0.85);
+    this.controls.update();
+    this.aimSun(this.mid);
   }
 
   resize(): void {
@@ -298,12 +313,9 @@ export class World3D {
     return { x: g.x, y: g.y, kind, id, mountain };
   }
 
-  focusMountain(id: MountainId): void {
-    const o = MOUNT_OFF[id];
-    this.controls.target.set(o.x + 20 * K, 90 * K, o.z - 60 * K);
-    this.camera.position.set(o.x + 300 * K, 330 * K, o.z - 640 * K);
-    this.controls.update();
-    this.aimSun(id);
+  focusMountain(_id: MountainId): void {
+    // Start at the base village, looking south up toward the big peaks.
+    this.focusPoint(BASE.x, BASE.y - 600, 2600);
   }
 
   showGhost(type: BuildingType | `feature:${FeatureType}`, x: number, y: number, ok: boolean, angle = 0): void {
@@ -349,17 +361,21 @@ export class World3D {
     if (this.flying) {
       this.introT += dt * 0.1;
       const a = -0.55 + this.introT;
-      const r = 640 * K;
-      this.camera.position.set(Math.sin(a) * r, (330 + Math.sin(this.introT * 0.6) * 24) * K, (Math.cos(a) * 640 * 0.85 - 40) * K);
-      this.camera.lookAt(0, 90 * K, 40 * K);
+      // Slow orbit over the whole valley on the title screen.
+      const c = to3(BASE.x, BASE.y - 2000, 0, this.mid);
+      const r = 9000;
+      this.camera.position.set(c.x + Math.sin(a) * r, 4200 + Math.sin(this.introT * 0.6) * 200, c.z + Math.cos(a) * r);
+      this.camera.lookAt(c.x, c.y + 400, c.z);
     } else {
       this.flyKeys(dt);
       this.controls.update();
+      this.aimSun(this.mid);
     }
     // Steepness tint is always on while drawing a run or placing a surface lift.
     const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
+    this.syncTrees(game);
     this.syncLift(game);
     this.syncHeli(game, dt);
     this.syncSkiers(game);
@@ -373,7 +389,9 @@ export class World3D {
   }
 
   private flyKeys(dt: number): void {
-    const speed = (this.keys.has("shift") ? 280 : 150) * K * dt;
+    // Faster the higher you are, so crossing the valley doesn't take forever.
+    const height = Math.max(200, this.camera.position.distanceTo(this.controls.target));
+    const speed = (this.keys.has("shift") ? 2.5 : 1) * height * 0.6 * dt;
     const forward = new THREE.Vector3();
     this.camera.getWorldDirection(forward);
     forward.y = 0;
@@ -408,11 +426,11 @@ export class World3D {
     sun.castShadow = true;
     sun.shadow.mapSize.set(4096, 4096);
     sun.shadow.camera.near = 40;
-    sun.shadow.camera.far = 2400 * K;
-    sun.shadow.camera.left = -620 * K;
-    sun.shadow.camera.right = 620 * K;
-    sun.shadow.camera.top = 620 * K;
-    sun.shadow.camera.bottom = -620 * K;
+    sun.shadow.camera.far = 6000;
+    sun.shadow.camera.left = -1500;
+    sun.shadow.camera.right = 1500;
+    sun.shadow.camera.top = 1500;
+    sun.shadow.camera.bottom = -1500;
     sun.shadow.bias = -0.0006;
     sun.shadow.normalBias = 1.2;
     this.sun = sun;
@@ -422,7 +440,7 @@ export class World3D {
 
   private addGround(): void {
     const g = new THREE.Mesh(
-      new THREE.PlaneGeometry(9000 * K, 6000 * K),
+      new THREE.PlaneGeometry(200000, 200000),
       new THREE.MeshLambertMaterial({ color: "#dfe8ef" }),
     );
     g.position.x = 0;
@@ -430,26 +448,31 @@ export class World3D {
     g.position.y = -2;
     g.receiveShadow = true;
     this.scene.add(g);
-    this.scene.add(this.makeFarTrees());
   }
 
-  private makeTerrain(id: MountainId): THREE.Mesh {
-    const wx = 320;
-    const wy = 410;
+  /**
+   * The whole map as tiles of 64 x 64 heightmap cells (~1.8 km), so the
+   * renderer skips tiles that are off screen (and outside the shadow box).
+   * Normals come from the heightmap itself so tile edges don't show seams.
+   */
+  private makeTerrain(id: MountainId): THREE.Group {
+    const cell = 28;
+    const wx = Math.round(WORLD_W / cell);
+    const wy = Math.round(WORLD_H / cell);
     const o = MOUNT_OFF[id];
     const hScale = TERRAIN_H[id];
     const n = (wx + 1) * (wy + 1);
     const pos = new Float32Array(n * 3);
+    const nor = new Float32Array(n * 3);
     const natural = new Float32Array(n * 3);
     const overlay = new Float32Array(n * 3);
-    const idx: number[] = [];
     const c = new THREE.Color();
     const groomed = new THREE.Color("#edf2f7");
     const packed = new THREE.Color("#dbe4ee");
     const wind = new THREE.Color("#c3cfdc");
     const rock = new THREE.Color("#5f5b58");
     const rockDark = new THREE.Color("#433f3d");
-    const meadow = new THREE.Color("#d8d6cc");
+    const forest = new THREE.Color("#3f5f4c");
     let k = 0;
     for (let j = 0; j <= wy; j++) {
       for (let i = 0; i <= wx; i++, k++) {
@@ -460,16 +483,24 @@ export class World3D {
         pos[k * 3] = x - WORLD_W / 2 + o.x;
         pos[k * 3 + 1] = e * hScale;
         pos[k * 3 + 2] = y - WORLD_H / 2 + o.z;
+        const hx = (elevation(x + cell, y, id) - elevation(x - cell, y, id)) * hScale;
+        const hz = (elevation(x, y + cell, id) - elevation(x, y - cell, id)) * hScale;
+        const nl = Math.hypot(hx, 2 * cell, hz);
+        nor[k * 3] = -hx / nl;
+        nor[k * 3 + 1] = (2 * cell) / nl;
+        nor[k * 3 + 2] = -hz / nl;
 
         // Natural look: the steeper it gets, the more wind-blown, then rocky.
         const grain = noise2(x * 0.06, y * 0.06);
-        const streak = noise2(x * 0.22, y * 0.035);
-        if (g < 0.16) c.copy(groomed);
-        else if (g < 0.3) c.copy(groomed).lerp(packed, (g - 0.16) / 0.14);
-        else c.copy(packed).lerp(wind, Math.min(1, (g - 0.3) / 0.18));
-        const rockAmt = smooth(0.52, 0.8, g + (streak - 0.5) * 0.28);
+        const streak = noise2(x * 0.02, y * 0.004);
+        if (g < 0.25) c.copy(groomed);
+        else if (g < 0.45) c.copy(groomed).lerp(packed, (g - 0.25) / 0.2);
+        else c.copy(packed).lerp(wind, Math.min(1, (g - 0.45) / 0.25));
+        const rockAmt = smooth(0.75, 1.1, g + (streak - 0.5) * 0.35);
         if (rockAmt > 0) c.lerp(streak > 0.55 ? rockDark : rock, rockAmt * 0.92);
-        if (y < 150) c.lerp(meadow, (1 - y / 150) * 0.55);
+        // Woods read as a dark tint from far away; real trees are drawn near the camera.
+        const woods = smooth(0.32, 0.62, forestDensity(x, y)) * (1 - rockAmt);
+        if (woods > 0) c.lerp(forest, woods * 0.55);
         const shade = (grain - 0.5) * 0.05;
         natural[k * 3] = c.r + shade;
         natural[k * 3 + 1] = c.g + shade;
@@ -483,36 +514,62 @@ export class World3D {
         overlay[k * 3 + 2] = c.b;
       }
     }
-    for (let j = 0; j < wy; j++) {
-      for (let i = 0; i < wx; i++) {
-        const a = j * (wx + 1) + i;
-        idx.push(a, a + wx + 1, a + 1, a + 1, a + wx + 1, a + wx + 2);
+
+    const group = new THREE.Group();
+    group.userData = { kind: "terrain", mountain: id };
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 });
+    const tile = 64;
+    for (let tj = 0; tj < wy; tj += tile) {
+      for (let ti = 0; ti < wx; ti += tile) {
+        const cw = Math.min(tile, wx - ti);
+        const ch = Math.min(tile, wy - tj);
+        const m = (cw + 1) * (ch + 1);
+        const tp = new Float32Array(m * 3);
+        const tn = new Float32Array(m * 3);
+        const tnat = new Float32Array(m * 3);
+        const tov = new Float32Array(m * 3);
+        let q = 0;
+        for (let j = 0; j <= ch; j++) {
+          for (let i = 0; i <= cw; i++, q++) {
+            const src = ((tj + j) * (wx + 1) + (ti + i)) * 3;
+            for (let d = 0; d < 3; d++) {
+              tp[q * 3 + d] = pos[src + d];
+              tn[q * 3 + d] = nor[src + d];
+              tnat[q * 3 + d] = natural[src + d];
+              tov[q * 3 + d] = overlay[src + d];
+            }
+          }
+        }
+        const idx: number[] = [];
+        for (let j = 0; j < ch; j++) {
+          for (let i = 0; i < cw; i++) {
+            const a = j * (cw + 1) + i;
+            idx.push(a, a + cw + 1, a + 1, a + 1, a + cw + 1, a + cw + 2);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(tp, 3));
+        geo.setAttribute("normal", new THREE.BufferAttribute(tn, 3));
+        const naturalAttr = new THREE.Float32BufferAttribute(tnat, 3);
+        const overlayAttr = new THREE.Float32BufferAttribute(tov, 3);
+        geo.userData = { natural: naturalAttr, overlay: overlayAttr };
+        geo.setAttribute("color", naturalAttr);
+        geo.setIndex(idx);
+        geo.computeBoundingSphere();
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.receiveShadow = true;
+        mesh.castShadow = true;
+        mesh.userData = { kind: "terrain", mountain: id };
+        group.add(mesh);
       }
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    const naturalAttr = new THREE.Float32BufferAttribute(natural, 3);
-    const overlayAttr = new THREE.Float32BufferAttribute(overlay, 3);
-    geo.userData = { natural: naturalAttr, overlay: overlayAttr };
-    geo.setAttribute("color", naturalAttr);
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.88,
-      metalness: 0,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.receiveShadow = true;
-    mesh.castShadow = true;
-    mesh.userData = { kind: "terrain", mountain: id };
-    mesh.add(makeSkirt(id));
+    group.add(makeSkirt(id));
     // Low-poly stand-in used only for mouse picking (refined against the heightfield).
     const proxy = new THREE.Mesh(makeProxyGeometry(id), new THREE.MeshBasicMaterial({ visible: false }));
     proxy.userData = { kind: "terrain", mountain: id };
     this.pickProxy = proxy;
     this.scene.add(proxy);
-    return mesh;
+    return group;
   }
 
   private makeEmptyTrees(): THREE.InstancedMesh {
@@ -524,33 +581,10 @@ export class World3D {
     trunk.translate(0, -7.5, 0);
     const geo = mergeGeometries([lower, upper, trunk])!;
     const mat = new THREE.MeshLambertMaterial({ color: "#ffffff" });
-    const mesh = new THREE.InstancedMesh(geo, mat, 12000);
+    const mesh = new THREE.InstancedMesh(geo, mat, TREES_DRAWN);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.castShadow = true;
     mesh.count = 0;
-    return mesh;
-  }
-
-  private makeFarTrees(): THREE.InstancedMesh {
-    const geo = new THREE.ConeGeometry(4.2, 18, 5);
-    const mat = new THREE.MeshLambertMaterial({ color: "#163828" });
-    const mesh = new THREE.InstancedMesh(geo, mat, 900);
-    const dummy = this.tmp;
-    let n = 0;
-    for (let i = 0; i < 900; i++) {
-      const a = noise2(i * 0.41, 3) * Math.PI * 2;
-      const r = (420 + noise2(i * 0.2, 9) * 520) * K;
-      const x = Math.cos(a) * r;
-      const z = Math.sin(a) * r;
-      if (Math.abs(x) < WORLD_W * 0.55 && Math.abs(z) < WORLD_H * 0.55) continue;
-      dummy.position.set(x, 8, z);
-      dummy.scale.setScalar(0.8 + noise2(i, 1) * 1.4);
-      dummy.rotation.y = a;
-      dummy.updateMatrix();
-      mesh.setMatrixAt(n++, dummy.matrix);
-    }
-    mesh.count = n;
-    mesh.instanceMatrix.needsUpdate = true;
     return mesh;
   }
 
@@ -581,14 +615,32 @@ export class World3D {
   }
 
   private syncStatic(game: Game): void {
-    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.map((b) => `${b.id}@${Math.round(b.x)},${Math.round(b.y)}`).join(",")}:${game.trees.length}:${game.features.length}:${game.selected?.kind}:${game.selected?.id}:${game.owned.join(",")}:${game.lifts.map((l) => l.id).join(",")}`;
+    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.map((b) => `${b.id}@${Math.round(b.x)},${Math.round(b.y)}`).join(",")}:${game.forestVersion}:${game.features.length}:${game.selected?.kind}:${game.selected?.id}:${game.conquered.size}:${game.lifts.map((l) => l.id).join(",")}`;
     if (key === this.stamp) return;
     this.stamp = key;
-    this.layoutTrees(game);
+    this.treeVersion = -1;
     this.layoutTrails(game);
     this.layoutBuildings(game);
     this.layoutLift(game);
     this.layoutFeatures(game);
+    this.layoutPeaks(game);
+  }
+
+  /** A flag on every summit: grey until a lift reaches it, gold once conquered. */
+  private layoutPeaks(game: Game): void {
+    this.peakGroup.clear();
+    for (const p of SUMMITS) {
+      const done = game.conquered.has(p.id);
+      const base = to3(p.x, p.y, 0, this.mid);
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 40, 6), std("#3a3f45"));
+      pole.position.copy(base).add(new THREE.Vector3(0, 20, 0));
+      const flag = new THREE.Mesh(new THREE.PlaneGeometry(22, 13), std(done ? "#e2b857" : "#c8ced6", { side: THREE.DoubleSide }));
+      flag.position.copy(base).add(new THREE.Vector3(11, 33, 0));
+      this.peakGroup.add(pole, flag);
+      const label = makePeakLabel(`${done ? "🚩 " : ""}${p.name} · ${p.elevation.toLocaleString()} m`, done);
+      label.position.copy(base).add(new THREE.Vector3(0, 70, 0));
+      this.peakGroup.add(label);
+    }
   }
 
   private layoutFeatures(game: Game): void {
@@ -600,14 +652,32 @@ export class World3D {
     }
   }
 
+  /** Trees are only drawn near where you're looking; farther out the ground is tinted. */
+  private treeCentre = { x: -1e9, y: -1e9 };
+  private treeVersion = -1;
+
+  private syncTrees(game: Game): void {
+    const g = from3(this.controls.target, this.mid);
+    const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > 350;
+    if (!moved && this.treeVersion === game.forestVersion) return;
+    this.treeCentre = g;
+    this.treeVersion = game.forestVersion;
+    this.layoutTrees(game);
+  }
+
   private layoutTrees(game: Game): void {
     const dummy = this.tmp;
     const col = new THREE.Color();
     let n = 0;
-    for (const t of game.trees) {
-      if (n >= 12000) break;
-      // Nothing grows on the cliff bands.
-      if (gradeAt(t.x, t.y, this.mid) > 0.6) continue;
+    const c = this.treeCentre;
+    const r = TREE_RADIUS;
+    const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r);
+    for (const t of list) {
+      if (n >= TREES_DRAWN) break;
+      const d = Math.hypot(t.x - c.x, t.y - c.y);
+      if (d > r) continue;
+      // Thin the trees out toward the edge so the drawn forest blends into the tinted ground.
+      if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.6, r, d)) continue;
       const sc = 0.7 + noise2(t.x, t.y) * 0.9;
       dummy.position.copy(to3(t.x, t.y, 8 * sc, this.mid));
       dummy.scale.setScalar(sc);
@@ -638,7 +708,7 @@ export class World3D {
 
   private layoutBuildings(game: Game): void {
     this.buildingGroup.clear();
-    this.buildingGroup.add(makeVillageProps(this.mid));
+    this.buildingGroup.add(makeVillageProps(this.mid, game.booth(), game.exit(), game.villageRadius()));
     for (const b of game.buildings) {
       const mesh = makeBuildingMesh(b.type, false);
       mesh.position.copy(to3(b.x, b.y, 0, this.mid));
@@ -690,7 +760,7 @@ export class World3D {
       return;
     }
     const base = to3(pad.x, pad.y, 1.2, this.mid);
-    const away = base.clone().add(new THREE.Vector3(0, 520 * K, WORLD_H * 1.1));
+    const away = base.clone().add(new THREE.Vector3(0, 2600, -9000));
     let pos = base;
     let spin = game.heli.wait > 0 ? 8 : 0;
     h.visible = true;
@@ -1076,10 +1146,10 @@ function makeBackdrop(id: MountainId): THREE.Group {
   const rockC = new THREE.Color("#7d8794");
   for (let i = 0; i < 26; i++) {
     const a = (i / 26) * Math.PI * 2 + noise2(i * 1.7 + id * 31, 4) * 0.2;
-    const r = (1900 + noise2(i * 0.9 + id * 17, 7) * 900) * K;
+    const r = 30000 + noise2(i * 0.9 + id * 17, 7) * 9000;
     const x = Math.cos(a) * r * 1.1;
     const z = Math.sin(a) * r;
-    const height = (380 + noise2(i * 2.3 + id * 13, 11) * 520 + id * 90) * K;
+    const height = 2200 + noise2(i * 2.3 + id * 13, 11) * 2600;
     const geo = new THREE.ConeGeometry(height * 1.25, height, 7, 3);
     const p = geo.getAttribute("position") as THREE.BufferAttribute;
     const colors: number[] = [];
@@ -1183,42 +1253,39 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   return g;
 }
 
-function makeVillageProps(mid: MountainId): THREE.Group {
+/** Ticket booth, parking and the village boundary around the base. */
+function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: number): THREE.Group {
   const g = new THREE.Group();
-  const booth = makeBuildingMesh("restroom", false);
-  booth.scale.set(0.7, 0.85, 0.7);
-  booth.position.copy(to3(352 * K, 92 * K, 0, mid));
-  booth.userData = { kind: "hill" };
-  g.add(booth);
-  const road = new THREE.Mesh(
-    new THREE.BoxGeometry(22, 0.4, 90 * K),
-    new THREE.MeshLambertMaterial({ color: "#5c6570" }),
-  );
-  road.position.copy(to3(300 * K, 50 * K, 0.2, mid));
-  g.add(road);
+  const hut = makeBuildingMesh("restroom", false);
+  hut.scale.set(0.7, 0.85, 0.7);
+  hut.position.copy(to3(booth.x, booth.y, 0, mid));
+  hut.userData = { kind: "hill" };
+  g.add(hut);
   const colors = ["#8b3a32", "#2e4a72", "#d5d0c4", "#355e3b"];
-  const spots = [
-    [240 * K, 28 * K],
-    [268 * K, 32 * K],
-    [296 * K, 26 * K],
-    [390 * K, 34 * K],
-  ];
-  for (let i = 0; i < 40; i++) spots.push([(200 + (i % 20) * 11) * K, (24 + Math.floor(i / 20) * 9) * K]);
-  spots.forEach(([x, y], i) => {
-    if (noise2(i * 1.3, 2) < 0.35) return;
-    const car = new THREE.Mesh(new THREE.BoxGeometry(6, 2.2, 3.2), new THREE.MeshLambertMaterial({ color: colors[i % colors.length] }));
-    car.position.copy(to3(x, y, 1.2, mid));
+  const lot = new THREE.Mesh(new THREE.BoxGeometry(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
+  lot.position.copy(to3(exit.x, exit.y, 0.2, mid));
+  g.add(lot);
+  for (let i = 0; i < 60; i++) {
+    if (noise2(i * 1.3, 2) < 0.35) continue;
+    const car = new THREE.Mesh(new THREE.BoxGeometry(5, 2.2, 2.6), new THREE.MeshLambertMaterial({ color: colors[i % colors.length] }));
+    car.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 1.1, mid));
     g.add(car);
-  });
-  const pad = new THREE.Mesh(
-    new THREE.BoxGeometry(220 * K, 0.35, 90 * K),
-    new THREE.MeshLambertMaterial({ color: "#c9c2b0" }),
+  }
+  // Village boundary: a dashed line draped on the snow.
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= 180; i++) {
+    const a = (i / 180) * Math.PI * 2;
+    pts.push(to3(BASE.x + Math.cos(a) * radius, BASE.y + Math.sin(a) * radius, 1.5, mid));
+  }
+  const ring = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineDashedMaterial({ color: "#e2b857", dashSize: 18, gapSize: 12 }),
   );
-  pad.position.copy(to3(325 * K, 108 * K, 0.1, mid));
-  g.add(pad);
+  ring.computeLineDistances();
+  g.add(ring);
   const sign = makeSignSprite("BASE VILLAGE — build here");
-  sign.scale.multiplyScalar(2);
-  sign.position.copy(to3(325 * K, 150 * K, 10, mid));
+  sign.scale.multiplyScalar(2.4);
+  sign.position.copy(to3(BASE.x, BASE.y, 30, mid));
   g.add(sign);
   return g;
 }
@@ -1544,8 +1611,8 @@ function makeCabin(color: string): THREE.Group {
 
 /** Coarse version of a mountain's terrain, used only for mouse picking. */
 function makeProxyGeometry(id: MountainId): THREE.BufferGeometry {
-  const wx = 80;
-  const wy = 100;
+  const wx = 280;
+  const wy = 166;
   const o = MOUNT_OFF[id];
   const pos: number[] = [];
   const idx: number[] = [];
@@ -1793,4 +1860,32 @@ function makeHelicopter(): THREE.Group {
   rotor.position.y = 5.8;
   g.add(body, glass, boom, fin, mast, rotor);
   return g;
+}
+
+/** How far around the view trees are drawn, and the most drawn at once. */
+const TREE_RADIUS = 1100;
+const TREES_DRAWN = 30000;
+
+/** Peak names stay readable from anywhere on the map (fixed on-screen size). */
+function makePeakLabel(text: string, done: boolean): THREE.Sprite {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 72;
+  const ctx = c.getContext("2d")!;
+  ctx.font = "800 30px Nunito, Segoe UI, sans-serif";
+  const w = Math.min(500, ctx.measureText(text).width + 36);
+  ctx.fillStyle = done ? "rgba(226, 184, 87, 0.95)" : "rgba(19, 32, 44, 0.82)";
+  ctx.beginPath();
+  ctx.roundRect((512 - w) / 2, 8, w, 56, 16);
+  ctx.fill();
+  ctx.fillStyle = done ? "#13202c" : "#f3efe4";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 256, 37);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, sizeAttenuation: false, depthTest: false }));
+  sprite.scale.set(0.2, 0.028, 1);
+  sprite.renderOrder = 4;
+  return sprite;
 }
