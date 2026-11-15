@@ -318,26 +318,29 @@ export class Game {
    * features clear it; glades only thin it. Nothing is stored per tree, so
    * the whole 28 km map can be forested.
    */
-  treesIn(x0: number, y0: number, x1: number, y1: number, cleared = true, stride = 1): Vec2[] {
-    const out: Vec2[] = [];
+  treesIn(x0: number, y0: number, x1: number, y1: number, cleared = true, stride = 1): ForestTree[] {
+    const out: ForestTree[] = [];
     const gx0 = Math.max(0, Math.floor(x0 / TREE_CELL));
     const gy0 = Math.max(0, Math.floor(y0 / TREE_CELL));
     const gx1 = Math.min(Math.floor(WORLD_W / TREE_CELL), Math.ceil(x1 / TREE_CELL));
     const gy1 = Math.min(Math.floor(WORLD_H / TREE_CELL), Math.ceil(y1 / TREE_CELL));
     const near = cleared ? this.clearersIn(x0 - 40, y0 - 40, x1 + 40, y1 + 40) : null;
     // A stride > 1 samples one random cell from each stride x stride block,
-    // for a sparser far-off view that still doesn't fall into rows.
+    // for a sparser far-off view that still doesn't fall into rows. Strides
+    // are powers of two and nested (every tree kept at stride 2s is also kept
+    // at stride s), so zooming out only thins the forest, never reshuffles it.
+    stride = strideOf(stride);
     const sx = Math.floor(gx0 / stride) * stride;
     const sy = Math.floor(gy0 / stride) * stride;
     for (let by = sy; by <= gy1; by += stride) {
       for (let bx = sx; bx <= gx1; bx += stride) {
-        const gx = stride > 1 ? bx + Math.floor(cellHash(bx, by, 7) * stride) : bx;
-        const gy = stride > 1 ? by + Math.floor(cellHash(bx, by, 8) * stride) : by;
+        const [gx, gy] = strideCell(bx, by, stride);
         if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1) continue;
         const t = forestCell(gx, gy);
         if (!t) continue;
         if (this.inVillage(t.x, t.y)) continue;
         if (near && this.isCleared(t.x, t.y, near)) continue;
+        t.level = cellLevel(gx, gy);
         out.push(t);
       }
     }
@@ -349,9 +352,10 @@ export class Game {
         if (!list) continue;
         for (const t of list) {
           if (t.x < x0 || t.x > x1 || t.y < y0 || t.y > y1) continue;
-          if (stride > 1 && treeHash(t.x, t.y) > keep) continue;
+          const h = treeHash(t.x, t.y);
+          if (stride > 1 && h > keep) continue;
           if (near && this.isCleared(t.x, t.y, near, true)) continue;
-          out.push(t);
+          out.push({ x: t.x, y: t.y, level: hashLevel(h) });
         }
       }
     }
@@ -3184,6 +3188,55 @@ function cellHash(gx: number, gy: number, salt: number): number {
   return (h >>> 0) / 4294967296;
 }
 
+/** Largest sparse-forest stride a tree can survive (see treesIn). */
+export const MAX_TREE_STRIDE = 16;
+
+/** A drawn tree; `level` is the largest stride at which it is still drawn. */
+export type ForestTree = Vec2 & { level?: number };
+
+/** Round a stride down to a power of two (1, 2, 4, ... MAX_TREE_STRIDE). */
+function strideOf(s: number): number {
+  let p = 1;
+  while (p * 2 <= Math.min(s, MAX_TREE_STRIDE)) p *= 2;
+  return p;
+}
+
+/**
+ * The one cell kept from the s x s block at (bx, by): one of the four
+ * half-size blocks is picked at random, then recursively, so the pick at
+ * stride s is always one of the picks at stride s / 2.
+ */
+function strideCell(bx: number, by: number, s: number): [number, number] {
+  while (s > 1) {
+    s >>= 1;
+    const q = Math.floor(cellHash(bx, by, 40 + s) * 4);
+    bx += (q & 1) * s;
+    by += (q >> 1) * s;
+  }
+  return [bx, by];
+}
+
+/** The largest stride at which forest cell (gx, gy) is still drawn. */
+function cellLevel(gx: number, gy: number): number {
+  let level = 1;
+  for (let s = 2; s <= MAX_TREE_STRIDE; s *= 2) {
+    const [cx, cy] = strideCell(Math.floor(gx / s) * s, Math.floor(gy / s) * s, s);
+    if (cx !== gx || cy !== gy) break;
+    level = s;
+  }
+  return level;
+}
+
+/** Planted trees keep a 1 / stride² share: the largest stride this one survives. */
+function hashLevel(h: number): number {
+  let level = 1;
+  for (let s = 2; s <= MAX_TREE_STRIDE; s *= 2) {
+    if (h > 1 / (s * s)) break;
+    level = s;
+  }
+  return level;
+}
+
 /** Stable 0..1 value per tree position. */
 function treeHash(x: number, y: number): number {
   const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
@@ -3200,7 +3253,7 @@ export function forestDensity(x: number, y: number): number {
 }
 
 /** One possible tree per forest cell: where it stands, or null for a clearing. */
-function forestCell(gx: number, gy: number): Vec2 | null {
+function forestCell(gx: number, gy: number): ForestTree | null {
   // An independent random spot anywhere in (and a little past) the cell, so
   // neighbours don't line up into rows.
   const x = (gx + 0.5 + (cellHash(gx, gy, 1) - 0.5) * 1.35) * TREE_CELL;

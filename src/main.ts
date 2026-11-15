@@ -144,6 +144,31 @@ try {
   document.body.appendChild(box);
   throw err;
 }
+// If the graphics driver resets (a GPU hang, a driver update, the laptop
+// switching GPUs), WebGL loses everything and the canvas goes black. Ask the
+// browser to give the context back; three.js re-uploads the scene once it does.
+{
+  let note: HTMLDivElement | null = null;
+  let reloadTimer = 0;
+  canvas.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    note ??= document.createElement("div");
+    note.style.cssText =
+      "position:fixed;left:50%;top:40%;transform:translate(-50%,-50%);z-index:9999;background:rgba(19,32,44,0.92);color:#f3ead8;font:15px/1.5 Nunito,sans-serif;padding:16px 22px;border-radius:14px;text-align:center";
+    note.textContent = "The graphics driver reset. Restoring the view…";
+    document.body.appendChild(note);
+    // Some drivers take a while, or never give it back.
+    reloadTimer = window.setTimeout(() => {
+      if (note) note.textContent = "Still waiting for the graphics driver. If the view doesn't come back, restart Skilandia.";
+    }, 6000);
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    clearTimeout(reloadTimer);
+    note?.remove();
+    note = null;
+    world.resize();
+  });
+}
 // Dev-only handle for poking at the game from the console.
 if ((import.meta as unknown as { env: { DEV: boolean } }).env.DEV) Object.assign(window, { skilandia: { game, world } });
 

@@ -167,6 +167,17 @@ export class PostFx {
     this.composer = new EffectComposer(renderer, target);
     this.composer.addPass(new RenderPass(scene, camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.22, 0.55, 1.6);
+    // Bloom blurs the bright parts of the frame over the whole screen. One bad
+    // pixel (NaN or infinity, e.g. from a degenerate normal at a grazing angle)
+    // would be smeared into a black screen, so drop those before the blur.
+    const hp = this.bloom.materialHighPassFilter;
+    hp.fragmentShader = hp.fragmentShader.replace(
+      "vec4 texel = texture2D( tDiffuse, vUv );",
+      `vec4 texel = texture2D( tDiffuse, vUv );
+      if ( any( isnan( texel ) ) || any( isinf( texel ) ) ) texel = vec4( 0.0 );
+      texel.rgb = clamp( texel.rgb, 0.0, 32.0 );`,
+    );
+    hp.needsUpdate = true;
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
     this.grade = new ShaderPass(GradeShader);
@@ -268,7 +279,11 @@ export function makeTerrainMaterial(uniforms: TerrainUniforms): THREE.MeshStanda
             vec3 r2 = cross(normal, dpx);
             float det = dot(dpx, r1);
             vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
-            normal = normalize(abs(det) * normal - grad);
+            vec3 bumped = abs(det) * normal - grad;
+            // Seen edge-on (det ~ 0) the bump vector can vanish: keep the plain normal
+            // rather than normalising zero into NaN, which would black out the frame.
+            float bl = dot(bumped, bumped);
+            if (bl > 1e-20 && abs(det) > 1e-12) normal = bumped * inversesqrt(bl);
           }
         }`,
       )
@@ -308,13 +323,14 @@ function hash1(n: number): number {
  */
 export function makeSpruceGeometry(detailed = true): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  const tiers = detailed ? 9 : 5;
+  // Close-up model ~430 triangles, far-off one ~80: there can be tens of thousands.
+  const tiers = detailed ? 8 : 4;
   for (let k = 0; k < tiers; k++) {
     const t = k / (tiers - 1);
     const r = THREE.MathUtils.lerp(4.6, 1.3, t);
     const h = THREE.MathUtils.lerp(6, 3.6, t);
     const y = THREE.MathUtils.lerp(-4.2, 6.6, t);
-    const cone = new THREE.ConeGeometry(r, h, detailed ? 16 : 8, detailed ? 3 : 2, true).toNonIndexed();
+    const cone = new THREE.ConeGeometry(r, h, detailed ? 12 : 7, detailed ? 2 : 1, true).toNonIndexed();
     cone.rotateY(k * 0.7);
     const pos = cone.getAttribute("position") as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
@@ -369,11 +385,11 @@ export function makeSpruceGeometry(detailed = true): THREE.BufferGeometry {
     parts.push(cone);
   }
   // A small snowy tip.
-  const tip = new THREE.ConeGeometry(0.5, 2.6, detailed ? 12 : 8).toNonIndexed();
+  const tip = new THREE.ConeGeometry(0.5, 2.6, detailed ? 8 : 5).toNonIndexed();
   tip.translate(0, 9.6, 0);
   paint(tip, NEEDLE);
   parts.push(tip);
-  const trunk = new THREE.CylinderGeometry(0.4, 0.75, 6, detailed ? 12 : 6, 1, !detailed).toNonIndexed();
+  const trunk = new THREE.CylinderGeometry(0.4, 0.75, 6, detailed ? 8 : 5, 1, true).toNonIndexed();
   trunk.translate(0, -6.5, 0);
   paint(trunk, BARK);
   parts.push(trunk);
@@ -391,60 +407,90 @@ function paint(g: THREE.BufferGeometry, col: THREE.Color): void {
   g.setAttribute("color", new THREE.BufferAttribute(a, 3));
 }
 
-/** Tree material with a slow sway in the wind (more toward the crown). */
-export function makeTreeMaterial(time: { value: number }, wind: { value: number }): THREE.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0, side: THREE.DoubleSide });
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = time;
-    shader.uniforms.uWind = wind;
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nuniform float uTime;\nuniform float uWind;")
-      .replace(
-        "#include <begin_vertex>",
-        `#include <begin_vertex>
-        {
-          #ifdef USE_INSTANCING
-          vec3 ip = instanceMatrix[3].xyz;
-          #else
-          vec3 ip = vec3(0.0);
-          #endif
-          float bend = max(0.0, transformed.y + 6.0) / 16.0;
-          float ph = uTime * 1.3 + ip.x * 0.013 + ip.z * 0.017;
-          float sway = (sin(ph) * 0.6 + sin(ph * 2.7 + 1.3) * 0.25) * bend * bend * (0.25 + uWind * 0.9);
-          transformed.x += sway;
-          transformed.z += sway * 0.6;
-        }`,
-      );
+/**
+ * Shared by every tree mesh: wind, and where the drawn forest is. Trees fade
+ * out toward the edge of the drawn area (`uCentre`, `uFadeR`, world x/z) and
+ * thin out smoothly as the view zooms out (`uStride`, eased each frame), so
+ * the forest never pops when it is re-laid around a new view.
+ */
+export type TreeUniforms = {
+  uTime: { value: number };
+  uWind: { value: number };
+  uCentre: { value: THREE.Vector2 };
+  uFadeR: { value: number };
+  uStride: { value: number };
+};
+
+export function makeTreeUniforms(): TreeUniforms {
+  return {
+    uTime: { value: 0 },
+    uWind: { value: 0.5 },
+    uCentre: { value: new THREE.Vector2(0, 0) },
+    uFadeR: { value: 1e9 },
+    uStride: { value: 1 },
   };
+}
+
+/** How big the sparse stand-in trees are drawn at a given stride. */
+export function treeGrow(stride: number): number {
+  return 1 + Math.log2(Math.max(1, stride)) * 0.55;
+}
+
+const TREE_VERTEX_DECL = /* glsl */ `
+uniform float uTime;
+uniform float uWind;
+uniform vec2 uCentre;
+uniform float uFadeR;
+uniform float uStride;
+attribute float aLevel;
+`;
+
+const TREE_VERTEX_BODY = /* glsl */ `
+{
+  #ifdef USE_INSTANCING
+  vec3 ip = instanceMatrix[3].xyz;
+  #else
+  vec3 ip = vec3(0.0);
+  #endif
+  float bend = max(0.0, transformed.y + 6.0) / 16.0;
+  float ph = uTime * 1.3 + ip.x * 0.013 + ip.z * 0.017;
+  float sway = (sin(ph) * 0.6 + sin(ph * 2.7 + 1.3) * 0.25) * bend * bend * (0.25 + uWind * 0.9);
+  transformed.x += sway;
+  transformed.z += sway * 0.6;
+  // Fade (shrink) out toward the edge of the drawn forest, raggedly.
+  float lkH = fract(sin(dot(ip.xz, vec2(12.9898, 78.233))) * 43758.5453);
+  float lkD = distance(ip.xz, uCentre) * (0.86 + 0.28 * lkH);
+  float lkF = 1.0 - smoothstep(uFadeR * 0.6, uFadeR, lkD);
+  // Thin out as you zoom out: trees only kept at a finer stride shrink away.
+  lkF *= clamp(log2(max(aLevel, 1.0)) - log2(uStride) + 1.0, 0.0, 1.0);
+  // Don't let a tree fill the lens when the camera is down among them.
+  // (In the shadow pass cameraPosition is the light, far away, so shadows stay.)
+  lkF *= smoothstep(5.0, 24.0, distance(ip, cameraPosition));
+  // The ones left stand in for more, so they grow a little.
+  lkF *= 1.0 + log2(uStride) * 0.55;
+  transformed = (transformed - vec3(0.0, -8.0, 0.0)) * lkF + vec3(0.0, -8.0, 0.0);
+}
+`;
+
+function treeShader(shader: THREE.WebGLProgramParametersWithUniforms, u: TreeUniforms): void {
+  Object.assign(shader.uniforms, u);
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\n" + TREE_VERTEX_DECL)
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\n" + TREE_VERTEX_BODY);
+}
+
+/** Tree material with a slow sway in the wind (more toward the crown). */
+export function makeTreeMaterial(u: TreeUniforms): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0, side: THREE.DoubleSide });
+  mat.onBeforeCompile = (shader) => treeShader(shader, u);
   mat.customProgramCacheKey = () => "skilandia-tree";
   return mat;
 }
 
-/** Shadow pass for the trees, swaying the same way so shadows match. */
-export function makeTreeDepthMaterial(time: { value: number }, wind: { value: number }): THREE.MeshDepthMaterial {
+/** Shadow pass for the trees, swaying and fading the same way so shadows match. */
+export function makeTreeDepthMaterial(u: TreeUniforms): THREE.MeshDepthMaterial {
   const mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = time;
-    shader.uniforms.uWind = wind;
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nuniform float uTime;\nuniform float uWind;")
-      .replace(
-        "#include <begin_vertex>",
-        `#include <begin_vertex>
-        {
-          #ifdef USE_INSTANCING
-          vec3 ip = instanceMatrix[3].xyz;
-          #else
-          vec3 ip = vec3(0.0);
-          #endif
-          float bend = max(0.0, transformed.y + 6.0) / 16.0;
-          float ph = uTime * 1.3 + ip.x * 0.013 + ip.z * 0.017;
-          float sway = (sin(ph) * 0.6 + sin(ph * 2.7 + 1.3) * 0.25) * bend * bend * (0.25 + uWind * 0.9);
-          transformed.x += sway;
-          transformed.z += sway * 0.6;
-        }`,
-      );
-  };
+  mat.onBeforeCompile = (shader) => treeShader(shader, u);
   mat.customProgramCacheKey = () => "skilandia-tree-depth";
   return mat;
 }

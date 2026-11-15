@@ -2,12 +2,13 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { HEIGHT_CELL_M, elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
-import { PostFx, SkyUniforms, TerrainUniforms, gableRoof, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial, rbox } from "./look";
+import { PostFx, SkyUniforms, TerrainUniforms, TreeUniforms, gableRoof, makeChalet, makeLogCabin, makeSkyDome, makeTerrainMaterial, makeTreeUniforms, rbox, treeGrow } from "./look";
+import { Forest } from "./forest";
 import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { PATH_MAX_GRADE, PATH_WIDTH, Path } from "./paths";
 import { Game } from "./sim";
-import { SUMMITS, classifyGrade, forestDensity } from "./sim";
+import { MAX_TREE_STRIDE, SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
   BuildingType,
   DIFF,
@@ -139,10 +140,11 @@ export class World3D {
   private loadedId: MountainId | null = null;
   private featureGroup = new THREE.Group();
   private peakGroup = new THREE.Group();
-  /** Detailed spruces close in; a lighter model when zoomed out over a wide area. */
-  private treesHi!: THREE.InstancedMesh;
-  private treesLo!: THREE.InstancedMesh;
-  private boulders = makeBoulders(BOULDERS_DRAWN);
+  /** Where the drawn forest is, wind, and how sparse it is; shared by every tree and boulder. */
+  private treeU = makeTreeUniforms();
+  /** Instanced spruces around the view, in culled chunks: detailed close in, light farther out. */
+  private forest = new Forest(this.treeU);
+  private boulders = makeBoulders(BOULDERS_DRAWN, this.treeU);
   private brushRing = makeBrushRing();
   private lastTreeLayout = 0;
   private terrainSeen = 0;
@@ -193,8 +195,6 @@ export class World3D {
   private post: PostFx;
   private sky: { mesh: THREE.Mesh; uniforms: SkyUniforms };
   private terrainUniforms: TerrainUniforms = { uDetail: { value: 1 }, uRock: { value: new THREE.Color("#6d655e") } };
-  private treeTime = { value: 0 };
-  private treeWind = { value: 0.5 };
   private frameT = performance.now();
 
   constructor(canvas: HTMLCanvasElement) {
@@ -203,7 +203,7 @@ export class World3D {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
     this.renderer.setSize(innerWidth, innerHeight, false);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoftShadowMap is gone in this three.js; this is what it fell back to
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -221,9 +221,8 @@ export class World3D {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.06;
     this.controls.maxPolarAngle = Math.PI * 0.46;
-    this.controls.minDistance = 70;
-    this.controls.maxDistance = 30000;
     this.controls.minDistance = 40;
+    this.controls.maxDistance = MAX_ZOOM;
     this.controls.mouseButtons.LEFT = -1 as unknown as THREE.MOUSE;
     this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
     this.controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
@@ -233,9 +232,7 @@ export class World3D {
     this.addLights();
     this.addGround();
     this.loadMountain(0);
-    this.treesHi = this.makeEmptyTrees(true);
-    this.treesLo = this.makeEmptyTrees(false);
-    this.scene.add(this.treesHi, this.treesLo, this.boulders, this.brushRing);
+    this.scene.add(this.forest.group, this.boulders, this.brushRing);
     this.scene.add(this.roadGroup, this.pathGroup, this.cars.group);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
@@ -323,12 +320,77 @@ export class World3D {
     return this.slopeView;
   }
 
-  /** The sun (and its shadow box) follows what you're looking at. */
+  /**
+   * The sun (and its shadow box) follows what you're looking at, and the box
+   * grows as you zoom out so shadows don't end in a hard square mid-screen.
+   * Its size snaps to a few steps so the shadow map isn't re-fitted every frame.
+   */
   private aimSun(_id: MountainId): void {
     const t = this.controls.target;
-    this.sun.target.position.copy(t);
-    this.sun.position.copy(t).addScaledVector(this.sunDir, 2400);
+    const dist = this.camera.position.distanceTo(t);
+    const half = Math.min(SHADOW_HALF_MAX, SHADOW_HALF * 2 ** Math.max(0, Math.ceil(Math.log2(Math.max(1, dist * 1.1) / SHADOW_HALF))));
+    const sc = this.sun.shadow.camera;
+    if (sc.right !== half) {
+      sc.left = sc.bottom = -half;
+      sc.right = sc.top = half;
+      // Far enough back to catch the tallest peaks between the sun and the view.
+      sc.near = 10;
+      sc.far = half * 2 + 6000;
+      sc.updateProjectionMatrix();
+      this.sun.shadow.normalBias = 1.2 * (half / SHADOW_HALF);
+    }
+    // Snap the box to whole shadow-map texels so shadow edges don't crawl as you pan.
+    const texel = (half * 2) / this.sun.shadow.mapSize.x;
+    this.sun.target.position.set(Math.round(t.x / texel) * texel, t.y, Math.round(t.z / texel) * texel);
+    this.sun.position.copy(this.sun.target.position).addScaledVector(this.sunDir, half + 3000);
     this.sun.target.updateMatrixWorld();
+  }
+
+  /** Ground height (world y) under a world x/z, or 0 off the edge of the map. */
+  private groundY(x: number, z: number): number {
+    const m = from3(this.tmpV.set(x, 0, z), this.mid);
+    if (m.x < -50 || m.y < -50 || m.x > WORLD_W + 50 || m.y > WORLD_H + 50) return 0;
+    return onGround(m.x, m.y, 0, this.mid).y;
+  }
+
+  /**
+   * Never let the camera (or what it orbits) go into the mountain: from inside
+   * it you'd see the back of the terrain, and the view goes dark or empty.
+   * The camera stays a little above the ground, more when zoomed out.
+   */
+  private keepAboveGround(): void {
+    const cam = this.camera.position;
+    const t = this.controls.target;
+    const gt = this.groundY(t.x, t.z);
+    if (t.y < gt) t.y = gt;
+    const dist = cam.distanceTo(t);
+    const clear = Math.max(8, dist * 0.05);
+    // The near plane spans a few metres around the lens: check around it too.
+    let g = this.groundY(cam.x, cam.z);
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * Math.PI * 2;
+      g = Math.max(g, this.groundY(cam.x + Math.cos(a) * 6, cam.z + Math.sin(a) * 6));
+    }
+    if (cam.y < g + clear) cam.y = g + clear;
+  }
+
+  /**
+   * Near and far planes follow the zoom: close in, the near plane comes in so
+   * nothing in front of the lens gets clipped; zoomed out, it moves out for
+   * depth precision (no flickering roads and runs) and the far plane moves
+   * out so distant ridges and the backdrop range don't get cut off.
+   */
+  private fitDepthRange(): void {
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const near = THREE.MathUtils.clamp(dist * 0.02, 1, 300);
+    const far = 70000 + dist * 1.5;
+    if (Math.abs(near - this.camera.near) > this.camera.near * 0.05 || Math.abs(far - this.camera.far) > 500) {
+      this.camera.near = near;
+      this.camera.far = far;
+      this.camera.updateProjectionMatrix();
+    }
+    // The sky dome sits just inside the far plane, centred on the camera.
+    this.sky.mesh.scale.setScalar(this.camera.far * 0.9);
   }
 
   /** Fly the camera to look at a map position. */
@@ -469,8 +531,11 @@ export class World3D {
     } else {
       this.flyKeys(dt);
       this.controls.update();
+      this.keepAboveGround();
       this.aimSun(this.mid);
     }
+    this.fitDepthRange();
+    this.updateTerrainLod();
     // Steepness tint is always on while drawing a run or placing a surface lift.
     const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
@@ -480,7 +545,8 @@ export class World3D {
     this.syncPaths(game);
     this.syncBrush(game);
     this.syncCars(game);
-    this.syncTrees(game);
+    this.syncTrees(game, dt);
+    this.forest.update(this.camera);
     this.syncLift(game);
     this.syncHeli(game, dt);
     this.syncSkiers(game);
@@ -495,15 +561,15 @@ export class World3D {
     const now = performance.now();
     const dt = Math.min(0.1, (now - this.frameT) / 1000);
     this.frameT = now;
-    this.treeTime.value = (this.treeTime.value + dt) % 10000;
-    const ft = this.treeTime.value;
+    this.treeU.uTime.value = (this.treeU.uTime.value + dt) % 10000;
+    const ft = this.treeU.uTime.value;
     for (const f of this.flames) {
       const ph = f.userData.flame as number;
       const k = 1 + Math.sin(ft * 9 + ph) * 0.16 + Math.sin(ft * 23.7 + ph * 2.1) * 0.09;
       f.scale.set(1 + Math.sin(ft * 13 + ph) * 0.07, k, 1 + Math.cos(ft * 11 + ph) * 0.07);
       f.rotation.y = ft * 1.7 + ph;
     }
-    this.treeWind.value = this.weather.wind;
+    this.treeU.uWind.value = this.weather.wind;
     this.sky.mesh.position.copy(this.camera.position);
     this.post.render(dt);
   }
@@ -584,41 +650,24 @@ export class World3D {
     const group = new THREE.Group();
     group.userData = { kind: "terrain", mountain: id };
     const mat = makeTerrainMaterial(this.terrainUniforms);
+    this.terrainTiles = [];
     const tile = TERRAIN_TILE;
     for (let tj = 0; tj < wy; tj += tile) {
       for (let ti = 0; ti < wx; ti += tile) {
         const cw = Math.min(tile, wx - ti);
         const ch = Math.min(tile, wy - tj);
-        const m = (cw + 1) * (ch + 1);
-        const tp = new Float32Array(m * 3);
-        const tn = new Float32Array(m * 3);
-        const tnat = new Float32Array(m * 3);
-        const tov = new Float32Array(m * 3);
-        let q = 0;
-        for (let j = 0; j <= ch; j++) {
-          for (let i = 0; i <= cw; i++, q++) shadeTerrainVertex(ti + i, tj + j, wx, wy, id, tp, tn, tnat, tov, q);
+        // The same tile at three levels of detail; updateTerrainLod shows one by distance.
+        const lods: THREE.Mesh[] = [];
+        for (const step of TERRAIN_LOD_STEPS) {
+          const mesh = new THREE.Mesh(makeTerrainTile({ ti, tj, cw, ch, wx, wy, step }, id), mat);
+          mesh.receiveShadow = true;
+          mesh.castShadow = true;
+          mesh.visible = step === 1;
+          mesh.userData = { kind: "terrain", mountain: id, tile: mesh.geometry.userData.tile };
+          group.add(mesh);
+          lods.push(mesh);
         }
-        const idx: number[] = [];
-        for (let j = 0; j < ch; j++) {
-          for (let i = 0; i < cw; i++) {
-            const a = j * (cw + 1) + i;
-            idx.push(a, a + cw + 1, a + 1, a + 1, a + cw + 1, a + cw + 2);
-          }
-        }
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.BufferAttribute(tp, 3));
-        geo.setAttribute("normal", new THREE.BufferAttribute(tn, 3));
-        const naturalAttr = new THREE.Float32BufferAttribute(tnat, 3);
-        const overlayAttr = new THREE.Float32BufferAttribute(tov, 3);
-        geo.userData = { natural: naturalAttr, overlay: overlayAttr };
-        geo.setAttribute("color", naturalAttr);
-        geo.setIndex(idx);
-        geo.computeBoundingSphere();
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.receiveShadow = true;
-        mesh.castShadow = true;
-        mesh.userData = { kind: "terrain", mountain: id, tile: { ti, tj, cw, ch, wx, wy } };
-        group.add(mesh);
+        this.terrainTiles.push({ lods, level: 0, sphere: lods[0].geometry.boundingSphere!.clone() });
       }
     }
     group.add(makeSkirt(id));
@@ -643,25 +692,30 @@ export class World3D {
     const j0 = Math.floor(box.j0 * scale) - 2;
     const j1 = Math.ceil(box.j1 * scale) + 2;
     for (const mesh of this.terrain.children) {
-      const t = mesh.userData.tile as { ti: number; tj: number; cw: number; ch: number; wx: number; wy: number } | undefined;
+      const t = mesh.userData.tile as TerrainTile | undefined;
       if (!t || !(mesh instanceof THREE.Mesh)) continue;
       if (t.ti > i1 || t.ti + t.cw < i0 || t.tj > j1 || t.tj + t.ch < j0) continue;
-      const geo = mesh.geometry;
-      const pos = geo.getAttribute("position") as THREE.BufferAttribute;
-      const nor = geo.getAttribute("normal") as THREE.BufferAttribute;
-      const nat = geo.userData.natural as THREE.BufferAttribute;
-      const ov = geo.userData.overlay as THREE.BufferAttribute;
-      for (let j = Math.max(t.tj, j0); j <= Math.min(t.tj + t.ch, j1); j++) {
-        for (let i = Math.max(t.ti, i0); i <= Math.min(t.ti + t.cw, i1); i++) {
-          const q = (j - t.tj) * (t.cw + 1) + (i - t.ti);
-          shadeTerrainVertex(i, j, t.wx, t.wy, this.mid, pos.array as Float32Array, nor.array as Float32Array, nat.array as Float32Array, ov.array as Float32Array, q);
-        }
-      }
-      pos.needsUpdate = true;
-      nor.needsUpdate = true;
-      nat.needsUpdate = true;
-      ov.needsUpdate = true;
-      geo.computeBoundingSphere();
+      shadeTerrainTile(mesh.geometry, this.mid, i0, i1, j0, j1);
+    }
+    for (const tile of this.terrainTiles) tile.sphere.copy(tile.lods[0].geometry.boundingSphere!);
+  }
+
+  /**
+   * Each terrain tile shows its detailed mesh up close and coarser ones far
+   * away, where the 14 m triangles would be smaller than a pixel anyway. Skirts
+   * on every tile hide the seams where neighbours differ in detail.
+   */
+  private terrainTiles: { lods: THREE.Mesh[]; level: number; sphere: THREE.Sphere }[] = [];
+
+  private updateTerrainLod(): void {
+    const cam = this.camera.position;
+    for (const t of this.terrainTiles) {
+      const d = Math.max(0, t.sphere.center.distanceTo(cam) - t.sphere.radius);
+      let level = 0;
+      while (level < TERRAIN_LOD_DIST.length && d > TERRAIN_LOD_DIST[level] * (level < t.level ? 0.9 : 1)) level++;
+      if (level === t.level && t.lods[level].visible) continue;
+      t.level = level;
+      t.lods.forEach((m, k) => (m.visible = k === level));
     }
   }
 
@@ -696,18 +750,6 @@ export class World3D {
       this.redrapeBox = r ? { i0: Math.min(r.i0, box.i0), i1: Math.max(r.i1, box.i1), j0: Math.min(r.j0, box.j0), j1: Math.max(r.j1, box.j1) } : box;
     }
     if (!this.redrapeAt) this.redrapeAt = performance.now() + 250;
-  }
-
-  private makeEmptyTrees(detailed: boolean): THREE.InstancedMesh {
-    const geo = makeSpruceGeometry(detailed);
-    const mat = makeTreeMaterial(this.treeTime, this.treeWind);
-    const mesh = new THREE.InstancedMesh(geo, mat, TREES_DRAWN);
-    mesh.customDepthMaterial = makeTreeDepthMaterial(this.treeTime, this.treeWind);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.count = 0;
-    return mesh;
   }
 
   /**
@@ -748,7 +790,11 @@ export class World3D {
     const horizon = HORIZON_CLEAR.clone().lerp(HORIZON_LOW, low * 0.6).lerp(SKY_OVERCAST, cover * 0.8).lerp(SKY_SNOW, snow * 0.7);
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(horizon).lerp(FOG_TINT, snow * 0.4);
-    fog.density = FOG_DENSITY * (1 + cover * 0.4) + snow * 0.00011;
+    // Zoomed out, thin the haze so the whole valley shows; it still closes in to
+    // nothing just before the far plane, so nothing is ever visibly cut off there.
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const zoomHaze = THREE.MathUtils.clamp(9000 / Math.max(1, dist), 0.42, 1);
+    fog.density = Math.max(2.6 / this.camera.far, FOG_DENSITY * zoomHaze * (1 + cover * 0.4) + snow * 0.00011);
     const su = this.sky.uniforms;
     su.uSunDir.value.copy(this.sunDir);
     su.uZenith.value.copy(ZENITH_CLEAR).lerp(SKY_OVERCAST, cover * 0.85).lerp(SKY_SNOW, snow * 0.7);
@@ -922,35 +968,68 @@ export class World3D {
     }
   }
 
-  /** Trees are only drawn near where you're looking; farther out the ground is tinted. */
+  /**
+   * Trees are only drawn near where you're looking; farther out the ground is
+   * tinted. The forest is laid out around a centre (map coords) with a radius
+   * and a sparseness stride; what the shader shows (fade radius, stride) eases
+   * toward the view, so zooming and panning thin or grow the forest smoothly
+   * instead of popping it. A zoom step first shrinks away what the next layout
+   * won't have, then lays out and grows in what's new.
+   */
   private treeCentre = { x: -1e9, y: -1e9 };
   private treeVersion = -1;
-  private treeRadius = TREE_RADIUS;
+  private treeLayout = { r: 0, s: 1 };
+  private treeShown = { r: TREE_RADIUS, s: 1 };
+  private treeLevel = 0;
 
-  /**
-   * The drawn forest follows what you're looking at: centred a little past the
-   * look point (where most of the screen is), wider when zoomed out, where it
-   * samples a sparser grid of bigger trees so the count stays bounded.
-   */
-  private syncTrees(game: Game): void {
+  private syncTrees(game: Game, dt: number): void {
     const cam = this.camera.position;
     const tgt = this.controls.target;
     const dist = cam.distanceTo(tgt);
-    // Snap the radius to a few levels so it doesn't relayout every frame.
-    const want = TREE_RADIUS * Math.pow(1.6, Math.round(Math.log(Math.max(1, dist / 1400)) / Math.log(1.6)));
-    const radius = Math.min(TREE_RADIUS_MAX, Math.max(TREE_RADIUS, want));
+    // Zoom level, with hysteresis so hovering at a boundary doesn't flip back and forth.
+    const lk = Math.log2(Math.max(1, dist / TREE_ZOOM_BASE));
+    if (Math.abs(lk - this.treeLevel) > 0.65) this.treeLevel = Math.max(0, Math.min(TREE_LEVELS, Math.round(lk)));
+    const ts = 2 ** this.treeLevel;
+    const tr = TREE_RADIUS * ts;
     const ahead = this.tmpV.subVectors(tgt, cam).setY(0);
     const len = ahead.length();
-    if (len > 1) ahead.multiplyScalar(Math.min(radius * 0.35, len * 0.4) / len);
+    if (len > 1) ahead.multiplyScalar(Math.min(tr * 0.3, len * 0.4) / len);
     const g = from3(new THREE.Vector3(tgt.x + ahead.x, tgt.y, tgt.z + ahead.z), this.mid);
-    const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > radius * 0.3;
-    if (!moved && radius === this.treeRadius && this.treeVersion === game.forestVersion) return;
+    const wc = to3(g.x, g.y, 0, this.mid);
+    this.treeU.uCentre.value.set(wc.x, wc.z);
+
+    const L = this.treeLayout;
+    const shown = this.treeShown;
+    if (L.r === 0) {
+      shown.r = tr;
+      shown.s = ts;
+    } else {
+      // Ease (in log space) toward the view, but never past what the layout holds.
+      const wantR = Math.min(tr, L.r / TREE_LAYOUT_PAD);
+      const wantS = Math.max(ts, L.s);
+      const k = 1 - Math.exp(-dt * 5);
+      shown.r *= Math.pow(wantR / shown.r, k);
+      shown.s *= Math.pow(wantS / shown.s, k);
+      if (Math.abs(shown.r / wantR - 1) < 0.01) shown.r = wantR;
+      if (Math.abs(shown.s / wantS - 1) < 0.01) shown.s = wantS;
+    }
+    this.treeU.uFadeR.value = shown.r;
+    this.treeU.uStride.value = shown.s;
+
+    const drift = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y);
+    const zoomReady = (ts !== L.s || tr * TREE_LAYOUT_PAD !== L.r) && shown.s >= ts * 0.99 && shown.r <= tr * 1.01;
+    const drifted = drift > Math.max(60, (L.r - shown.r) * 0.75);
+    const edited = this.treeVersion !== game.forestVersion;
+    if (!zoomReady && !drifted && !edited && L.r > 0) return;
     // While you drag the tree brush, redraw the forest a few times a second, not every stamp.
     const now = performance.now();
-    if (!moved && radius === this.treeRadius && now - this.lastTreeLayout < 140) return;
+    if (!zoomReady && !drifted && now - this.lastTreeLayout < 140) return;
     this.lastTreeLayout = now;
+    if (zoomReady || L.r === 0) {
+      L.r = tr * TREE_LAYOUT_PAD;
+      L.s = ts;
+    }
     this.treeCentre = g;
-    this.treeRadius = radius;
     this.treeVersion = game.forestVersion;
     this.layoutTrees(game);
   }
@@ -958,44 +1037,29 @@ export class World3D {
   private layoutTrees(game: Game): void {
     const dummy = this.tmp;
     const col = new THREE.Color();
-    let n = 0;
     const c = this.treeCentre;
-    const r = this.treeRadius;
-    const stride = Math.max(1, Math.round(r / TREE_RADIUS));
+    const { r, s: stride } = this.treeLayout;
     const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r, true, stride);
-    // Sparser samples stand in for more trees, so draw them a bit bigger.
-    const grow = 1 + (stride - 1) * 0.45;
-    const trees = stride > 1 ? this.treesLo : this.treesHi;
-    const other = stride > 1 ? this.treesHi : this.treesLo;
-    other.count = 0;
+    this.forest.begin(TREE_CHUNK * stride);
+    let n = 0;
     for (const t of list) {
       if (n >= TREES_DRAWN) break;
       const d = Math.hypot(t.x - c.x, t.y - c.y);
       if (d > r) continue;
-      // Thin the trees out toward the edge so the drawn forest blends into the tinted ground.
-      if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.7, r, d)) continue;
-      const sc = (0.7 + noise2(t.x, t.y) * 0.9) * grow;
+      const sc = 0.7 + noise2(t.x, t.y) * 0.9;
       // Some tall and narrow, some squat and broad.
       const tall = 0.85 + noise2(t.y * 0.53, t.x * 0.41) * 0.4;
       dummy.position.copy(to3(t.x, t.y, 8 * sc * tall, this.mid));
       dummy.scale.set(sc / Math.sqrt(tall), sc * tall, sc / Math.sqrt(tall));
       dummy.rotation.set(0, t.x * 0.1, 0);
       dummy.updateMatrix();
-      trees.setMatrixAt(n, dummy.matrix);
       const v = noise2(t.x * 0.7, t.y * 0.7);
       // Mostly spruce green; some bluer firs, some yellower pines.
       col.setRGB(0.82 + v * 0.22, 0.86 + v * 0.18 - (v > 0.7 ? 0.06 : 0), 0.8 + (1 - v) * 0.2);
-      trees.setColorAt(n, col);
-      n++;
+      if (this.forest.add(dummy.position, dummy.matrix, col, t.level ?? 1)) n++;
     }
-    trees.count = n;
+    this.forest.end();
     this.layoutBoulders(c, r, stride);
-    trees.instanceMatrix.needsUpdate = true;
-    if (trees.instanceColor) trees.instanceColor.needsUpdate = true;
-    // Bounds are cached from the first layout; refresh them or trees on the
-    // other mountains get frustum-culled.
-    trees.computeBoundingSphere();
-    trees.computeBoundingBox();
   }
 
   /** The tree brush outline, draped on the ground under the pointer. */
@@ -1072,8 +1136,10 @@ export class World3D {
   private layoutBoulders(c: { x: number; y: number }, r: number, stride: number): void {
     const dummy = this.tmp;
     const col = new THREE.Color();
+    // Boulders sit on a 17 m grid; a sparser view keeps every 2nd, 4th... point,
+    // so zooming out thins the same boulders instead of reshuffling them.
     const step = 17 * stride;
-    const grow = 1 + (stride - 1) * 0.5;
+    const levels = this.boulders.geometry.getAttribute("aLevel") as THREE.InstancedBufferAttribute;
     let n = 0;
     for (let y = Math.floor((c.y - r) / step) * step; y <= c.y + r && n < BOULDERS_DRAWN; y += step) {
       for (let x = Math.floor((c.x - r) / step) * step; x <= c.x + r && n < BOULDERS_DRAWN; x += step) {
@@ -1087,7 +1153,7 @@ export class World3D {
         // Bigger lumps toward the heart of an outcrop, rubble at its edge.
         // A few big crags among the rubble.
         const crag = noise2(jx * 0.05 + 9, jy * 0.05) > 0.62 ? 1.9 : 1;
-        const size = (2 + Math.pow(h, 2) * 9 + (rock - 0.5) * 12) * crag * grow;
+        const size = (2 + Math.pow(h, 2) * 9 + (rock - 0.5) * 12) * crag;
         dummy.position.copy(onGround(jx, jy, size * 0.2, this.mid));
         dummy.scale.set(size * (0.8 + h * 0.6), size * (0.45 + noise2(jx, jy) * 0.5), size * (0.8 + (1 - h) * 0.5));
         dummy.rotation.set((h - 0.5) * 0.5, jx * 0.37 + jy * 0.11, (noise2(jy, jx) - 0.5) * 0.4);
@@ -1096,13 +1162,21 @@ export class World3D {
         const v = noise2(jx * 0.9, jy * 0.9);
         col.setHSL(0.07 + v * 0.04, 0.05 + v * 0.05, 0.27 + v * 0.14);
         this.boulders.setColorAt(n, col);
+        const gi = Math.round(x / 17);
+        const gj = Math.round(y / 17);
+        let level = 1;
+        while (level < MAX_TREE_STRIDE && gi % (level * 2) === 0 && gj % (level * 2) === 0) level *= 2;
+        levels.setX(n, level);
         n++;
       }
     }
     this.boulders.count = n;
     this.boulders.instanceMatrix.needsUpdate = true;
+    levels.needsUpdate = true;
     if (this.boulders.instanceColor) this.boulders.instanceColor.needsUpdate = true;
     this.boulders.computeBoundingSphere();
+    // Room for the most a sparse boulder grows in the shader.
+    if (this.boulders.boundingSphere) this.boulders.boundingSphere.radius += 40 * treeGrow(MAX_TREE_STRIDE);
   }
 
   private layoutTrails(game: Game): void {
@@ -2790,10 +2864,18 @@ function makeHelicopter(): THREE.Group {
   return g;
 }
 
-/** How far around the view trees are drawn, and the most drawn at once. */
-const TREE_RADIUS = 1300;
-const TREE_RADIUS_MAX = 5300;
-const TREES_DRAWN = 60000;
+/**
+ * How far around the view trees are drawn when zoomed in; each zoom level
+ * (camera distance doubling from TREE_ZOOM_BASE) doubles the radius and halves
+ * the density, so the count stays about the same. The layout reaches a bit
+ * past the fade radius so the view can drift before it's re-laid.
+ */
+const TREE_RADIUS = 1250;
+const TREE_ZOOM_BASE = 1500;
+const TREE_LEVELS = 4;
+const TREE_LAYOUT_PAD = 1.3;
+const TREE_CHUNK = 512;
+const TREES_DRAWN = 70000;
 
 /** Peak names stay readable from anywhere on the map (fixed on-screen size). */
 function makePeakLabel(text: string, done: boolean): THREE.Sprite {
@@ -2845,6 +2927,11 @@ const ZENITH_CLEAR = new THREE.Color("#3f78b8");
 const HORIZON_CLEAR = new THREE.Color("#d6e2ea");
 const HORIZON_LOW = new THREE.Color("#f0d6b8");
 const FOG_DENSITY = 0.000042;
+/** Farthest the camera can pull back from what it looks at. */
+const MAX_ZOOM = 34000;
+/** Shadow box half-width close in, and the most it grows to when zoomed out. */
+const SHADOW_HALF = 1500;
+const SHADOW_HALF_MAX = 12000;
 const EXPOSURE = 0.95;
 
 /** Post-processing runs at up to 1.5x so high-DPI screens stay smooth. */
@@ -3008,7 +3095,7 @@ function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
 const BOULDERS_DRAWN = 16000;
 
 /** Faceted rocks: a subdivided icosahedron, flat shaded, coloured per instance. */
-function makeBoulders(max: number): THREE.InstancedMesh {
+function makeBoulders(max: number, u: TreeUniforms): THREE.InstancedMesh {
   const geo = new THREE.IcosahedronGeometry(1, 2);
   // Break the regular facets so each boulder reads as a chunk of mountain.
   const pos = geo.getAttribute("position") as THREE.BufferAttribute;
@@ -3020,11 +3107,37 @@ function makeBoulders(max: number): THREE.InstancedMesh {
     pos.setXYZ(i, x * n, y * (0.7 + noise2(y * 4.2, x * 2.1) * 0.55), z * n);
   }
   geo.computeVertexNormals();
-  const mesh = new THREE.InstancedMesh(
-    geo,
-    new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.95, flatShading: true }),
-    max,
-  );
+  geo.setAttribute("aLevel", new THREE.InstancedBufferAttribute(new Float32Array(max).fill(1), 1).setUsage(THREE.DynamicDrawUsage));
+  const mat = new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.95, flatShading: true });
+  const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  // Fade with the forest at the edge of the drawn area, and thin out the same way when zooming out.
+  for (const m of [mat, depth]) {
+    m.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, { uCentre: u.uCentre, uFadeR: u.uFadeR, uStride: u.uStride });
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nuniform vec2 uCentre;\nuniform float uFadeR;\nuniform float uStride;\nattribute float aLevel;")
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          {
+            #ifdef USE_INSTANCING
+            vec3 ip = instanceMatrix[3].xyz;
+            #else
+            vec3 ip = vec3(0.0);
+            #endif
+            float h = fract(sin(dot(ip.xz, vec2(12.9898, 78.233))) * 43758.5453);
+            float f = 1.0 - smoothstep(uFadeR * 0.6, uFadeR, distance(ip.xz, uCentre) * (0.86 + 0.28 * h));
+            f *= clamp(log2(max(aLevel, 1.0)) - log2(uStride) + 1.0, 0.0, 1.0);
+            f *= 1.0 + log2(uStride) * 0.5;
+            transformed = (transformed - vec3(0.0, -0.3, 0.0)) * f + vec3(0.0, -0.3, 0.0);
+          }`,
+        );
+    };
+    m.customProgramCacheKey = () => "skilandia-boulder";
+  }
+  depth.customProgramCacheKey = () => "skilandia-boulder-depth";
+  const mesh = new THREE.InstancedMesh(geo, mat, max);
+  mesh.customDepthMaterial = depth;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -3187,6 +3300,108 @@ const T_ROCK = new THREE.Color("#5f5b58");
 const T_ROCK_DARK = new THREE.Color("#433f3d");
 const T_FOREST = new THREE.Color("#2c4636");
 const T_TMP = new THREE.Color();
+
+/** Detail levels for terrain tiles: vertex spacing in mesh cells, and the camera distance each one ends at. */
+const TERRAIN_LOD_STEPS = [1, 2, 4];
+const TERRAIN_LOD_DIST = [5000, 12000];
+/** Coarser levels sit slightly lower, so runs and roads draped on the detailed ground never sink into them. */
+const TERRAIN_LOD_DROP = [0, 2.5, 5];
+
+type TerrainTile = { ti: number; tj: number; cw: number; ch: number; wx: number; wy: number; step: number };
+
+/** Vertex offsets along one side of a tile at a given spacing, always ending on the tile edge. */
+function tileOffsets(n: number, step: number): number[] {
+  const out: number[] = [];
+  for (let k = 0; k < n; k += step) out.push(k);
+  out.push(n);
+  return out;
+}
+
+/**
+ * One terrain tile at one level of detail, with a skirt hanging from its
+ * edges so a coarser neighbour never leaves a gap to the sky.
+ */
+function makeTerrainTile(t: TerrainTile, id: MountainId): THREE.BufferGeometry {
+  const oi = tileOffsets(t.cw, t.step);
+  const oj = tileOffsets(t.ch, t.step);
+  const ni = oi.length;
+  const nj = oj.length;
+  // Edge vertices, in order around the tile, each gets a twin lower down.
+  const edge: number[] = [];
+  for (let a = 0; a < ni; a++) edge.push(a);
+  for (let b = 1; b < nj; b++) edge.push(b * ni + ni - 1);
+  for (let a = ni - 2; a >= 0; a--) edge.push((nj - 1) * ni + a);
+  for (let b = nj - 2; b >= 0; b--) edge.push(b * ni);
+  const grid = ni * nj;
+  const m = grid + edge.length;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(m * 3), 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(m * 3), 3));
+  const naturalAttr = new THREE.Float32BufferAttribute(new Float32Array(m * 3), 3);
+  const overlayAttr = new THREE.Float32BufferAttribute(new Float32Array(m * 3), 3);
+  geo.setAttribute("color", naturalAttr);
+  geo.userData = { natural: naturalAttr, overlay: overlayAttr, tile: t, oi, oj, edge };
+  const idx: number[] = [];
+  for (let b = 0; b < nj - 1; b++) {
+    for (let a = 0; a < ni - 1; a++) {
+      const q = b * ni + a;
+      idx.push(q, q + ni, q + 1, q + 1, q + ni, q + ni + 1);
+    }
+  }
+  for (let k = 0; k < edge.length - 1; k++) {
+    const p = edge[k];
+    const n = edge[k + 1];
+    const ps = grid + k;
+    const ns = grid + k + 1;
+    // Both windings: the skirt is seen from whichever side the gap is on.
+    idx.push(p, ps, n, n, ps, ns, p, n, ps, n, ns, ps);
+  }
+  geo.setIndex(idx);
+  shadeTerrainTile(geo, id, -Infinity, Infinity, -Infinity, Infinity);
+  return geo;
+}
+
+/** (Re)compute a tile's vertices that fall in mesh cells i0..i1, j0..j1, then its skirt. */
+function shadeTerrainTile(geo: THREE.BufferGeometry, id: MountainId, i0: number, i1: number, j0: number, j1: number): void {
+  const { tile: t, oi, oj, edge } = geo.userData as { tile: TerrainTile; oi: number[]; oj: number[]; edge: number[] };
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  const nor = geo.getAttribute("normal") as THREE.BufferAttribute;
+  const nat = geo.userData.natural as THREE.BufferAttribute;
+  const ov = geo.userData.overlay as THREE.BufferAttribute;
+  const P = pos.array as Float32Array;
+  const N = nor.array as Float32Array;
+  const C = nat.array as Float32Array;
+  const O = ov.array as Float32Array;
+  const level = TERRAIN_LOD_STEPS.indexOf(t.step);
+  const drop = TERRAIN_LOD_DROP[Math.max(0, level)];
+  const ni = oi.length;
+  for (let b = 0; b < oj.length; b++) {
+    const j = t.tj + oj[b];
+    if (j < j0 || j > j1) continue;
+    for (let a = 0; a < ni; a++) {
+      const i = t.ti + oi[a];
+      if (i < i0 || i > i1) continue;
+      const q = b * ni + a;
+      shadeTerrainVertex(i, j, t.wx, t.wy, id, P, N, C, O, q);
+      P[q * 3 + 1] -= drop;
+    }
+  }
+  const grid = ni * oj.length;
+  const depth = 12 + t.step * 10;
+  for (let k = 0; k < edge.length; k++) {
+    const src = edge[k] * 3;
+    const dst = (grid + k) * 3;
+    for (let c = 0; c < 3; c++) {
+      P[dst + c] = P[src + c];
+      N[dst + c] = N[src + c];
+      C[dst + c] = C[src + c];
+      O[dst + c] = O[src + c];
+    }
+    P[dst + 1] -= depth;
+  }
+  pos.needsUpdate = nor.needsUpdate = nat.needsUpdate = ov.needsUpdate = true;
+  geo.computeBoundingSphere();
+}
 
 /**
  * One terrain vertex: position, normal (from the heightfield, so tiles don't
