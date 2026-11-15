@@ -10,6 +10,7 @@ import {
   Difficulty,
   Feature,
   FeatureType,
+  HELI,
   MAP_SCALE,
   TRAIL_KIND_SPEC,
   INCOME_PER_MIN,
@@ -75,6 +76,8 @@ export class World3D {
   private pickProxies: THREE.Mesh[] = [];
   private featureGroup = new THREE.Group();
   private trees: THREE.InstancedMesh;
+  private helicopter = makeHelicopter();
+  private rotorSpin = 0;
   private mid: MountainId = 0;
   private trailGroup = new THREE.Group();
   private buildingGroup = new THREE.Group();
@@ -146,6 +149,8 @@ export class World3D {
     this.snow = this.makeSnow();
     this.scene.add(this.snow);
     this.scene.add(this.liftPreview);
+    this.helicopter.visible = false;
+    this.scene.add(this.helicopter);
     for (let i = 0; i < 80; i++) {
       const s = makeSkierMesh("#c45c4a");
       s.visible = false;
@@ -328,6 +333,7 @@ export class World3D {
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
     this.syncLift(game);
+    this.syncHeli(game, dt);
     this.syncSkiers(game);
     this.syncDraft(game);
     this.syncLiftPreview(game);
@@ -618,7 +624,7 @@ export class World3D {
       const mesh = makeBuildingMesh(b.type, false);
       mesh.position.copy(to3(b.x, b.y, 0, this.mid));
       mesh.userData = { kind: "building", id: b.id };
-      const tag = makeRateSprite(`$${INCOME_PER_MIN[b.type]}/min`);
+      const tag = makeRateSprite(b.type === "heli" ? `$${HELI.fare}/seat` : `$${INCOME_PER_MIN[b.type]}/min`);
       tag.position.y = b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" ? 20 : 14;
       mesh.add(tag);
       if (game.selected?.kind === "building" && game.selected.id === b.id) {
@@ -654,6 +660,38 @@ export class World3D {
         if (vis.down[i]) placeCarrier(vis, vis.down[i], 1 - t, -1);
       }
     }
+  }
+
+  /** Helicopter sits on the pad; on a drop it climbs away over the ridge and comes back. */
+  private syncHeli(game: Game, dt: number): void {
+    const pad = game.helipad();
+    const h = this.helicopter;
+    if (!pad) {
+      h.visible = false;
+      return;
+    }
+    const base = to3(pad.x, pad.y, 1.2, this.mid);
+    const away = base.clone().add(new THREE.Vector3(0, 520 * K, WORLD_H * 1.1));
+    let pos = base;
+    let spin = game.heli.wait > 0 ? 8 : 0;
+    h.visible = true;
+    if (game.heli.flying) {
+      const u = game.heli.t / HELI.tripTime;
+      spin = 30;
+      const ease = (x: number) => x * x * (3 - 2 * x);
+      if (u < 0.25) pos = base.clone().lerp(away, ease(u / 0.25));
+      else if (u > 0.75) pos = away.clone().lerp(base, ease((u - 0.75) / 0.25));
+      else {
+        pos = away;
+        h.visible = false; // off the map, in the backcountry
+      }
+      const dir = u < 0.5 ? away.clone().sub(base) : base.clone().sub(away);
+      h.rotation.y = Math.atan2(dir.x, dir.z);
+    }
+    h.position.copy(pos);
+    this.rotorSpin += spin * dt * (game.paused ? 0 : 1);
+    const rotor = h.getObjectByName("rotor");
+    if (rotor) rotor.rotation.y = this.rotorSpin;
   }
 
   private syncLiftPreview(game: Game): void {
@@ -837,7 +875,7 @@ function makeTrailRibbon(t: Trail, glow: boolean, mid: MountainId): THREE.Mesh {
   const diffColor = new THREE.Color(DIFF[t.difficulty].color);
   // Park runs get the orange edges parks are signed with.
   const edge = t.kind === "park" ? new THREE.Color("#f0892a") : t.difficulty >= 2 ? new THREE.Color("#23262b") : diffColor;
-  const centre = new THREE.Color(t.kind === "moguls" ? "#e9eef3" : "#fbfdff");
+  const centre = new THREE.Color(t.kind === "moguls" ? "#e9eef3" : t.kind === "glades" ? "#dfe8ee" : "#fbfdff");
   const width = TRAIL_KIND_SPEC[t.kind].width;
   const geo = buildRibbon(t.points, mid, width, 0.7, () => [edge, centre], t.kind === "park" ? 0.1 : 0.2);
   const mat = new THREE.MeshStandardMaterial({
@@ -848,10 +886,14 @@ function makeTrailRibbon(t: Trail, glow: boolean, mid: MountainId): THREE.Mesh {
     polygonOffset: true,
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
+    // Glades aren't groomed: just a faint corridor through the trees.
+    transparent: t.kind === "glades",
+    opacity: t.kind === "glades" ? (glow ? 0.6 : 0.3) : 1,
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.userData = { kind: "trail", id: t.id };
+  if (t.kind === "glades") mesh.add(makeBoundaryPoles(mid, width, geo.userData.samples));
 
   if (t.kind === "moguls") mesh.add(makeMoguls(t, mid, width, geo.userData.samples));
   if (t.kind === "slalom") mesh.add(makeGates(mid, width, geo.userData.samples));
@@ -1072,6 +1114,7 @@ function makeRateSprite(text: string): THREE.Sprite {
 }
 
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
+  if (type === "heli") return makeHelipad(ghost);
   const g = new THREE.Group();
   const palette: Record<BuildingType, { body: string; roof: string; w: number; d: number; h: number }> = {
     lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
@@ -1085,6 +1128,7 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     condo: { body: "#d7dde4", roof: "#2c3d4f", w: 24, d: 18, h: 16 },
     patrol: { body: "#dfe7ee", roof: "#c45c4a", w: 12, d: 10, h: 7 },
     school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
+    heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
   };
   const p = palette[type];
   const bodyMat = new THREE.MeshStandardMaterial({ color: p.body, roughness: 0.8 });
@@ -1606,4 +1650,108 @@ function placeFeature(obj: THREE.Object3D, f: Pick<Feature, "x" | "y" | "angle" 
   obj.rotation.order = "YXZ";
   obj.rotation.y = Math.atan2(dx, dy);
   obj.rotation.x = -Math.atan2(front.y - back.y, half * 2);
+}
+
+/** Bamboo boundary poles with orange tips along both edges of a glade. */
+function makeBoundaryPoles(mid: MountainId, width: number, samples: { x: number; y: number; along: number }[]): THREE.Group {
+  const g = new THREE.Group();
+  const pole = new THREE.CylinderGeometry(0.15, 0.15, 5, 5);
+  const tip = new THREE.CylinderGeometry(0.17, 0.17, 1, 5);
+  const poleMat = std("#d9c27a", { metalness: 0 });
+  const tipMat = std("#f0892a", { metalness: 0 });
+  let next = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const p = samples[i];
+    if (p.along < next) continue;
+    next += 22;
+    const prev = samples[i - 1];
+    let dx = p.x - prev.x;
+    let dy = p.y - prev.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    for (const side of [-0.5, 0.5]) {
+      const o = side * width;
+      const base = to3(p.x - dy * o, p.y + dx * o, 2.5, mid);
+      const m = new THREE.Mesh(pole, poleMat);
+      m.position.copy(base);
+      g.add(m);
+      const t = new THREE.Mesh(tip, tipMat);
+      t.position.copy(base).add(new THREE.Vector3(0, 3, 0));
+      g.add(t);
+    }
+  }
+  return g;
+}
+
+/** Concrete pad with a painted H, a windsock and a small hangar. */
+function makeHelipad(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 0.6, 28), std("#8e959c", { metalness: 0 }));
+  pad.position.y = 0.3;
+  pad.receiveShadow = true;
+  g.add(pad);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(12, 0.5, 4, 32), std("#f2c94c"));
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.65;
+  g.add(ring);
+  const paint = std("#ffffff", { metalness: 0 });
+  for (const x of [-3, 3]) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 9), paint);
+    bar.position.set(x, 0.7, 0);
+    g.add(bar);
+  }
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(6, 0.2, 1.2), paint);
+  cross.position.set(0, 0.7, 0);
+  g.add(cross);
+  const hangar = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 12), std("#c9cdd2", { metalness: 0.3 }));
+  hangar.position.set(26, 4, 0);
+  hangar.castShadow = !ghost;
+  g.add(hangar);
+  const roof = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 14, 16, 1, false, 0, Math.PI), std("#3a434d", { side: THREE.DoubleSide }));
+  roof.rotation.z = Math.PI / 2;
+  roof.position.set(26, 8, 0);
+  g.add(roof);
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 7, 5), std("#55606b"));
+  mast.position.set(-18, 3.5, -10);
+  const sock = new THREE.Mesh(new THREE.ConeGeometry(0.7, 3, 8, 1, true), std("#f0892a", { side: THREE.DoubleSide }));
+  sock.rotation.z = Math.PI / 2;
+  sock.position.set(-16.5, 6.6, -10);
+  g.add(mast, sock);
+  g.userData = { kind: "building" };
+  return g;
+}
+
+function makeHelicopter(): THREE.Group {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(2.6, 14, 10), std("#c8332b"));
+  body.scale.set(1, 0.85, 1.5);
+  body.position.y = 2.6;
+  body.castShadow = true;
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(1.9, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), std("#2b4d6b", { roughness: 0.1, metalness: 0.5 }));
+  glass.rotation.x = Math.PI / 2.4;
+  glass.position.set(0, 3, 2.4);
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 7, 8), std("#c8332b"));
+  boom.rotation.x = Math.PI / 2;
+  boom.position.set(0, 3.2, -6.5);
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.2, 1.2), std("#e6e9ec"));
+  fin.position.set(0, 4, -9.8);
+  const skid = std("#3a3f45");
+  for (const x of [-1.6, 1.6]) {
+    const s = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 6), skid);
+    s.position.set(x, 0.2, 0);
+    g.add(s);
+  }
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.2, 6), skid);
+  mast.position.y = 5.2;
+  const rotor = new THREE.Group();
+  rotor.name = "rotor";
+  for (const a of [0, Math.PI / 2]) {
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(14, 0.12, 0.5), skid);
+    blade.rotation.y = a;
+    rotor.add(blade);
+  }
+  rotor.position.y = 5.8;
+  g.add(body, glass, boom, fin, mast, rotor);
+  return g;
 }

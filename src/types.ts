@@ -11,9 +11,10 @@ export type BuildingType =
   | "shop"
   | "condo"
   | "patrol"
-  | "school";
+  | "school"
+  | "heli";
 export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
-export type TrailKind = "slope" | "slalom" | "moguls" | "park";
+export type TrailKind = "slope" | "slalom" | "moguls" | "park" | "glades";
 export type FeatureType = "jump" | "rail" | "box" | "halfpipe";
 export type Tool =
   | "select"
@@ -33,7 +34,9 @@ export type SkierState =
   | "toTrail"
   | "skiing"
   | "visit"
-  | "leaving";
+  | "leaving"
+  | "heliWait"
+  | "heli";
 
 export interface Vec2 {
   x: number;
@@ -100,6 +103,8 @@ export interface Skier {
   /** Seconds of airtime left after hitting a jump or feature. */
   air: number;
   lesson: boolean;
+  /** Already flown a heli-ski trip today. */
+  heliDone: boolean;
   dist: number;
   wait: number;
   runsLeft: number;
@@ -187,6 +192,7 @@ export const COSTS: Record<BuildingType, number> = {
   condo: 9500,
   patrol: 1600,
   school: 3800,
+  heli: 45000,
 };
 
 /** Dollars per minute at a busy hill, 1× speed. */
@@ -202,6 +208,7 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   condo: 200,
   hotel: 220,
   school: 150,
+  heli: 0,
 };
 
 export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
@@ -219,6 +226,7 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   condo: 3,
   patrol: 2,
   school: 1,
+  heli: 1,
 };
 
 export const EXPANSION_BUILDINGS: BuildingType[] = ["hotel", "restaurant", "shop", "condo", "patrol"];
@@ -265,6 +273,7 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   condo: "Condo",
   patrol: "Ski patrol hut",
   school: "Ski school",
+  heli: "Heli-ski base",
 };
 
 /** Height in world units of one unit of elevation, as drawn (true classifier scale × 1.3). */
@@ -394,7 +403,7 @@ export function liftCost(type: LiftType, length: number): number {
 
 export const MAX_LIFTS = 6;
 
-export const TRAIL_KINDS: TrailKind[] = ["slope", "slalom", "moguls", "park"];
+export const TRAIL_KINDS: TrailKind[] = ["slope", "slalom", "moguls", "park", "glades"];
 
 export const TRAIL_KIND_SPEC: Record<
   TrailKind,
@@ -404,12 +413,20 @@ export const TRAIL_KIND_SPEC: Record<
   slalom: { label: "Slalom course", blurb: "Gates down the run. Racers love it.", costMul: 1.3, speedMul: 0.9, width: 10, diffBump: 0 },
   moguls: { label: "Mogul run", blurb: "Left ungroomed. Bumps rate it one notch harder.", costMul: 1.15, speedMul: 0.72, width: 10, diffBump: 1 },
   park: { label: "Terrain park", blurb: "Wide run for jumps, rails, boxes and a halfpipe.", costMul: 1.5, speedMul: 0.85, width: 18, diffBump: 0 },
+  glades: {
+    label: "Glades",
+    blurb: "Draw it through the forest: trees are thinned, not cleared. Tree skiing rates one notch harder.",
+    costMul: 0.7,
+    speedMul: 0.65,
+    width: 26,
+    diffBump: 1,
+  },
 };
 
 export const FEATURE_TYPES: FeatureType[] = ["jump", "rail", "box", "halfpipe"];
 
 export const FEATURE_SPEC: Record<FeatureType, { label: string; cost: number; parkOnly: boolean; blurb: string }> = {
-  jump: { label: "Jump", cost: 300, parkOnly: false, blurb: "A kicker. Goes on any run, or anywhere on the hill." },
+  jump: { label: "Jump", cost: 300, parkOnly: false, blurb: "A kicker. Goes on any run — slope, park, glades, anything." },
   rail: { label: "Rail", cost: 450, parkOnly: true, blurb: "Grind rail. Terrain parks only." },
   box: { label: "Box", cost: 350, parkOnly: true, blurb: "Wide fun-box. Terrain parks only." },
   halfpipe: { label: "Halfpipe", cost: 2400, parkOnly: true, blurb: "A big pipe. Terrain parks only." },
@@ -417,3 +434,19 @@ export const FEATURE_SPEC: Record<FeatureType, { label: string; cost: number; pa
 
 /** Fee to move a building, as a share of its price. */
 export const MOVE_FEE = 0.25;
+
+/** Running costs per minute (fuel, pilots, insurance), charged whether busy or not. */
+export const OPERATING_COST_PER_MIN: Partial<Record<BuildingType, number>> = {
+  heli: 180,
+};
+
+/** Heli-skiing: seats per flight, fare per seat, fuel per flight, minutes are game seconds. */
+export const HELI = {
+  seats: 4,
+  fare: 340,
+  fuelPerFlight: 140,
+  /** Seconds the drop-and-ski trip lasts (out of sight, off the map). */
+  tripTime: 34,
+  /** Seconds the pilot waits for a full load before going with fewer. */
+  maxWait: 10,
+};

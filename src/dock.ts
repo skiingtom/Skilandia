@@ -46,7 +46,7 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
   { id: "base", label: "Base", items: ["lodge", "restroom", "school", "patrol"] },
   { id: "food", label: "Food", items: ["shack", "coffee", "sandwich", "restaurant"] },
-  { id: "resort", label: "Resort", items: ["shop", "condo", "hotel"] },
+  { id: "resort", label: "Resort", items: ["shop", "condo", "hotel", "heli"] },
 ];
 
 export function groupOf(tool: Tool): string | null {

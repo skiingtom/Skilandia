@@ -6,6 +6,8 @@ import {
   BUILDING_LABEL,
   BUILDING_MAX,
   FEATURE_SPEC,
+  HELI,
+  OPERATING_COST_PER_MIN,
   TRAIL_KIND_SPEC,
   BuildingType,
   COSTS,
@@ -19,6 +21,11 @@ import {
   Tool,
   UNIT_M,
 } from "./types";
+import "@fontsource/nunito/500.css";
+import "@fontsource/nunito/700.css";
+import "@fontsource/nunito/800.css";
+import "@fontsource/fraunces/600.css";
+import "@fontsource/fraunces/700.css";
 import "./style.css";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
@@ -149,7 +156,8 @@ function paintHud(force = false): void {
   if (!game.buildings.length) {
     shopRate.textContent = `Shacks $${INCOME_PER_MIN.shack}/min · coffee $${INCOME_PER_MIN.coffee} · hotel $${INCOME_PER_MIN.hotel}. Sugar shacks go beside trails.`;
   } else {
-    const wages = game.staffRequired() ? ` Wages today $${Math.round(game.wagesToday)}.` : "";
+    const upkeep = game.upkeepPerMin() ? ` Running costs today $${Math.round(game.upkeepToday)}.` : "";
+    const wages = (game.staffRequired() || game.staff.instructor ? ` Wages today $${Math.round(game.wagesToday)}.` : "") + upkeep;
     shopRate.textContent = `About $${game.shopRatePerMin()}/min here. Take today $${Math.round(game.shopIncomeToday)}.${wages}`;
   }
   const expand = game.expansionUnlocked();
@@ -485,6 +493,9 @@ window.addEventListener("keydown", (e) => {
 });
 
 function moneyLine(type: keyof typeof COSTS): string {
+  if (type === "heli") {
+    return `$${COSTS.heli.toLocaleString()} · $${HELI.fare}/seat · upkeep $${OPERATING_COST_PER_MIN.heli}/min`;
+  }
   return `$${COSTS[type].toLocaleString()} · earns $${INCOME_PER_MIN[type]}/min`;
 }
 

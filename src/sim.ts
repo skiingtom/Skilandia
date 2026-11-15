@@ -9,6 +9,8 @@ import {
   EXPANSION_BUILDINGS,
   FEATURE_SPEC,
   Feature,
+  HELI,
+  OPERATING_COST_PER_MIN,
   FeatureType,
   INCOME_PER_MIN,
   MAP_SCALE,
@@ -140,6 +142,11 @@ export class Game {
   moveId: number | null = null;
   /** Settings: charge a fee to move buildings. */
   moveFeeOn = true;
+  /** The heli-ski helicopter: on the pad loading, or away on a drop. */
+  heli: { flying: boolean; t: number; riders: number[]; wait: number } = { flying: false, t: 0, riders: [], wait: 0 };
+  heliFlightsToday = 0;
+  heliTakeToday = 0;
+  upkeepToday = 0;
   fx: Fx[] = [];
   toasts: Toast[] = [];
   draft: Vec2[] = [];
@@ -233,10 +240,19 @@ export class Game {
     this.clearTrees();
   }
 
-  /** Remove trees from runs, lift lines, buildings and park features. */
+  /**
+   * Remove trees from runs, lift lines, buildings and park features.
+   * Glades are thinned, not cleared: about half the trees stay standing
+   * (decided per tree, so repeated calls don't keep thinning).
+   */
   private clearTrees(): void {
     this.trees = this.trees.filter((t) => {
-      if (this.trails.some((tr) => distToTrail(tr, t.x, t.y) < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9)) return false;
+      for (const tr of this.trails) {
+        const d = distToTrail(tr, t.x, t.y);
+        if (tr.kind === "glades") {
+          if (d < TRAIL_KIND_SPEC.glades.width / 2 && (d < 2.5 || treeHash(t.x, t.y) < 0.5)) return false;
+        } else if (d < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9) return false;
+      }
       if (this.nearLift(t.x, t.y, 16)) return false;
       if (this.buildings.some((b) => Math.hypot(b.x - t.x, b.y - t.y) < 22)) return false;
       if (this.features.some((f) => Math.hypot(f.x - t.x, f.y - t.y) < (f.type === "halfpipe" ? 40 : 12))) return false;
@@ -290,6 +306,7 @@ export class Game {
     if (this.has("condo")) n += 0.14;
     if (this.has("patrol")) n += 0.08;
     if (this.has("school")) n += 0.12;
+    if (this.has("heli")) n += 0.15;
     return Math.min(1.5, n);
   }
 
@@ -528,6 +545,7 @@ export class Game {
     if (spec.parkOnly && (!spot.trail || spot.trail.kind !== "park")) {
       return `${spec.label}s go inside a terrain park. Cut a park run first.`;
     }
+    if (!spot.trail) return "Put jumps on a run — skiers only ski designated trails.";
     const gap = type === "halfpipe" ? 70 : 16;
     if (this.features.some((f) => Math.hypot(f.x - x, f.y - y) < (f.type === "halfpipe" ? 70 : gap))) {
       return "Too close to another feature.";
@@ -554,11 +572,7 @@ export class Game {
     this.features.push({ id: this.id(), type, x, y, angle: spot.angle, trailId: spot.trail?.id ?? null });
     this.clearTrees();
     this.float(x, y, `-${spec.cost}`, "#d9785f");
-    this.toast(
-      spot.trail
-        ? `${spec.label} built on ${spot.trail.name}.`
-        : `${spec.label} built off-piste. Put it on a run so skiers hit it.`,
-    );
+    this.toast(`${spec.label} built on ${spot.trail?.name ?? "the hill"}.`);
     return "ok";
   }
 
@@ -752,7 +766,7 @@ export class Game {
     if (!anywhere && !midMountain && !this.villageOk(x, y)) return "Build down in the base village.";
     if (midMountain && !anywhere && y < 170 * K) return "Put this on the mountain, not in the village.";
     if (x < 12 || x > WORLD_W - 12 || y < 24 || y > WORLD_H - 12) return "That's off the property.";
-    const minGap = type === "shack" ? 22 : 38;
+    const minGap = type === "shack" ? 22 : type === "heli" ? 60 : 38;
     if (others.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
@@ -844,7 +858,15 @@ export class Game {
         condo: "Sold as lodging. Big checks, village only.",
         patrol: "Barely earns. After the starter hill you also need hired patrol.",
         school: `Lessons for beginners. Needs instructors: ${this.staff.instructor} hired.`,
+        heli: "",
       };
+      if (b.type === "heli") {
+        const waiting = this.skiers.filter((k) => k.state === "heliWait").length;
+        return {
+          title: BUILDING_LABEL.heli,
+          body: `Flies ${HELI.seats} experts at a time into the backcountry for $${HELI.fare} a seat. Fuel $${HELI.fuelPerFlight} a flight, upkeep $${OPERATING_COST_PER_MIN.heli}/min. ${this.heli.flying ? "Helicopter is out on a drop." : `${waiting} waiting on the pad.`} Today: ${this.heliFlightsToday} flights, $${Math.round(this.heliTakeToday).toLocaleString()} in fares. Moving it costs ${this.moveFee(b) ? `$${this.moveFee(b).toLocaleString()}` : "nothing"}.`,
+        };
+      }
       return {
         title: BUILDING_LABEL[b.type],
         body: `Earns $${INCOME_PER_MIN[b.type]}/min when the hill is busy. ${extra[b.type]} Moving it costs ${this.moveFee(b) ? `$${this.moveFee(b).toLocaleString()}` : "nothing"}.`,
@@ -904,6 +926,14 @@ export class Game {
       this.toast("That run is too short to groom.", true);
       return "shake";
     }
+    if (kind === "glades") {
+      const probe = { points: this.draft } as Trail;
+      const inside = this.trees.filter((t) => distToTrail(probe, t.x, t.y) < TRAIL_KIND_SPEC.glades.width / 2).length;
+      if (inside < info.length / 12) {
+        this.toast("Glades need forest. Draw this one through the trees.", true);
+        return "shake";
+      }
+    }
     if (this.money < info.cost) {
       this.toast(`Need $${(info.cost - this.money).toLocaleString()} more to cut this.`, true);
       return "shake";
@@ -929,6 +959,7 @@ export class Game {
       slalom: ["Slalom", "Gates", "Race Course"],
       moguls: ["Bumps", "Moguls", "Washboard"],
       park: ["Park", "Terrain Park", "Jib Park"],
+      glades: ["Glades", "Trees", "Woods"],
     };
     for (let i = 0; i < 40; i++) {
       const name = `${pick(TRAIL_PREFIX)} ${pick(suffix[kind])}`;
@@ -956,7 +987,11 @@ export class Game {
     if (type === "lodge") {
       this.toast(`Lodge is open. Earns $${INCOME_PER_MIN.lodge}/min and unlocks ticket prices.`);
     } else {
-      this.toast(`${BUILDING_LABEL[type]} is open. Earns $${INCOME_PER_MIN[type]}/min.`);
+      this.toast(
+        type === "heli"
+          ? `Heli-ski base is open. Experts pay $${HELI.fare} a seat; it costs $${OPERATING_COST_PER_MIN.heli}/min to run.`
+          : `${BUILDING_LABEL[type]} is open. Earns $${INCOME_PER_MIN[type]}/min.`,
+      );
     }
     return "ok";
   }
@@ -979,6 +1014,7 @@ export class Game {
       trailId: null,
       liftId: null,
       rideT: 0,
+      heliDone: false,
       likes: likes(),
       air: 0,
       lesson: false,
@@ -1012,6 +1048,9 @@ export class Game {
         this.incomeToday = 0;
         this.shopIncomeToday = 0;
         this.wagesToday = 0;
+        this.upkeepToday = 0;
+        this.heliFlightsToday = 0;
+        this.heliTakeToday = 0;
         this.toast(`Day ${this.day} on Little Hawk Hill.`);
       }
       this.spawnAcc += capped * (0.042 + this.attraction() * 0.14);
@@ -1022,8 +1061,10 @@ export class Game {
       this.collectBuildingIncome(capped);
       this.collectRemoteIncome(capped);
       this.payWages(capped);
+      this.payUpkeep(capped);
     }
     this.stepLift(capped);
+    this.stepHeli(capped);
     for (const s of this.skiers) this.stepSkier(s, capped);
     this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && s.y < 12 * K && s.wait <= 0));
     this.peakSkiers = Math.max(this.peakSkiers, this.skiers.length);
@@ -1095,6 +1136,87 @@ export class Game {
     if (type !== "school") return 1;
     const need = Math.max(1, this.staffNeeds().instructor);
     return Math.min(1, this.staff.instructor / need);
+  }
+
+  /** Running costs for buildings that have them, on every mountain you own. */
+  upkeepPerMin(): number {
+    let n = 0;
+    const all = [this.buildings, ...this.owned.filter((id) => id !== this.currentMountain).map((id) => this.snapshots[id]?.buildings ?? [])];
+    for (const list of all) for (const b of list) n += OPERATING_COST_PER_MIN[b.type] ?? 0;
+    return n;
+  }
+
+  private payUpkeep(dt: number): void {
+    const cost = (this.upkeepPerMin() / 60) * dt;
+    this.money -= cost;
+    this.upkeepToday += cost;
+  }
+
+  helipad(): Building | undefined {
+    return this.buildings.find((b) => b.type === "heli");
+  }
+
+  /** Load experts on the pad, fly them off the map, bring them back. */
+  private stepHeli(dt: number): void {
+    const pad = this.helipad();
+    const h = this.heli;
+    if (!pad) {
+      h.flying = false;
+      h.riders = [];
+      return;
+    }
+    if (h.flying) {
+      h.t += dt;
+      if (h.t >= HELI.tripTime) {
+        for (const id of h.riders) {
+          const s = this.skiers.find((k) => k.id === id);
+          if (!s) continue;
+          s.x = pad.x + (Math.random() - 0.5) * 16;
+          s.y = pad.y + (Math.random() - 0.5) * 16;
+          s.runsDone += 3;
+          s.runsLeft -= 1;
+          s.mood = Math.min(100, s.mood + 18);
+          s.bubble = pick(["Best day ever", "Deep powder!", "Worth every cent", "Untracked!"]);
+          s.bubbleT = 2.6;
+          if (s.runsLeft <= 0) s.state = "leaving";
+          else this.goToLift(s);
+        }
+        h.flying = false;
+        h.riders = [];
+        h.t = 0;
+        h.wait = 0;
+      }
+      return;
+    }
+    const ready = this.skiers.filter((s) => s.state === "heliWait" && Math.hypot(s.x - pad.x, s.y - pad.y) < 36);
+    if (!ready.length) {
+      h.wait = 0;
+      return;
+    }
+    h.wait += dt;
+    if (ready.length < HELI.seats && h.wait < HELI.maxWait) return;
+    const load = ready.slice(0, HELI.seats);
+    for (const s of load) {
+      s.state = "heli";
+      s.heliDone = true;
+      this.money += HELI.fare;
+      this.incomeToday += HELI.fare;
+      this.lifetimeEarned += HELI.fare;
+      this.heliTakeToday += HELI.fare;
+    }
+    this.money -= HELI.fuelPerFlight;
+    this.upkeepToday += HELI.fuelPerFlight;
+    this.heliFlightsToday += 1;
+    this.float(pad.x, pad.y, `+$${HELI.fare * load.length - HELI.fuelPerFlight} heli`);
+    this.sfx.push("cash");
+    h.flying = true;
+    h.t = 0;
+    h.riders = load.map((s) => s.id);
+  }
+
+  /** Experts sometimes book a heli drop instead of riding the lifts. */
+  private wantsHeli(s: Skier): boolean {
+    return s.skill >= 2 && !s.heliDone && !!this.helipad() && Math.random() < 0.4;
   }
 
   private payWages(dt: number): void {
@@ -1417,6 +1539,11 @@ export class Game {
   }
 
   private goToLift(s: Skier): void {
+    if (s.runsDone > 0 && this.wantsHeli(s) && Math.random() < 0.4) {
+      s.state = "heliWait";
+      s.wait = 0;
+      return;
+    }
     s.state = "toLift";
     s.liftId = null;
   }
@@ -1428,8 +1555,11 @@ export class Game {
     if (!options.length) return ranked[0] ?? null;
     const from = lift ? this.trailsFrom(lift) : [];
     const hikeOk = options.filter((t) => from.includes(t));
-    const pool = hikeOk.length ? hikeOk : options;
-    return pool[(Math.random() * Math.min(3, pool.length)) | 0];
+    if (hikeOk.length) return hikeOk[(Math.random() * Math.min(3, hikeOk.length)) | 0];
+    // Nothing served from this lift: take the closest trailhead rather than roam the mountain.
+    const at = lift ? lift.top : { x: s.x, y: s.y };
+    const pool = from.length ? from : this.trails;
+    return [...pool].sort((a, b) => Math.hypot(a.points[0].x - at.x, a.points[0].y - at.y) - Math.hypot(b.points[0].x - at.x, b.points[0].y - at.y))[0] ?? null;
   }
 
   private booth(): Vec2 {
@@ -1466,6 +1596,11 @@ export class Game {
         this.lifetimeEarned += this.ticketPrice;
         this.float(s.x, s.y, `+$${this.ticketPrice}`);
         this.sfx.push("cash");
+      }
+      if (this.wantsHeli(s)) {
+        s.state = "heliWait";
+        s.wait = 0;
+        return;
       }
       // New skiers sign up for a lesson when the school has instructors.
       if (s.skill === 0 && !s.lesson && this.has("school") && this.staff.instructor > 0 && Math.random() < 0.65) {
@@ -1534,6 +1669,8 @@ export class Game {
       this.walkToward(s, start.x, start.y, 50 * WALK * dt);
       if (Math.hypot(s.x - start.x, s.y - start.y) < 10) {
         s.state = "skiing";
+        s.x = start.x;
+        s.y = start.y;
         s.dist = 0;
         const mismatch = trail.difficulty - s.skill;
         if (mismatch > 1) s.mood -= 12;
@@ -1628,6 +1765,24 @@ export class Game {
       }
       return;
     }
+    if (s.state === "heliWait") {
+      const pad = this.helipad();
+      if (!pad) {
+        this.goToLift(s);
+        return;
+      }
+      const i = this.skiers.filter((k) => k.state === "heliWait").findIndex((k) => k.id === s.id);
+      this.walkToward(s, pad.x - 14 + (i % 4) * 6, pad.y - 18 - Math.floor(i / 4) * 6, 46 * WALK * dt);
+      s.wait += dt;
+      if (s.wait > 60) {
+        // Gave up waiting on the helicopter.
+        s.mood -= 10;
+        s.heliDone = true;
+        this.goToLift(s);
+      }
+      return;
+    }
+    if (s.state === "heli") return; // off the map, skiing the backcountry
     if (s.state === "leaving") {
       this.walkToward(s, (200 + (s.id % 7) * 30) * K, 10 * K, 48 * WALK * dt);
       s.wait = 0;
@@ -1755,4 +1910,10 @@ export function nearestOnTrail(t: Trail, x: number, y: number): { along: number;
     acc += len;
   }
   return best;
+}
+
+/** Stable 0..1 value per tree position. */
+function treeHash(x: number, y: number): number {
+  const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return n - Math.floor(n);
 }
