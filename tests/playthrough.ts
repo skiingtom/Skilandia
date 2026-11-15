@@ -381,6 +381,41 @@ ok(g.totalTickets > 100, "hardly anyone came");
   g.cancel();
 }
 
+// --- settings: free tree clearing and free shaping cost nothing (and still work)
+{
+  g.freeTreeClearing = true;
+  g.freeShaping = true;
+  let spot: Vec2 | null = null;
+  for (let a = 0; a < 36 && !spot; a++) {
+    const p = { x: BASE.x + Math.cos(a / 5.7) * 1500, y: BASE.y + Math.sin(a / 5.7) * 1500 };
+    if (g.treesUnderBrush(p.x, p.y) > 10) spot = p;
+  }
+  ok(!!spot, "no forest for the free-clearing test");
+  if (spot) {
+    const money = g.money;
+    g.setTool("clearTrees");
+    ok(g.click(spot.x, spot.y) === "ok" && g.treesUnderBrush(spot.x, spot.y) === 0, "free clearing didn't fell the trees");
+    g.endBrush();
+    g.setTool("shape");
+    g.setShapeMode("raise");
+    const h0 = elevationM(spot.x + 300, spot.y);
+    for (let i = 0; i < 20; i++) g.shapeStep(spot.x + 300, spot.y, 0.05);
+    g.endShape();
+    ok(elevationM(spot.x + 300, spot.y) > h0 + 1, "free shaping didn't move the ground");
+    ok(g.money === money, `free tools still charged $${(money - g.money).toFixed(2)}`);
+    // Free shaping works even when broke.
+    g.money = 0;
+    const h1 = elevationM(spot.x - 300, spot.y);
+    for (let i = 0; i < 20; i++) g.shapeStep(spot.x - 300, spot.y, 0.05);
+    g.endShape();
+    ok(elevationM(spot.x - 300, spot.y) > h1 + 1, "free shaping refused with no money");
+    g.money = money;
+  }
+  g.freeTreeClearing = false;
+  g.freeShaping = false;
+  g.cancel();
+}
+
 // --- conquer every remaining peak with a gondola from somewhere below it
 for (const p of SUMMITS) {
   if (g.conquered.has(p.id)) continue;

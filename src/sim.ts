@@ -181,6 +181,9 @@ export class Game {
   moveId: number | null = null;
   /** Settings: charge a fee to move buildings. */
   moveFeeOn = true;
+  /** Settings: clear trees and shape the ground at no cost. */
+  freeTreeClearing = false;
+  freeShaping = false;
   /** The heli-ski helicopter: on the pad loading, or away on a drop. */
   heli: { flying: boolean; t: number; riders: number[]; wait: number } = { flying: false, t: 0, riders: [], wait: 0 };
   heliFlightsToday = 0;
@@ -1242,14 +1245,14 @@ export class Game {
     if (this.shapeTarget === null) this.shapeTarget = elevationM(x, y);
     const amount = this.shapeMode === "raise" || this.shapeMode === "lower" ? SHAPE_RATE_M * dt : Math.min(1, 2.5 * dt);
     // Preview the cost with a dry run's worth of budget: stop when the money runs out.
-    if (this.money <= 0) {
+    if (!this.freeShaping && this.money <= 0) {
       if (!this.shapeBroke) this.toast("Out of money for earthworks.", true);
       this.shapeBroke = true;
       return;
     }
     const r = sculpt(x, y, this.shapeRadius, this.shapeMode, amount, this.shapeTarget, this.padLocked);
     if (r.volume <= 0) return;
-    const cost = r.volume * EARTH_COST_PER_M3;
+    const cost = this.freeShaping ? 0 : r.volume * EARTH_COST_PER_M3;
     this.money -= cost;
     this.shapeCost += cost;
     this.shapeVolume += r.volume;
@@ -1391,8 +1394,8 @@ export class Game {
     if (this.lastBrush && Math.hypot(this.lastBrush.x - x, this.lastBrush.y - y) < BRUSH_R * 0.45) return "none";
     const n = this.treesUnderBrush(x, y);
     if (!n) return "none";
-    const cost = n * TREE_FELL_COST;
-    if (this.money < cost) {
+    const cost = this.freeTreeClearing ? 0 : n * TREE_FELL_COST;
+    if (cost > 0 && this.money < cost) {
       this.toast(`Need $${(cost - this.money).toLocaleString()} more to clear these trees.`, true);
       return "shake";
     }

@@ -109,6 +109,8 @@ const moveBtn = document.querySelector<HTMLButtonElement>("#btn-move-building")!
 const settingsBtn = document.querySelector<HTMLButtonElement>("#btn-settings")!;
 const settingsEl = document.querySelector<HTMLElement>("#settings")!;
 const moveFeeOpt = document.querySelector<HTMLInputElement>("#opt-move-fee")!;
+const freeTreesOpt = document.querySelector<HTMLInputElement>("#opt-free-trees")!;
+const freeShapingOpt = document.querySelector<HTMLInputElement>("#opt-free-shaping")!;
 const dockEl = document.querySelector<HTMLElement>("#dock")!;
 const dockMenus = document.querySelector<HTMLElement>("#dock-menus")!;
 buildDock(dockEl, dockMenus);
@@ -233,7 +235,7 @@ function paintHud(force = false): void {
   shapeBanner.classList.toggle("hidden", game.tool !== "shape");
   shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-mode").forEach((b) => b.classList.toggle("on", b.dataset.mode === game.shapeMode));
   shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-size").forEach((b) => b.classList.toggle("on", Number(b.dataset.size) === game.shapeRadius));
-  shapeText.textContent = `${SHAPE_HELP[game.shapeMode]} Hold the left button and drag. $${EARTH_COST_PER_M3}/m³ of earth moved; building pads stay put.`;
+  shapeText.textContent = `${SHAPE_HELP[game.shapeMode]} Hold the left button and drag. ${game.freeShaping ? "Free (see Settings)" : `$${EARTH_COST_PER_M3}/m³ of earth moved`}; building pads stay put.`;
   cutBanner.classList.toggle("hidden", !drafting);
   cutText.textContent =
     game.tool === "road"
@@ -412,7 +414,8 @@ function loop(now: number): void {
     game.brushHover = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
     if (hudAcc === 0 || !brushHint) {
       const n = game.brushHover ? game.treesUnderBrush(game.brushHover.x, game.brushHover.y) : 0;
-      brushHint = n ? `Click or drag to clear ${n} trees · $${(n * TREE_FELL_COST).toLocaleString()}` : "Clear trees: click or drag over the forest.";
+      const price = game.freeTreeClearing ? "free" : `$${(n * TREE_FELL_COST).toLocaleString()}`;
+      brushHint = n ? `Click or drag to clear ${n} trees · ${price}` : "Clear trees: click or drag over the forest.";
     }
     placeHint.classList.remove("hidden");
     placeHint.classList.add("ok");
@@ -653,6 +656,16 @@ settingsBtn.addEventListener("click", () => {
   const open = settingsEl.classList.toggle("hidden") === false;
   settingsBtn.setAttribute("aria-expanded", String(open));
   settingsBtn.classList.toggle("on", open);
+});
+freeTreesOpt.addEventListener("change", () => {
+  game.freeTreeClearing = freeTreesOpt.checked;
+  game.toast(game.freeTreeClearing ? "Tree clearing is free." : `Tree clearing costs $${TREE_FELL_COST} a tree.`);
+  paintHud();
+});
+freeShapingOpt.addEventListener("change", () => {
+  game.freeShaping = freeShapingOpt.checked;
+  game.toast(game.freeShaping ? "Terrain shaping is free." : `Terrain shaping costs $${EARTH_COST_PER_M3} per m³ of earth moved.`);
+  paintHud();
 });
 moveFeeOpt.addEventListener("change", () => {
   game.moveFeeOn = moveFeeOpt.checked;

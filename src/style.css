@@ -1204,3 +1204,7 @@ body.welcome-open #hud > * {
     bottom: 196px;
   }
 }
+
+.settings .switch + .switch {
+  margin-top: 10px;
+}
