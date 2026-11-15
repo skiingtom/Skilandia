@@ -66,6 +66,8 @@ startBtn.addEventListener("click", (e) => {
 });
 
 world = new World3D(canvas);
+// Dev-only handle for poking at the game from the console.
+if ((import.meta as unknown as { env: { DEV: boolean } }).env.DEV) Object.assign(window, { skilandia: { game, world } });
 
 let last = performance.now();
 let pointer = { x: 0, y: 0, downX: 0, downY: 0, over: false, held: false };
