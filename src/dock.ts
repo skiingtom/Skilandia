@@ -68,7 +68,7 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "dining", label: "Dining", items: ["restaurant", "bar", "brewpub", "fondue", "sushi", "steakhouse", "summit"] },
   { id: "shops", label: "Shops", items: ["gifts", "skiShop", "grocery", "shop", "chocolate", "outfitter", "boutique"] },
   { id: "hotels", label: "Hotels", items: ["motel", "bnb", "hostel", "inn", "condo", "hotel", "boutiqueHotel", "grandHotel"] },
-  { id: "resort", label: "Resort", items: ["spa", "cabinOffice", "cabin", "heli"] },
+  { id: "resort", label: "Resort", items: ["lookout", "spa", "cabinOffice", "cabin", "heli"] },
   { id: "edit", label: "Edit", items: ["shape", "clearTrees", "plantTrees", "demolish"] },
 ];
 

@@ -108,7 +108,8 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 - **Dining**: restaurant, après bar, brewpub, fondue stübli, sushi bar, steakhouse, summit restaurant (on the mountain; needs a regional resort, 3 peaks)
 - **Shops**: gift shop, ski & board shop, village market, shop, chocolatier, outdoor outfitter, fashion boutique. Skiers finishing their day often browse the nearest shop on the way to the car
 - **Hotels**: motel, bed & breakfast, hostel, mountain inn, condo, hotel, boutique hotel (needs a regional resort, 3 peaks), grand hotel (needs a destination resort, 5 peaks)
-- **Resort**: spa, cabin rental office, ski-in cabins, heli-ski base
+- **Resort**: scenic lookout, spa, cabin rental office, ski-in cabins, heli-ski base
+- **Scenic lookout** ($1,800, up to 6): a timber deck with two fire pits, Adirondack chairs, a log bench, a picnic table and coin binoculars. Goes anywhere, village or mountain. About a third of the skiers getting off a lift within 350 m of one stop by once a day to warm up before their run, and the higher the lookout, the happier they leave
 - Each different kind of food, shop and hotel adds to the resort's appeal, which raises the fair ticket price and draws more skiers. Gift shops, ski shops, markets, motels, B&Bs and the quick-bite places are open from the start; the fancier ones (and hostels, spas, bars, hotels, condos, patrol) unlock after your first peak
 - **Ski school** sells lessons to beginners (some graduate to blues). It needs instructors, who are paid from day one
 - **Heli-ski base** ($450,000) flies expert skiers off the map to the backcountry, eight at a time, for $650 a seat. It costs $1,500/min to run plus $600 fuel a flight; a busy one clears about $7,700/min

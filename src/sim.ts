@@ -1814,6 +1814,17 @@ export class Game {
     return "ok";
   }
 
+  /** Off the lift: a lookout close by draws some people over for the view (once a day each). */
+  private maybeLookout(s: Skier): void {
+    if (s.sawView || !this.has("lookout")) return;
+    const spot = this.nearestOf(["lookout"], s.x, s.y);
+    if (!spot || Math.hypot(spot.x - s.x, spot.y - s.y) > LOOKOUT_REACH || Math.random() > 0.3) return;
+    s.sawView = true;
+    s.state = "visit";
+    s.visitType = "lookout";
+    s.wait = 0;
+  }
+
   /** Walk toward a spot, along the footpaths when that's the better way. */
   private walkTo(s: Skier, x: number, y: number, step: number, dt: number): void {
     if (!this.paths.length) {
@@ -2006,6 +2017,7 @@ export class Game {
           ? "Ski-in / ski-out: guests step out the door onto a run. Fully booked."
           : `No run within ${CABIN_REACH} m any more, so it rents for a fraction of the price. Cut a run past it.`,
         heli: "",
+        lookout: `Fire pits and benches with a view. ${this.skiers.filter((k) => k.visitType === "lookout").length} people up here now. Skiers stop by from lifts within ${LOOKOUT_REACH} m.`,
       };
       if (b.type === "heli") {
         const waiting = this.skiers.filter((k) => k.state === "heliWait").length;
@@ -2265,6 +2277,7 @@ export class Game {
         this.upkeepToday = 0;
         this.heliFlightsToday = 0;
         this.heliTakeToday = 0;
+        for (const k of this.skiers) k.sawView = false;
         this.toast(`Day ${this.day} in Skilandia.`);
       }
       const wNow = this.weather();
@@ -2593,6 +2606,7 @@ export class Game {
                 ? -lift.id
                 : this.chooseTrail(s, lift)?.id ?? null;
             s.dist = 0;
+            this.maybeLookout(s);
           }
           c.riders = [];
         }
@@ -2772,6 +2786,7 @@ export class Game {
       const c = lift?.carriers.find((k) => k.riders.includes(s.id));
       if (!lift || !c) {
         s.state = "toTrail";
+        this.maybeLookout(s);
         return;
       }
       const t = Math.min(c.t, 0.97);
@@ -2870,13 +2885,30 @@ export class Game {
     if (s.state === "visit") {
       const b = s.visitType ? this.nearestOf([s.visitType], s.x, s.y) : undefined;
       if (!b) {
-        this.goToLift(s);
+        if (s.visitType === "lookout") {
+          s.visitType = null;
+          s.state = "toTrail";
+        } else this.goToLift(s);
         return;
       }
       this.walkTo(s, b.x, b.y, 44 * WALK * dt, dt);
       if (Math.hypot(s.x - b.x, s.y - b.y) < 12) {
         s.wait += dt;
-        if (s.wait > (s.visitType === "school" ? 3 : 1.6)) {
+        if (s.wait > (s.visitType === "school" || s.visitType === "lookout" ? 3 : 1.6)) {
+          if (s.visitType === "lookout") {
+            // Warmed up by the fire pit and soaked in the view: the higher, the better.
+            const high = clamp((elevationM(b.x, b.y) - 1000) / 1500, 0, 1);
+            s.mood = Math.min(100, s.mood + 6 + high * 10);
+            s.needFood = Math.max(0, s.needFood - 0.1);
+            if (Math.random() < 0.35) {
+              s.bubble = pick(high > 0.5 ? ["What a view!", "You can see forever", "Top of the world"] : ["Nice fire!", "Toasty", "Pretty view"]);
+              s.bubbleT = 2.2;
+            }
+            s.wait = 0;
+            s.visitType = null;
+            s.state = "toTrail";
+            return;
+          }
           if (s.visitType === "school") {
             // A lesson: happier, and some beginners graduate to blues.
             const fee = 25;
@@ -3110,6 +3142,9 @@ export const TREE_PLANT_COST = 12;
 const PLANT_PER_STAMP = 9;
 const PLANT_GAP = 6;
 const PLANT_CELL = 64;
+
+/** How far from a lift's top station people will wander to a lookout. */
+export const LOOKOUT_REACH = 350;
 
 export type Reward = { id: number; kind: "goal" | "peak" | "win"; title: string; text: string; bonus: number };
 

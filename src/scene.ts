@@ -150,6 +150,8 @@ export class World3D {
   private redrapeBox: { i0: number; i1: number; j0: number; j1: number } | null = null;
   private helicopter = makeHelicopter();
   private rotorSpin = 0;
+  /** Fire-pit flames to flicker each frame. */
+  private flames: THREE.Object3D[] = [];
   private mid: MountainId = 0;
   private trailGroup = new THREE.Group();
   private roadGroup = new THREE.Group();
@@ -494,6 +496,13 @@ export class World3D {
     const dt = Math.min(0.1, (now - this.frameT) / 1000);
     this.frameT = now;
     this.treeTime.value = (this.treeTime.value + dt) % 10000;
+    const ft = this.treeTime.value;
+    for (const f of this.flames) {
+      const ph = f.userData.flame as number;
+      const k = 1 + Math.sin(ft * 9 + ph) * 0.16 + Math.sin(ft * 23.7 + ph * 2.1) * 0.09;
+      f.scale.set(1 + Math.sin(ft * 13 + ph) * 0.07, k, 1 + Math.cos(ft * 11 + ph) * 0.07);
+      f.rotation.y = ft * 1.7 + ph;
+    }
     this.treeWind.value = this.weather.wind;
     this.sky.mesh.position.copy(this.camera.position);
     this.post.render(dt);
@@ -1106,6 +1115,7 @@ export class World3D {
 
   private layoutBuildings(game: Game): void {
     this.buildingGroup.clear();
+    this.flames = [];
     this.buildingGroup.add(makeVillageProps(this.mid, game.booth(), game.exit(), game.villageRadius()));
     for (const b of game.buildings) {
       const mesh = makeBuildingMesh(b.type, false);
@@ -1127,6 +1137,9 @@ export class World3D {
         });
       }
       this.buildingGroup.add(mesh);
+      mesh.traverse((o) => {
+        if (o.userData.flame !== undefined) this.flames.push(o);
+      });
     }
   }
 
@@ -1688,6 +1701,7 @@ const BUILDING_LOOK: Partial<Record<BuildingType, BuildingLook>> = {
 
 /** Where a building's price tag floats. */
 function tagHeight(type: BuildingType): number {
+  if (type === "lookout") return 9;
   if (type === "garage") return 26;
   if (PARKING[type]) return 10;
   if (type === "foodTruck") return 9;
@@ -1699,6 +1713,7 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
   if (PARKING[type]) return makeParkingMesh(type, ghost);
   if (type === "cabin") return makeLogCabin(ghost);
+  if (type === "lookout") return makeLookout(ghost);
   if (type === "foodTruck") return makeFoodTruck(ghost);
   const p = BUILDING_LOOK[type]!;
   const g = makeChalet(p, { ghost, tall: p.h > 14, door: true });
@@ -1728,6 +1743,200 @@ function makeAwning(p: BuildingLook, ghost: boolean): THREE.Group {
   g.rotation.x = 0.32;
   const plinth = Math.min(2, p.h * 0.18);
   g.position.set(0, plinth + (p.h < 6 ? 3 : 4.1), p.d / 2 + 0.1);
+  return g;
+}
+
+/** Soft warm glow for fire pits and lanterns. */
+let GLOW_TEX: THREE.Texture | null = null;
+function glowTexture(): THREE.Texture {
+  if (!GLOW_TEX) {
+    GLOW_TEX = canvasTexture(64, (g, n) => {
+      const r = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+      r.addColorStop(0, "rgba(255, 214, 140, 1)");
+      r.addColorStop(0.35, "rgba(255, 150, 60, 0.45)");
+      r.addColorStop(1, "rgba(255, 120, 40, 0)");
+      g.fillStyle = r;
+      g.fillRect(0, 0, n, n);
+    });
+  }
+  return GLOW_TEX;
+}
+
+/**
+ * A scenic lookout: a timber deck on a stone base with a railing along the
+ * view side, two crackling fire pits ringed with Adirondack chairs, a log
+ * bench, a picnic table, lantern posts and a pair of coin binoculars.
+ * Faces +z (the view).
+ */
+function makeLookout(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const shadow = !ghost;
+  const mat = (color: string, extra: THREE.MeshStandardMaterialParameters = {}) =>
+    new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra });
+  const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number, ry = 0) => {
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = ry;
+    mesh.castShadow = shadow;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+    return mesh;
+  };
+  const stone = mat("#8a8379", { roughness: 0.95 });
+  const stoneDark = mat("#6f6a62", { roughness: 0.95 });
+  const deckA = mat("#9a7048");
+  const deckB = mat("#8c6440");
+  const timber = mat("#5a3d26", { roughness: 0.9 });
+  const snow = mat("#f2f5f8", { roughness: 0.7 });
+  const W = 18;
+  const D = 13;
+  const top = 1.3;
+  // Stone base and plank deck.
+  add(rbox(W + 0.8, 1.2, D + 0.8), stone, 0, 0.35, 0);
+  const planks = 10;
+  for (let i = 0; i < planks; i++) {
+    add(rbox(W, 0.32, D / planks - 0.06, 0.08), i % 2 ? deckA : deckB, 0, top - 0.16, -D / 2 + (D / planks) * (i + 0.5));
+  }
+  // Railing along the front and both sides.
+  const rail = (x0: number, z0: number, x1: number, z1: number) => {
+    const len = Math.hypot(x1 - x0, z1 - z0);
+    const ry = Math.atan2(x1 - x0, z1 - z0);
+    const n = Math.max(2, Math.round(len / 2.2));
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      add(rbox(0.28, 1.15, 0.28, 0.06), timber, x0 + (x1 - x0) * t, top + 0.57, z0 + (z1 - z0) * t);
+    }
+    add(rbox(0.22, 0.2, len + 0.3, 0.07), timber, (x0 + x1) / 2, top + 1.18, (z0 + z1) / 2, ry);
+    add(rbox(0.12, 0.12, len, 0.04), timber, (x0 + x1) / 2, top + 0.6, (z0 + z1) / 2, ry);
+    // A ridge of snow along the top rail.
+    add(rbox(0.3, 0.14, len, 0.06), snow, (x0 + x1) / 2, top + 1.33, (z0 + z1) / 2, ry);
+  };
+  const ex = W / 2 - 0.3;
+  const ez = D / 2 - 0.3;
+  rail(-ex, ez, ex, ez);
+  rail(-ex, -ez + 2.5, -ex, ez);
+  rail(ex, -ez + 2.5, ex, ez);
+  // Two fire pits, each ringed by chairs.
+  const pits: [number, number][] = [
+    [-4.4, 1.2],
+    [4.6, -0.6],
+  ];
+  const chairCols = ["#b8433a", "#2f6f8f", "#d9a43a", "#3f7a4a", "#e8e2d4"];
+  const ash = mat("#2b2522");
+  const logMat = mat("#5a3b24");
+  const ember = mat("#3a1a10", { emissive: "#ff5a1a", emissiveIntensity: 1.6 });
+  const flameOuter = new THREE.MeshBasicMaterial({ color: "#ff8a2a", transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
+  const flameInner = new THREE.MeshBasicMaterial({ color: "#ffd27a", transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+  const stoneGeo = rbox(0.62, 0.5, 0.48, 0.16);
+  pits.forEach(([px, pz], pi) => {
+    const R = 1.15;
+    for (let k = 0; k < 11; k++) {
+      const a = (k / 11) * Math.PI * 2;
+      add(stoneGeo, k % 3 ? stone : stoneDark, px + Math.cos(a) * R, top + 0.25, pz + Math.sin(a) * R, -a);
+    }
+    add(new THREE.CylinderGeometry(R - 0.15, R - 0.15, 0.1, 20), ash, px, top + 0.06, pz);
+    const logGeo = new THREE.CylinderGeometry(0.13, 0.15, 1.5, 8);
+    for (let k = 0; k < 3; k++) {
+      const log = add(logGeo, logMat, px, top + 0.3, pz, (k * Math.PI) / 3);
+      log.rotation.z = Math.PI / 2 - 0.35;
+    }
+    add(new THREE.CylinderGeometry(0.55, 0.65, 0.12, 12), ember, px, top + 0.16, pz);
+    // Flames: a few flickering tongues, brighter in the middle, and a glow.
+    const fire = new THREE.Group();
+    fire.position.set(px, top + 0.2, pz);
+    for (let k = 0; k < 4; k++) {
+      const h = 1.3 + (k % 2) * 0.5;
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.34 - k * 0.03, h, 7, 1, true), flameOuter);
+      cone.geometry.translate(0, h / 2, 0);
+      const a = (k / 4) * Math.PI * 2 + pi;
+      cone.position.set(Math.cos(a) * 0.22, 0, Math.sin(a) * 0.22);
+      cone.userData.flame = k * 1.7 + pi * 3.1;
+      fire.add(cone);
+    }
+    const core = new THREE.Mesh(new THREE.ConeGeometry(0.24, 1.1, 7, 1, true), flameInner);
+    core.geometry.translate(0, 0.55, 0);
+    core.userData.flame = pi * 2.3 + 0.5;
+    fire.add(core);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: "#ffb060", transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.8 }));
+    glow.scale.set(5, 5, 1);
+    glow.position.y = 0.8;
+    fire.add(glow);
+    g.add(fire);
+    // Adirondack chairs facing the fire.
+    const seats = 5;
+    for (let k = 0; k < seats; k++) {
+      const a = (k / seats) * Math.PI * 2 + 0.4 + pi;
+      const cx = px + Math.cos(a) * 2.7;
+      const cz = pz + Math.sin(a) * 2.7;
+      // Skip chairs that would poke through the railing or off the deck.
+      if (Math.abs(cx) > ex - 0.9 || Math.abs(cz) > ez - 0.9) continue;
+      const chair = new THREE.Group();
+      const paint = mat(chairCols[(k + pi * 2) % chairCols.length], { roughness: 0.6 });
+      const seat = new THREE.Mesh(rbox(0.95, 0.14, 0.95, 0.05), paint);
+      seat.position.set(0, 0.45, 0);
+      seat.rotation.x = -0.12;
+      const back = new THREE.Mesh(rbox(0.95, 1.15, 0.12, 0.05), paint);
+      back.position.set(0, 0.95, -0.55);
+      back.rotation.x = -0.32;
+      chair.add(seat, back);
+      for (const sx of [-1, 1]) {
+        const arm = new THREE.Mesh(rbox(0.16, 0.08, 1.1, 0.03), paint);
+        arm.position.set(sx * 0.58, 0.72, -0.05);
+        const leg = new THREE.Mesh(rbox(0.1, 0.72, 0.1, 0.03), paint);
+        leg.position.set(sx * 0.58, 0.36, 0.38);
+        chair.add(arm, leg);
+      }
+      chair.traverse((c) => {
+        if (c instanceof THREE.Mesh) {
+          c.castShadow = shadow;
+          c.receiveShadow = true;
+        }
+      });
+      chair.position.set(cx, top, cz);
+      // Seat faces +z by default: turn it to face the pit.
+      chair.rotation.y = Math.atan2(px - cx, pz - cz);
+      g.add(chair);
+    }
+  });
+  // A split-log bench along the back, on two stumps.
+  const bench = add(new THREE.CylinderGeometry(0.34, 0.34, 5, 12), logMat, -1.5, top + 0.75, -ez + 0.9);
+  bench.rotation.z = Math.PI / 2;
+  for (const sx of [-1.8, 1.8]) add(new THREE.CylinderGeometry(0.35, 0.4, 0.45, 10), timber, -1.5 + sx, top + 0.22, -ez + 0.9);
+  // Picnic table in the back corner.
+  const tx = ex - 2.6;
+  const tz = -ez + 1.6;
+  add(rbox(2.6, 0.14, 1.1, 0.05), deckA, tx, top + 0.85, tz);
+  for (const sz of [-1, 1]) add(rbox(2.6, 0.12, 0.38, 0.04), deckA, tx, top + 0.48, tz + sz * 0.85);
+  for (const sx of [-1, 1]) add(rbox(0.14, 0.85, 1.9, 0.04), timber, tx + sx * 1.0, top + 0.42, tz);
+  // Coin binoculars at the front rail.
+  add(new THREE.CylinderGeometry(0.1, 0.14, 1.3, 8), mat("#3a4048", { metalness: 0.5, roughness: 0.4 }), 1.2, top + 0.65, ez - 0.9);
+  const scope = add(rbox(0.5, 0.36, 0.7, 0.12), mat("#2f6f8f", { metalness: 0.4, roughness: 0.35 }), 1.2, top + 1.45, ez - 0.9);
+  scope.rotation.x = 0.25;
+  // Lantern posts at the back corners, warm-lit.
+  const lamp = mat("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 1.4 });
+  for (const sx of [-1, 1]) {
+    const x = sx * (ex - 0.4);
+    const z = -ez + 0.4;
+    add(new THREE.CylinderGeometry(0.09, 0.12, 2.6, 8), timber, x, top + 1.3, z);
+    add(rbox(0.42, 0.55, 0.42, 0.08), lamp, x, top + 2.75, z);
+    add(rbox(0.6, 0.12, 0.6, 0.05), snow, x, top + 3.1, z);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: "#ffd9a0", transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.6 }));
+    glow.scale.set(2.4, 2.4, 1);
+    glow.position.set(x, top + 2.75, z);
+    g.add(glow);
+  }
+  // Drifted snow banked against the stone base.
+  const drift = new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+  for (const [x, z, sx, sz] of [
+    [-W / 2 - 0.3, -D / 2 + 1, 1.6, 2.4],
+    [W / 2 + 0.4, 2, 1.4, 3],
+    [-3, D / 2 + 0.4, 3, 1.2],
+    [5, -D / 2 - 0.4, 2.6, 1.3],
+  ]) {
+    const m = add(drift, snow, x, 0, z);
+    m.scale.set(sx, 0.9, sz);
+  }
+  g.userData = { kind: "building" };
   return g;
 }
 

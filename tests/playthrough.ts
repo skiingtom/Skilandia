@@ -589,5 +589,30 @@ ok(Number.isFinite(g.money), "money NaN after conquering");
   ok(g.skiers.every((s) => Number.isFinite(s.x) && Number.isFinite(s.y)), "walker position broke after removing a path");
 }
 
+// --- lookouts: people stepping off a nearby lift stop by the fire pits
+{
+  const busiest = [...g.lifts].sort((a, b) => b.carriers.reduce((n, c) => n + c.riders.length, 0) - a.carriers.reduce((n, c) => n + c.riders.length, 0))[0];
+  let spot: Vec2 | null = null;
+  for (let r = 50; r < 320 && !spot; r += 15) {
+    for (let a = 0; a < Math.PI * 2 && !spot; a += 0.35) {
+      const q = { x: busiest.top.x + Math.cos(a) * r, y: busiest.top.y + Math.sin(a) * r };
+      if (g.canPlace("lookout", q.x, q.y) === null) spot = q;
+    }
+  }
+  ok(!!spot, "no spot for a lookout near a lift top");
+  if (spot) {
+    g.setTool("lookout");
+    ok(g.click(spot.x, spot.y) === "ok", `lookout failed: ${g.toasts.at(-1)?.text}`);
+    g.setTool("select");
+    let seen = 0;
+    for (let i = 0; i < 4000; i++) {
+      g.tick(0.05);
+      if (i % 10 === 0) seen += g.skiers.filter((s) => s.visitType === "lookout").length;
+    }
+    ok(seen > 0, "nobody stopped at the lookout");
+    ok(g.skiers.every((s) => s.state !== "visit" || s.visitType !== null), "a visitor lost track of where they were going");
+  }
+}
+
 console.log(problems.length ? `PROBLEMS (${problems.length}):\n` + problems.join("\n") : "ALL CHECKS PASSED");
 if (problems.length) process.exit(1);
