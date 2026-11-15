@@ -7,7 +7,14 @@ import {
   COSTS,
   DIFF,
   EXPANSION_BUILDINGS,
+  FEATURE_SPEC,
+  Feature,
+  FeatureType,
   INCOME_PER_MIN,
+  MAP_SCALE,
+  MOVE_FEE,
+  TRAIL_KIND_SPEC,
+  TrailKind,
   MOUNTAINS,
   MountainId,
   PLACE_ANYWHERE,
@@ -37,6 +44,12 @@ import {
   liftCost,
 } from "./types";
 
+const K = MAP_SCALE;
+/** Positions were authored for the original 640 x 820 maps. */
+const P = (x: number, y: number): Vec2 => ({ x: x * K, y: y * K });
+const WALK = 1.8;
+const SKI = 2;
+
 const NAMES = [
   "Ava", "Bo", "Cora", "Drew", "Eli", "Faye", "Gus", "Hana", "Ivy", "Jed",
   "Kai", "Liv", "Mae", "Ned", "Oli", "Pia", "Quin", "Rio", "Sky", "Tess",
@@ -63,8 +76,8 @@ function pick<T>(arr: T[]): T {
   return arr[(Math.random() * arr.length) | 0];
 }
 
-export function trailCost(length: number): number {
-  return Math.round(60 + length * 0.92);
+export function trailCost(length: number, kind: TrailKind = "slope"): number {
+  return Math.round((60 + length * 0.6) * TRAIL_KIND_SPEC[kind].costMul);
 }
 
 export function classifyGrade(dropM: number, lengthM: number): Difficulty {
@@ -78,13 +91,15 @@ export function classifyGrade(dropM: number, lengthM: number): Difficulty {
 export function measureTrail(
   points: Vec2[],
   mountain: MountainId = 0,
+  kind: TrailKind = "slope",
 ): { length: number; drop: number; difficulty: Difficulty; cost: number } {
   const length = polylineLength(points);
   const drop =
     elevation(points[0].x, points[0].y, mountain) -
     elevation(points[points.length - 1].x, points[points.length - 1].y, mountain);
-  const difficulty = classifyGrade(drop * VERTICAL_M, length * UNIT_M);
-  return { length, drop, difficulty, cost: trailCost(length) };
+  const base = classifyGrade(drop * VERTICAL_M, length * UNIT_M);
+  const difficulty = Math.min(3, base + TRAIL_KIND_SPEC[kind].diffBump) as Difficulty;
+  return { length, drop, difficulty, cost: trailCost(length, kind) };
 }
 
 interface Snapshot {
@@ -92,6 +107,7 @@ interface Snapshot {
   lifts: Lift[];
   buildings: Building[];
   trees: Vec2[];
+  features: Feature[];
   ticketPrice: number;
 }
 
@@ -117,6 +133,13 @@ export class Game {
   buildings: Building[] = [];
   skiers: Skier[] = [];
   trees: Vec2[] = [];
+  features: Feature[] = [];
+  /** Kind of run the Trail tool cuts. */
+  trailKind: TrailKind = "slope";
+  /** Building being moved with the Move tool. */
+  moveId: number | null = null;
+  /** Settings: charge a fee to move buildings. */
+  moveFeeOn = true;
   fx: Fx[] = [];
   toasts: Toast[] = [];
   draft: Vec2[] = [];
@@ -138,32 +161,32 @@ export class Game {
   owned: MountainId[] = [0];
   lifetimeEarned = 0;
   wagesToday = 0;
-  staff: Record<StaffRole, number> = { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0 };
+  staff: Record<StaffRole, number> = { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0, instructor: 0 };
   private snapshots: Partial<Record<MountainId, Snapshot>> = {};
 
   constructor() {
-    this.lifts = [this.makeLift("tbar", "Little Hawk T-Bar", { x: 328, y: 118 }, { x: 312, y: 628 })];
+    this.lifts = [this.makeLift("tbar", "Little Hawk T-Bar", P(328, 118), P(312, 628))];
     this.trails = [
       this.makeTrail("Sunnyside", [
-        { x: 328, y: 618 },
-        { x: 392, y: 500 },
-        { x: 438, y: 360 },
-        { x: 412, y: 220 },
-        { x: 356, y: 128 },
+        P(328, 618),
+        P(392, 500),
+        P(438, 360),
+        P(412, 220),
+        P(356, 128),
       ]),
       this.makeTrail("Little Elk", [
-        { x: 298, y: 612 },
-        { x: 248, y: 490 },
-        { x: 236, y: 340 },
-        { x: 268, y: 210 },
-        { x: 304, y: 126 },
+        P(298, 612),
+        P(248, 490),
+        P(236, 340),
+        P(268, 210),
+        P(304, 126),
       ]),
       this.makeTrail("Blue Spruce", [
-        { x: 500, y: 650 },
-        { x: 550, y: 480 },
-        { x: 530, y: 320 },
-        { x: 460, y: 200 },
-        { x: 372, y: 128 },
+        P(500, 650),
+        P(550, 480),
+        P(530, 320),
+        P(460, 200),
+        P(372, 128),
       ]),
     ];
     this.seedTrees();
@@ -171,25 +194,54 @@ export class Game {
     this.saveCurrent();
   }
 
-  private makeTrail(name: string, points: Vec2[]): Trail {
-    const m = measureTrail(points, this.currentMountain);
+  private makeTrail(name: string, points: Vec2[], kind: TrailKind = "slope"): Trail {
+    const m = measureTrail(points, this.currentMountain, kind);
     this.usedTrailNames.add(name);
-    return { id: this.nextId++, name, points, ...m };
+    return { id: this.nextId++, name, points, kind, ...m };
   }
 
+  /**
+   * Thick forest everywhere it can grow: a jittered grid thinned by a
+   * patchy density field, kept off cliffs, the summit, the village, runs
+   * and lift lines. Cutting a run or a lift clears its corridor.
+   */
   private seedTrees(): void {
     this.trees = [];
     const mid = this.currentMountain;
-    for (let i = 0; i < 420; i++) {
-      const x = 18 + noise2(i * 0.37 + mid * 9, 2.2) * (WORLD_W - 36);
-      const y = 90 + noise2(i * 0.19 + mid * 4, 8.1) * (WORLD_H - 130);
-      const h = elevation(x, y, mid);
-      const s = slopeAt(x, y, mid);
-      if (h < 0.07 || h > 0.9 || s > 0.012) continue;
-      if (this.trails.some((t) => distToTrail(t, x, y) < 16)) continue;
-      if (this.nearLift(x, y, 22)) continue;
-      this.trees.push({ x, y });
+    const cell = 13;
+    for (let gy = 0; gy * cell < WORLD_H; gy++) {
+      for (let gx = 0; gx * cell < WORLD_W; gx++) {
+        const jx = noise2(gx * 7.13 + mid * 3, gy * 3.71);
+        const jy = noise2(gx * 2.91, gy * 6.37 + mid * 5);
+        const x = (gx + jx) * cell;
+        const y = (gy + jy) * cell;
+        if (x < 10 || x > WORLD_W - 10 || y > WORLD_H - 10) continue;
+        const nx = x / WORLD_W;
+        const ny = y / WORLD_H;
+        const h = elevation(x, y, mid);
+        // Patchy forest with glades; thinner toward treeline.
+        const density = noise2(nx * 9 + mid * 7, ny * 11) * 0.75 + noise2(nx * 31, ny * 29 + mid) * 0.35;
+        const treeline = 1 - smoothstep(0.62, 0.86, h);
+        if (density * treeline < 0.42) continue;
+        if (ny < 0.2 && Math.abs(nx - 0.5) < 0.3) continue; // village & base area
+        if (h < 0.04) continue;
+        if (slopeAt(x, y, mid) * (VERTICAL_M / UNIT_M) > 0.62) continue; // cliffs
+        if (this.villageOk(x, y)) continue;
+        this.trees.push({ x, y });
+      }
     }
+    this.clearTrees();
+  }
+
+  /** Remove trees from runs, lift lines, buildings and park features. */
+  private clearTrees(): void {
+    this.trees = this.trees.filter((t) => {
+      if (this.trails.some((tr) => distToTrail(tr, t.x, t.y) < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9)) return false;
+      if (this.nearLift(t.x, t.y, 16)) return false;
+      if (this.buildings.some((b) => Math.hypot(b.x - t.x, b.y - t.y) < 22)) return false;
+      if (this.features.some((f) => Math.hypot(f.x - t.x, f.y - t.y) < (f.type === "halfpipe" ? 40 : 12))) return false;
+      return true;
+    });
   }
 
   id(): number {
@@ -205,15 +257,24 @@ export class Game {
     return `Day ${this.day} · ${h}:${m.toString().padStart(2, "0")} ${ap}`;
   }
 
-  variety(): { counts: number[]; score: number } {
+  variety(): { counts: number[]; score: number; kinds: Set<TrailKind> } {
     const counts = [0, 0, 0, 0];
-    for (const t of this.trails) counts[t.difficulty]++;
-    const score =
+    const kinds = new Set<TrailKind>();
+    for (const t of this.trails) {
+      counts[t.difficulty]++;
+      kinds.add(t.kind);
+    }
+    let score =
       Math.min(counts[0], 2) / 2 * 0.28 +
       Math.min(counts[1], 2) / 2 * 0.26 +
       Math.min(counts[2], 1) * 0.24 +
       Math.min(counts[3], 1) * 0.22;
-    return { counts, score };
+    // Specialty runs and park features widen the appeal.
+    if (kinds.has("slalom")) score += 0.05;
+    if (kinds.has("moguls")) score += 0.05;
+    if (kinds.has("park")) score += 0.06;
+    score += Math.min(0.08, this.features.length * 0.012);
+    return { counts, score, kinds };
   }
 
   amenityScore(): number {
@@ -228,7 +289,8 @@ export class Game {
     if (this.has("shop")) n += 0.1;
     if (this.has("condo")) n += 0.14;
     if (this.has("patrol")) n += 0.08;
-    return Math.min(1.4, n);
+    if (this.has("school")) n += 0.12;
+    return Math.min(1.5, n);
   }
 
   fairPrice(): number {
@@ -286,6 +348,11 @@ export class Game {
     if (counts[3] === 0 && this.trails.length >= 4) out.push("A few experts keep asking for a double black.");
     if (counts[0] === 0) out.push("Beginners have nowhere gentle to ski.");
     if (this.count("restroom") === 0 && onHill > 6) out.push("People are hunting for a restroom.");
+    if (this.has("school") && this.staff.instructor === 0) out.push("The ski school has no instructors. Hire some.");
+    if (!this.has("school") && this.skiers.filter((k) => k.skill === 0).length >= 5) out.push("Beginners are asking about lessons.");
+    if (!this.variety().kinds.has("park") && this.skiers.filter((k) => k.likes === "park").length >= 3) {
+      out.push("Freestylers want a terrain park.");
+    }
     if (this.ticketPrice > this.fairPrice() + 8) out.push("Tickets feel expensive for what is here.");
     if (this.has("lodge") && !this.has("coffee") && !this.has("sandwich") && this.count("shack") === 0) {
       out.push("Hungry skiers wish there was food.");
@@ -294,7 +361,7 @@ export class Game {
       const need = this.staffNeeds();
       for (const role of STAFF_ROLES) {
         if (this.staff[role] < need[role]) {
-          out.push(`Short on ${role === "patrol" ? "ski patrol" : role}. Hire more staff.`);
+          out.push(`Short on ${STAFF_LABEL[role].toLowerCase()}. Hire more staff.`);
           break;
         }
       }
@@ -318,6 +385,20 @@ export class Game {
 
   setTool(tool: Tool): void {
     this.liftStart = null;
+    this.moveId = null;
+    if (tool.startsWith("trail:")) {
+      this.trailKind = tool.slice(6) as TrailKind;
+      this.tool = "cut";
+      this.draft = [];
+      this.selected = null;
+      return;
+    }
+    if (tool.startsWith("feature:")) {
+      this.tool = tool;
+      this.draft = [];
+      this.selected = null;
+      return;
+    }
     if (tool.startsWith("lift:")) {
       if (this.lifts.length >= MAX_LIFTS) {
         this.toast(`${MAX_LIFTS} lifts is the limit for one mountain.`, true);
@@ -328,7 +409,8 @@ export class Game {
       this.selected = null;
       return;
     }
-    const build = tool as BuildingType | "select" | "cut";
+    const build = tool as BuildingType | "select" | "cut" | "move";
+    if (build === "move") return;
     if (build !== "select" && build !== "cut" && EXPANSION_BUILDINGS.includes(build) && !this.expansionUnlocked()) {
       this.toast("Hotels, shops, condos and patrol unlock after you buy the next mountain.", true);
       return;
@@ -360,6 +442,124 @@ export class Game {
     this.tool = "select";
     this.draft = [];
     this.liftStart = null;
+    this.moveId = null;
+  }
+
+  featureTool(): FeatureType | null {
+    return this.tool.startsWith("feature:") ? (this.tool.slice(8) as FeatureType) : null;
+  }
+
+  // ---------- moving buildings
+
+  moveFee(b: Building): number {
+    return this.moveFeeOn ? Math.round((COSTS[b.type] * MOVE_FEE) / 10) * 10 : 0;
+  }
+
+  movingBuilding(): Building | null {
+    return this.tool === "move" ? this.buildings.find((b) => b.id === this.moveId) ?? null : null;
+  }
+
+  startMove(id: number): void {
+    const b = this.buildings.find((x) => x.id === id);
+    if (!b) return;
+    this.cancel();
+    this.tool = "move";
+    this.moveId = id;
+    const fee = this.moveFee(b);
+    this.toast(`Click a new spot for the ${BUILDING_LABEL[b.type].toLowerCase()}${fee ? ` · $${fee.toLocaleString()} to move` : " · moving is free"}.`);
+  }
+
+  canMoveTo(x: number, y: number): string | null {
+    const b = this.movingBuilding();
+    if (!b) return "Pick a building first.";
+    return this.canPlace(b.type, x, y, { ignoreId: b.id, cost: this.moveFee(b) });
+  }
+
+  private clickMove(x: number, y: number): "ok" | "shake" | "none" {
+    const b = this.movingBuilding();
+    if (!b) return "none";
+    const err = this.canMoveTo(x, y);
+    if (err) {
+      this.toast(err, true);
+      return "shake";
+    }
+    const fee = this.moveFee(b);
+    this.money -= fee;
+    b.x = x;
+    b.y = y;
+    this.clearTrees();
+    if (fee) this.float(x, y, `-${fee}`, "#d9785f");
+    this.toast(`${BUILDING_LABEL[b.type]} moved${fee ? ` for $${fee.toLocaleString()}` : ""}.`);
+    this.tool = "select";
+    this.moveId = null;
+    this.selected = { kind: "building", id: b.id };
+    return "ok";
+  }
+
+  // ---------- park features and jumps
+
+  /** Where a feature at (x, y) would sit: its run (if any) and travel direction. */
+  private featureSpot(x: number, y: number): { trail: Trail | null; angle: number; dist: number } {
+    let best: Trail | null = null;
+    let bestD = Infinity;
+    for (const t of this.trails) {
+      const d = distToTrail(t, x, y);
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
+    }
+    if (best && bestD <= TRAIL_KIND_SPEC[best.kind].width / 2 + 3) {
+      const near = nearestOnTrail(best, x, y);
+      return { trail: best, angle: Math.atan2(near.dy, near.dx), dist: bestD };
+    }
+    // Off-piste jump: face down the fall line.
+    const mid = this.currentMountain;
+    const gx = elevation(x + 3, y, mid) - elevation(x - 3, y, mid);
+    const gy = elevation(x, y + 3, mid) - elevation(x, y - 3, mid);
+    return { trail: null, angle: Math.atan2(-gy, -gx), dist: bestD };
+  }
+
+  canPlaceFeature(type: FeatureType, x: number, y: number): string | null {
+    const spec = FEATURE_SPEC[type];
+    if (x < 14 || x > WORLD_W - 14 || y > WORLD_H - 12) return "That's off the property.";
+    if (this.villageOk(x, y) || y < 170 * K) return "Build features up on the hill.";
+    const spot = this.featureSpot(x, y);
+    if (spec.parkOnly && (!spot.trail || spot.trail.kind !== "park")) {
+      return `${spec.label}s go inside a terrain park. Cut a park run first.`;
+    }
+    const gap = type === "halfpipe" ? 70 : 16;
+    if (this.features.some((f) => Math.hypot(f.x - x, f.y - y) < (f.type === "halfpipe" ? 70 : gap))) {
+      return "Too close to another feature.";
+    }
+    if (this.buildings.some((b) => Math.hypot(b.x - x, b.y - y) < 24)) return "A building is in the way.";
+    if (this.nearLift(x, y, 14)) return "Keep clear of the lift line.";
+    if (this.money < spec.cost) return `Need $${(spec.cost - this.money).toLocaleString()} more.`;
+    return null;
+  }
+
+  featureAngle(x: number, y: number): number {
+    return this.featureSpot(x, y).angle;
+  }
+
+  private clickFeature(type: FeatureType, x: number, y: number): "ok" | "shake" | "none" {
+    const err = this.canPlaceFeature(type, x, y);
+    if (err) {
+      this.toast(err, true);
+      return "shake";
+    }
+    const spec = FEATURE_SPEC[type];
+    const spot = this.featureSpot(x, y);
+    this.money -= spec.cost;
+    this.features.push({ id: this.id(), type, x, y, angle: spot.angle, trailId: spot.trail?.id ?? null });
+    this.clearTrees();
+    this.float(x, y, `-${spec.cost}`, "#d9785f");
+    this.toast(
+      spot.trail
+        ? `${spec.label} built on ${spot.trail.name}.`
+        : `${spec.label} built off-piste. Put it on a run so skiers hit it.`,
+    );
+    return "ok";
   }
 
   liftTool(): LiftType | null {
@@ -526,41 +726,47 @@ export class Game {
     const topE = elevation(l.top.x, l.top.y, this.currentMountain);
     return this.trails.filter((t) => {
       const p = t.points[0];
-      return Math.hypot(p.x - l.top.x, p.y - l.top.y) < 140 && elevation(p.x, p.y, this.currentMountain) < topE + 0.04;
+      return Math.hypot(p.x - l.top.x, p.y - l.top.y) < 220 && elevation(p.x, p.y, this.currentMountain) < topE + 0.04;
     });
   }
 
   draftInfo(): { length: number; drop: number; difficulty: Difficulty; cost: number } | null {
-    if (this.draft.length < 2) return this.draft.length === 1 ? { length: 0, drop: 0, difficulty: 0, cost: 60 } : null;
-    return measureTrail(this.draft, this.currentMountain);
+    if (this.draft.length < 2) return this.draft.length === 1 ? { length: 0, drop: 0, difficulty: 0, cost: trailCost(0, this.trailKind) } : null;
+    return measureTrail(this.draft, this.currentMountain, this.trailKind);
   }
 
   private villageOk(x: number, y: number): boolean {
-    return y > 46 && y < 168 && x > 150 && x < 500;
+    return y > 46 * K && y < 168 * K && x > 150 * K && x < 500 * K;
   }
 
-  canPlace(type: BuildingType, x: number, y: number): string | null {
-    if (EXPANSION_BUILDINGS.includes(type) && !this.expansionUnlocked()) {
+  canPlace(type: BuildingType, x: number, y: number, opts: { ignoreId?: number; cost?: number } = {}): string | null {
+    const moving = opts.ignoreId != null;
+    const others = this.buildings.filter((b) => b.id !== opts.ignoreId);
+    const cost = opts.cost ?? COSTS[type];
+    if (!moving && EXPANSION_BUILDINGS.includes(type) && !this.expansionUnlocked()) {
       return "Buy the next mountain to unlock this.";
     }
-    if (this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
+    if (!moving && this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
     const anywhere = PLACE_ANYWHERE.includes(type);
     const midMountain = PLACE_MOUNTAIN.includes(type);
     if (!anywhere && !midMountain && !this.villageOk(x, y)) return "Build down in the base village.";
-    if (midMountain && !anywhere && y < 70) return "Put this on the mountain, not in the parking lot.";
+    if (midMountain && !anywhere && y < 170 * K) return "Put this on the mountain, not in the village.";
     if (x < 12 || x > WORLD_W - 12 || y < 24 || y > WORLD_H - 12) return "That's off the property.";
     const minGap = type === "shack" ? 22 : 38;
-    if (this.buildings.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
+    if (others.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
     if (this.nearLift(x, y, 26)) return "Keep clear of the lift line.";
-    if (this.money < COSTS[type]) return `Need $${(COSTS[type] - this.money).toLocaleString()} more.`;
+    if (this.money < cost) return `Need $${(cost - this.money).toLocaleString()} more.`;
     return null;
   }
 
   click(x: number, y: number): "ok" | "shake" | "none" {
     if (!this.managing) return "none";
     if (this.tool === "cut") return this.clickCut(x, y);
+    if (this.tool === "move") return this.clickMove(x, y);
+    const ft = this.featureTool();
+    if (ft) return this.clickFeature(ft, x, y);
     const lt = this.liftTool();
     if (lt) return this.clickLift(lt, x, y);
     if (this.tool !== "select") return this.clickBuild(this.tool as BuildingType, x, y);
@@ -616,9 +822,11 @@ export class Game {
       const t = this.trails.find((x) => x.id === sel.id);
       if (!t) return { title: "Trail", body: "" };
       const d = DIFF[t.difficulty];
+      const feats = this.features.filter((f) => f.trailId === t.id).length;
+      const kind = TRAIL_KIND_SPEC[t.kind];
       return {
         title: `${d.mark} ${t.name}`,
-        body: `${d.name} · ${Math.round(t.length * UNIT_M)} m long · ${Math.round(t.drop * VERTICAL_M)} m drop. Skiers pick runs that match their nerve.`,
+        body: `${kind.label} · ${d.name} · ${Math.round(t.length * UNIT_M)} m long · ${Math.round(t.drop * VERTICAL_M)} m drop${feats ? ` · ${feats} feature${feats === 1 ? "" : "s"}` : ""}. ${kind.blurb}`,
       };
     }
     if (sel.kind === "building") {
@@ -635,10 +843,11 @@ export class Game {
         shop: "Retail on the village street.",
         condo: "Sold as lodging. Big checks, village only.",
         patrol: "Barely earns. After the starter hill you also need hired patrol.",
+        school: `Lessons for beginners. Needs instructors: ${this.staff.instructor} hired.`,
       };
       return {
         title: BUILDING_LABEL[b.type],
-        body: `Earns $${INCOME_PER_MIN[b.type]}/min when the hill is busy. ${extra[b.type]}`,
+        body: `Earns $${INCOME_PER_MIN[b.type]}/min when the hill is busy. ${extra[b.type]} Moving it costs ${this.moveFee(b) ? `$${this.moveFee(b).toLocaleString()}` : "nothing"}.`,
       };
     }
     if (sel.kind === "lift") {
@@ -665,7 +874,7 @@ export class Game {
 
   private clickCut(x: number, y: number): "ok" | "shake" | "none" {
     if (this.draft.length === 0) {
-      if (y < 240) {
+      if (y < 240 * K) {
         this.toast("Start the cut higher on the mountain.", true);
         return "shake";
       }
@@ -689,8 +898,9 @@ export class Game {
       this.toast("Click a few downhill points first.", true);
       return "shake";
     }
-    const info = measureTrail(this.draft, this.currentMountain);
-    if (info.length < 90) {
+    const kind = this.trailKind;
+    const info = measureTrail(this.draft, this.currentMountain, kind);
+    if (info.length < 120) {
       this.toast("That run is too short to groom.", true);
       return "shake";
     }
@@ -699,21 +909,29 @@ export class Game {
       return "shake";
     }
     this.money -= info.cost;
-    const name = this.freshTrailName();
-    const trail = this.makeTrail(name, this.draft.map((p) => ({ ...p })));
+    const name = this.freshTrailName(kind);
+    const trail = this.makeTrail(name, this.draft.map((p) => ({ ...p })), kind);
     this.trails.push(trail);
-    this.trees = this.trees.filter((t) => distToTrail(trail, t.x, t.y) >= 15);
+    const before = this.trees.length;
+    this.clearTrees();
+    const felled = before - this.trees.length;
     this.float(this.draft[0].x, this.draft[0].y, `-${info.cost}`, "#d9785f");
-    this.toast(`${DIFF[info.difficulty].name} run “${name}” is open.`);
+    this.toast(`${DIFF[info.difficulty].name} ${TRAIL_KIND_SPEC[kind].label.toLowerCase()} “${name}” is open. ${felled} trees cleared.`);
     this.draft = [];
     this.tool = "select";
     this.selected = { kind: "trail", id: trail.id };
     return "ok";
   }
 
-  private freshTrailName(): string {
+  private freshTrailName(kind: TrailKind = "slope"): string {
+    const suffix: Record<TrailKind, string[]> = {
+      slope: TRAIL_SUFFIX,
+      slalom: ["Slalom", "Gates", "Race Course"],
+      moguls: ["Bumps", "Moguls", "Washboard"],
+      park: ["Park", "Terrain Park", "Jib Park"],
+    };
     for (let i = 0; i < 40; i++) {
-      const name = `${pick(TRAIL_PREFIX)} ${pick(TRAIL_SUFFIX)}`;
+      const name = `${pick(TRAIL_PREFIX)} ${pick(suffix[kind])}`;
       if (!this.usedTrailNames.has(name)) {
         this.usedTrailNames.add(name);
         return name;
@@ -731,6 +949,7 @@ export class Game {
     this.money -= COSTS[type];
     const b: Building = { id: this.id(), type, x, y, earnAcc: 0, earnTimer: 0 };
     this.buildings.push(b);
+    this.clearTrees();
     this.float(x, y, `-${COSTS[type]}`, "#d9785f");
     this.tool = "select";
     this.selected = { kind: "building", id: b.id };
@@ -754,12 +973,15 @@ export class Game {
       name: pick(NAMES),
       skill,
       color: pick(JACKETS),
-      x: 220 + Math.random() * 200,
-      y: 18 + Math.random() * 16,
+      x: (220 + Math.random() * 200) * K,
+      y: (18 + Math.random() * 16) * K,
       state: "arriving",
       trailId: null,
       liftId: null,
       rideT: 0,
+      likes: likes(),
+      air: 0,
+      lesson: false,
       dist: 0,
       wait: 0,
       runsLeft: 2 + ((Math.random() * 3) | 0),
@@ -795,7 +1017,7 @@ export class Game {
       this.spawnAcc += capped * (0.042 + this.attraction() * 0.14);
       while (this.spawnAcc > 1) {
         this.spawnAcc -= 1;
-        if (this.skiers.length < 36) this.spawnSkier(false);
+        if (this.skiers.length < 70) this.spawnSkier(false);
       }
       this.collectBuildingIncome(capped);
       this.collectRemoteIncome(capped);
@@ -803,7 +1025,7 @@ export class Game {
     }
     this.stepLift(capped);
     for (const s of this.skiers) this.stepSkier(s, capped);
-    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && s.y < 8 && s.wait <= 0));
+    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && s.y < 12 * K && s.wait <= 0));
     this.peakSkiers = Math.max(this.peakSkiers, this.skiers.length);
     this.thoughtAcc += capped;
     if (this.thoughtAcc > 4.5) {
@@ -827,7 +1049,7 @@ export class Game {
     if (!this.buildings.length) return 0;
     const busy = clamp(this.skiers.length / 16, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
-    return Math.round(this.buildings.reduce((n, b) => n + INCOME_PER_MIN[b.type], 0) * util);
+    return Math.round(this.buildings.reduce((n, b) => n + INCOME_PER_MIN[b.type] * this.buildingFactor(b.type), 0) * util);
   }
 
   private collectBuildingIncome(dt: number): void {
@@ -835,7 +1057,8 @@ export class Game {
     const busy = clamp(this.skiers.length / 16, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
     for (const b of this.buildings) {
-      const gain = (INCOME_PER_MIN[b.type] / 60) * util * dt;
+      const gain = (INCOME_PER_MIN[b.type] / 60) * util * this.buildingFactor(b.type) * dt;
+      if (gain <= 0) continue;
       this.money += gain;
       this.incomeToday += gain;
       this.shopIncomeToday += gain;
@@ -858,7 +1081,7 @@ export class Game {
       const snap = this.snapshots[id];
       if (!snap) continue;
       for (const b of snap.buildings) {
-        const gain = (INCOME_PER_MIN[b.type] / 60) * factor * dt;
+        const gain = (INCOME_PER_MIN[b.type] / 60) * factor * this.buildingFactor(b.type) * dt;
         this.money += gain;
         this.shopIncomeToday += gain;
         this.incomeToday += gain;
@@ -867,9 +1090,16 @@ export class Game {
     }
   }
 
+  /** A ski school only runs lessons with instructors on staff. */
+  private buildingFactor(type: BuildingType): number {
+    if (type !== "school") return 1;
+    const need = Math.max(1, this.staffNeeds().instructor);
+    return Math.min(1, this.staff.instructor / need);
+  }
+
   private payWages(dt: number): void {
-    if (!this.staffRequired()) return;
     for (const role of STAFF_ROLES) {
+      if (!this.staffRequired() && role !== "instructor") continue;
       const w = (STAFF_WAGE_PER_MIN[role] / 60) * this.staff[role] * dt;
       this.money -= w;
       this.wagesToday += w;
@@ -894,8 +1124,9 @@ export class Game {
   }
 
   staffNeeds(): Record<StaffRole, number> {
+    const instructor = this.empireCount("school") * 2;
     if (!this.staffRequired()) {
-      return { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0 };
+      return { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0, instructor };
     }
     const foodBuildings =
       this.empireCount("coffee") +
@@ -910,6 +1141,7 @@ export class Game {
       lift: Math.max(this.owned.length, Math.ceil((this.lifts.length + Object.entries(this.snapshots).reduce((n, [k, sn]) => n + (Number(k) === this.currentMountain ? 0 : sn?.lifts.length ?? 0), 0)) / 2)),
       delivery: Math.max(foodBuildings + lodgings > 0 ? 1 : 0, Math.ceil((foodBuildings + lodgings) / 2)),
       maintenance: Math.max(1, Math.ceil(trails / 5) + this.owned.length),
+      instructor,
     };
   }
 
@@ -919,6 +1151,7 @@ export class Game {
     let got = 0;
     let want = 0;
     for (const role of STAFF_ROLES) {
+      if (role === "instructor") continue; // only the ski school depends on them
       want += Math.max(1, need[role]);
       got += Math.min(this.staff[role], Math.max(1, need[role]));
     }
@@ -926,6 +1159,15 @@ export class Game {
   }
 
   hire(role: StaffRole): void {
+    if (role === "instructor") {
+      if (this.empireCount("school") === 0) {
+        this.toast("Build a ski school first.", true);
+        return;
+      }
+      this.staff.instructor += 1;
+      this.toast("Hired a ski instructor.");
+      return;
+    }
     if (!this.staffRequired()) {
       this.toast("Little Hawk is family-run. Staff starts when you buy the next mountain.", true);
       return;
@@ -987,6 +1229,7 @@ export class Game {
     this.lifts = snap.lifts;
     this.buildings = snap.buildings;
     this.trees = snap.trees;
+    this.features = snap.features;
     this.ticketPrice = snap.ticketPrice;
     this.skiers = [];
     this.draft = [];
@@ -1003,12 +1246,14 @@ export class Game {
       lifts: this.lifts,
       buildings: this.buildings,
       trees: this.trees,
+      features: this.features,
       ticketPrice: this.ticketPrice,
     };
   }
 
   private installMountain(id: MountainId): void {
     this.buildings = [];
+    this.features = [];
     this.skiers = [];
     this.draft = [];
     this.tool = "select";
@@ -1016,53 +1261,53 @@ export class Game {
     this.liftStart = null;
     this.ticketPrice = START_TICKET;
     if (id === 1) {
-      this.lifts = [this.makeLift("double", "Cedar Double", { x: 330, y: 112 }, { x: 300, y: 660 })];
+      this.lifts = [this.makeLift("double", "Cedar Double", P(330, 112), P(300, 660))];
       this.trails = [
         this.makeTrail("Cabin Run", [
-          { x: 318, y: 648 },
-          { x: 400, y: 480 },
-          { x: 430, y: 300 },
-          { x: 360, y: 130 },
+          P(318, 648),
+          P(400, 480),
+          P(430, 300),
+          P(360, 130),
         ]),
         this.makeTrail("Hemlock", [
-          { x: 288, y: 650 },
-          { x: 220, y: 470 },
-          { x: 210, y: 280 },
-          { x: 290, y: 124 },
+          P(288, 650),
+          P(220, 470),
+          P(210, 280),
+          P(290, 124),
         ]),
         this.makeTrail("Upper Pitch", [
-          { x: 250, y: 700 },
-          { x: 180, y: 520 },
-          { x: 150, y: 330 },
-          { x: 240, y: 140 },
+          P(250, 700),
+          P(180, 520),
+          P(150, 330),
+          P(240, 140),
         ]),
       ];
     } else {
-      this.lifts = [this.makeLift("quad", "Saddle Quad", { x: 320, y: 108 }, { x: 318, y: 640 })];
+      this.lifts = [this.makeLift("quad", "Saddle Quad", P(320, 108), P(318, 640))];
       this.trails = [
         this.makeTrail("West Peak", [
-          { x: 200, y: 700 },
-          { x: 170, y: 500 },
-          { x: 190, y: 300 },
-          { x: 260, y: 130 },
+          P(200, 700),
+          P(170, 500),
+          P(190, 300),
+          P(260, 130),
         ]),
         this.makeTrail("East Peak", [
-          { x: 460, y: 710 },
-          { x: 500, y: 500 },
-          { x: 470, y: 300 },
-          { x: 380, y: 128 },
+          P(460, 710),
+          P(500, 500),
+          P(470, 300),
+          P(380, 128),
         ]),
         this.makeTrail("Saddle Green", [
-          { x: 330, y: 620 },
-          { x: 350, y: 400 },
-          { x: 340, y: 220 },
-          { x: 320, y: 122 },
+          P(330, 620),
+          P(350, 400),
+          P(340, 220),
+          P(320, 122),
         ]),
         this.makeTrail("Chute", [
-          { x: 150, y: 720 },
-          { x: 120, y: 480 },
-          { x: 160, y: 260 },
-          { x: 250, y: 132 },
+          P(150, 720),
+          P(120, 480),
+          P(160, 260),
+          P(250, 132),
         ]),
       ];
     }
@@ -1168,7 +1413,7 @@ export class Game {
       { x: lift.bottom.x + ox * 1.4 + (dx / l) * 6, y: lift.bottom.y + oy * 1.4 + (dy / l) * 6 },
     ];
     const drop = elevation(points[0].x, points[0].y, this.currentMountain) - elevation(points[1].x, points[1].y, this.currentMountain);
-    return { id: s.trailId, name: "Bunny slope", points, difficulty: 0, length: l, drop: Math.max(0, drop) };
+    return { id: s.trailId, name: "Bunny slope", points, difficulty: 0, length: l, drop: Math.max(0, drop), kind: "slope" };
   }
 
   private goToLift(s: Skier): void {
@@ -1177,11 +1422,8 @@ export class Game {
   }
 
   private chooseTrail(s: Skier, lift?: Lift): Trail | null {
-    const ranked = [...this.trails].sort((a, b) => {
-      const sa = trailScore(s.skill, a.difficulty);
-      const sb = trailScore(s.skill, b.difficulty);
-      return sb - sa;
-    });
+    const score = (t: Trail) => trailScore(s.skill, t.difficulty) * (t.kind === s.likes ? 1.6 : 1);
+    const ranked = [...this.trails].sort((a, b) => score(b) - score(a));
     const options = ranked.filter((t) => trailScore(s.skill, t.difficulty) > 0.15);
     if (!options.length) return ranked[0] ?? null;
     const from = lift ? this.trailsFrom(lift) : [];
@@ -1191,7 +1433,7 @@ export class Game {
   }
 
   private booth(): Vec2 {
-    return { x: 352, y: 92 };
+    return P(352, 92);
   }
 
   private stepSkier(s: Skier, dt: number): void {
@@ -1199,9 +1441,10 @@ export class Game {
     s.needFood = clamp(s.needFood + dt * 0.012, 0, 1.2);
     if (s.bubbleT > 0) s.bubbleT -= dt;
     else s.bubble = null;
+    if (s.air > 0) s.air = Math.max(0, s.air - dt);
     if (s.state === "arriving") {
       const b = this.booth();
-      this.walkToward(s, b.x, b.y, 42 * dt);
+      this.walkToward(s, b.x, b.y, 42 * WALK * dt);
       if (Math.hypot(s.x - b.x, s.y - b.y) < 10) s.state = "booth";
       return;
     }
@@ -1224,6 +1467,14 @@ export class Game {
         this.float(s.x, s.y, `+$${this.ticketPrice}`);
         this.sfx.push("cash");
       }
+      // New skiers sign up for a lesson when the school has instructors.
+      if (s.skill === 0 && !s.lesson && this.has("school") && this.staff.instructor > 0 && Math.random() < 0.65) {
+        s.state = "visit";
+        s.visitType = "school";
+        s.lesson = true;
+        s.wait = 0;
+        return;
+      }
       this.goToLift(s);
       return;
     }
@@ -1236,7 +1487,7 @@ export class Game {
         }
       }
       const q = this.queueSlot(s);
-      this.walkToward(s, q.x, q.y, 46 * dt);
+      this.walkToward(s, q.x, q.y, 46 * WALK * dt);
       if (Math.hypot(s.x - q.x, s.y - q.y) < 8) s.state = "queue";
       return;
     }
@@ -1280,7 +1531,7 @@ export class Game {
       }
       s.trailId = trail.id;
       const start = trail.points[0];
-      this.walkToward(s, start.x, start.y, 50 * dt);
+      this.walkToward(s, start.x, start.y, 50 * WALK * dt);
       if (Math.hypot(s.x - start.x, s.y - start.y) < 10) {
         s.state = "skiing";
         s.dist = 0;
@@ -1297,12 +1548,20 @@ export class Game {
         this.goToLift(s);
         return;
       }
-      const grade = trail.drop / Math.max(40, trail.length);
-      const speed = 46 + trail.difficulty * 16 + grade * 220 - Math.max(0, trail.difficulty - s.skill) * 12;
+      const grade = (trail.drop * VERTICAL_M) / (Math.max(40, trail.length) * UNIT_M);
+      const kind = TRAIL_KIND_SPEC[trail.kind];
+      const speed =
+        (46 + trail.difficulty * 16 + grade * 90 - Math.max(0, trail.difficulty - s.skill) * 12) * SKI * kind.speedMul;
+      const before = s.dist;
       s.dist += speed * dt;
+      this.hitFeatures(s, trail, before, s.dist);
       const p = pointOnPolyline(trail.points, s.dist);
-      s.x = p.x + Math.sin(s.dist * 0.08 + s.id) * 3.2;
-      s.y = p.y;
+      // Slalom skiers carve wide around the gates; others make lazy turns.
+      const swing = trail.kind === "slalom" ? 4 : trail.kind === "park" ? 1.5 : 3.2;
+      const freq = trail.kind === "slalom" ? Math.PI / 28 : 0.08;
+      const phase = trail.kind === "slalom" ? 0 : s.id;
+      s.x = p.x + Math.sin(s.dist * freq + phase) * swing * -p.dy;
+      s.y = p.y + Math.sin(s.dist * freq + phase) * swing * p.dx;
       if (p.done) {
         s.runsDone += 1;
         s.runsLeft -= 1;
@@ -1340,11 +1599,25 @@ export class Game {
         this.goToLift(s);
         return;
       }
-      this.walkToward(s, b.x, b.y, 44 * dt);
+      this.walkToward(s, b.x, b.y, 44 * WALK * dt);
       if (Math.hypot(s.x - b.x, s.y - b.y) < 12) {
         s.wait += dt;
-        if (s.wait > 1.6) {
-          if (s.visitType === "restroom") s.needBath = 0.05;
+        if (s.wait > (s.visitType === "school" ? 3 : 1.6)) {
+          if (s.visitType === "school") {
+            // A lesson: happier, and some beginners graduate to blues.
+            const fee = 25;
+            this.money += fee;
+            this.incomeToday += fee;
+            this.shopIncomeToday += fee;
+            this.lifetimeEarned += fee;
+            this.float(b.x, b.y, `+$${fee} lesson`);
+            s.mood += 6;
+            if (Math.random() < 0.35) {
+              s.skill = 1;
+              s.bubble = "I can ski blues!";
+              s.bubbleT = 2.4;
+            }
+          } else if (s.visitType === "restroom") s.needBath = 0.05;
           else s.needFood = 0.08;
           s.mood += 8;
           s.wait = 0;
@@ -1356,8 +1629,25 @@ export class Game {
       return;
     }
     if (s.state === "leaving") {
-      this.walkToward(s, 200 + (s.id % 7) * 30, 10, 48 * dt);
+      this.walkToward(s, (200 + (s.id % 7) * 30) * K, 10 * K, 48 * WALK * dt);
       s.wait = 0;
+    }
+  }
+
+  /** Skiers who can handle it hit the jumps and features on their run. */
+  private hitFeatures(s: Skier, trail: Trail, from: number, to: number): void {
+    for (const f of this.features) {
+      if (f.trailId !== trail.id) continue;
+      const at = nearestOnTrail(trail, f.x, f.y).along;
+      if (at <= from || at > to) continue;
+      const keen = s.likes === "park";
+      if (s.skill === 0 && !keen) continue; // beginners ski around
+      s.air = f.type === "halfpipe" ? 1.1 : f.type === "jump" ? 0.75 : 0.45;
+      s.mood = Math.min(100, s.mood + (keen ? 4 : 2));
+      if (Math.random() < 0.25) {
+        s.bubble = pick(["Sent it!", "Woo!", "Stomped", "Big air"]);
+        s.bubbleT = 1.6;
+      }
     }
   }
 
@@ -1434,4 +1724,35 @@ function segmentsCross(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
 
 function liftNoun(type: LiftType): string {
   return type === "tbar" ? "T-bar" : LIFT_SPECS[type].label.toLowerCase();
+}
+
+function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+function likes(): TrailKind {
+  const r = Math.random();
+  if (r < 0.55) return "slope";
+  if (r < 0.75) return "park";
+  if (r < 0.88) return "moguls";
+  return "slalom";
+}
+
+/** Closest point on a run: distance along it and the direction of travel there. */
+export function nearestOnTrail(t: Trail, x: number, y: number): { along: number; dx: number; dy: number; d: number } {
+  let best = { along: 0, dx: 0, dy: -1, d: Infinity };
+  let acc = 0;
+  for (let i = 1; i < t.points.length; i++) {
+    const a = t.points[i - 1];
+    const b = t.points[i];
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const len = Math.hypot(abx, aby) || 1;
+    const u = Math.max(0, Math.min(1, ((x - a.x) * abx + (y - a.y) * aby) / (len * len)));
+    const d = Math.hypot(x - (a.x + abx * u), y - (a.y + aby * u));
+    if (d < best.d) best = { along: acc + len * u, dx: abx / len, dy: aby / len, d };
+    acc += len;
+  }
+  return best;
 }

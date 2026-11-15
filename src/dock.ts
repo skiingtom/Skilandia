@@ -2,6 +2,12 @@ import {
   BUILDING_LABEL,
   BuildingType,
   EXPANSION_BUILDINGS,
+  FEATURE_SPEC,
+  FEATURE_TYPES,
+  FeatureType,
+  TRAIL_KINDS,
+  TRAIL_KIND_SPEC,
+  TrailKind,
   LIFT_SPECS,
   LIFT_TYPES,
   LiftType,
@@ -21,6 +27,7 @@ const ICONS = {
   lifts: svg('<path d="M2 5l20 6"/><path d="M12 8v6"/><path d="M8 14h8v3H8z"/><path d="M8 17v3M16 17v3"/>'),
   base: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>'),
   food: svg('<path d="M5 9h11v5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3c0 1.5 1 1.5 1 3M12 3c0 1.5 1 1.5 1 3"/>'),
+  park: svg('<path d="M2 19h20"/><path d="M4 19l9-6h3v6"/><path d="M16 13l3-3"/><circle cx="19.5" cy="6.5" r="1.6"/>'),
   resort: svg('<path d="M4 21V5l8-2v18"/><path d="M12 9h8v12"/><path d="M7 8h2M7 12h2M7 16h2M15 13h2M15 17h2"/><path d="M2 21h20"/>'),
 };
 
@@ -34,14 +41,16 @@ export interface DockGroup {
 
 export const DOCK_GROUPS: DockGroup[] = [
   { id: "look", label: "Look", tool: "select" },
-  { id: "trail", label: "Trail", tool: "cut" },
+  { id: "trail", label: "Trails", items: TRAIL_KINDS.map((k) => `trail:${k}` as Tool) },
+  { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
-  { id: "base", label: "Base", items: ["lodge", "restroom", "patrol"] },
+  { id: "base", label: "Base", items: ["lodge", "restroom", "school", "patrol"] },
   { id: "food", label: "Food", items: ["shack", "coffee", "sandwich", "restaurant"] },
   { id: "resort", label: "Resort", items: ["shop", "condo", "hotel"] },
 ];
 
 export function groupOf(tool: Tool): string | null {
+  if (tool === "cut") return "trail";
   return DOCK_GROUPS.find((g) => g.tool === tool || g.items?.includes(tool))?.id ?? null;
 }
 
@@ -55,6 +64,24 @@ const LIFT_UNIT: Record<LiftType, string> = {
 };
 
 function itemHtml(tool: Tool): string {
+  if (tool.startsWith("trail:")) {
+    const k = tool.slice(6) as TrailKind;
+    const spec = TRAIL_KIND_SPEC[k];
+    return `<button type="button" class="tool item" data-tool="${tool}">
+      <b>${spec.label}</b>
+      <small>${spec.costMul === 1 ? "length fee" : `length fee × ${spec.costMul}`}</small>
+      <em>${spec.blurb}</em>
+    </button>`;
+  }
+  if (tool.startsWith("feature:")) {
+    const f = tool.slice(8) as FeatureType;
+    const spec = FEATURE_SPEC[f];
+    return `<button type="button" class="tool item" data-tool="${tool}">
+      <b>${spec.label}</b>
+      <small>$${spec.cost.toLocaleString()}</small>
+      <em>${spec.blurb}</em>
+    </button>`;
+  }
   if (tool.startsWith("lift:")) {
     const t = tool.slice(5) as LiftType;
     const spec = LIFT_SPECS[t];
@@ -86,7 +113,7 @@ export function buildDock(dock: HTMLElement, menus: HTMLElement): void {
   ).join("");
   menus.innerHTML = DOCK_GROUPS.filter((g) => g.items)
     .map(
-      (g) => `<div class="dock-panel hidden${g.id === "lifts" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
+      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
         ${g.items!.map(itemHtml).join("")}
       </div>`,
     )

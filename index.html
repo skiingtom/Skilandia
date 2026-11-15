@@ -52,6 +52,14 @@
             <button type="button" class="ghost speed" data-speed="2">2×</button>
             <button type="button" class="ghost speed" data-speed="3">3×</button>
             <button type="button" id="btn-mute" class="ghost" title="Mute">Sound</button>
+            <button type="button" id="btn-settings" class="ghost icon-btn" aria-expanded="false" title="Settings" aria-label="Settings">⚙</button>
+          </div>
+          <div id="settings" class="settings hidden" role="dialog" aria-label="Settings">
+            <h2>Settings</h2>
+            <label class="switch">
+              <input type="checkbox" id="opt-move-fee" checked />
+              <span>Charge a fee to move buildings <small>(25% of the price)</small></span>
+            </label>
           </div>
         </header>
 
@@ -95,6 +103,7 @@
               place.
             </p>
             <button type="button" id="btn-remove-lift" class="ghost hidden">Take down this lift (40% back)</button>
+            <button type="button" id="btn-move-building" class="ghost hidden">Move</button>
           </section>
         </aside>
 
@@ -115,7 +124,7 @@
         </div>
 
         <div id="cut-banner" class="cut-banner hidden">
-          <p>
+          <p id="cut-text">
             Click downhill to draw a run. It should start high and finish near the
             base. Cost grows with length.
           </p>

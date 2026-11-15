@@ -3,7 +3,10 @@ import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { World3D } from "./scene";
 import { Game } from "./sim";
 import {
+  BUILDING_LABEL,
   BUILDING_MAX,
+  FEATURE_SPEC,
+  TRAIL_KIND_SPEC,
   BuildingType,
   COSTS,
   DIFF,
@@ -75,6 +78,11 @@ const cutCost = document.querySelector("#cut-cost")!;
 const finishBtn = document.querySelector<HTMLButtonElement>("#btn-finish-trail")!;
 const toastsEl = document.querySelector("#toasts")!;
 const placeHint = document.querySelector("#place-hint")!;
+const cutText = document.querySelector("#cut-text")!;
+const moveBtn = document.querySelector<HTMLButtonElement>("#btn-move-building")!;
+const settingsBtn = document.querySelector<HTMLButtonElement>("#btn-settings")!;
+const settingsEl = document.querySelector<HTMLElement>("#settings")!;
+const moveFeeOpt = document.querySelector<HTMLInputElement>("#opt-move-fee")!;
 const dockEl = document.querySelector<HTMLElement>("#dock")!;
 const dockMenus = document.querySelector<HTMLElement>("#dock-menus")!;
 buildDock(dockEl, dockMenus);
@@ -147,8 +155,8 @@ function paintHud(force = false): void {
   const expand = game.expansionUnlocked();
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
-    btn.classList.toggle("on", game.tool === tool);
-    if (tool === "select" || tool === "cut") {
+    btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
+    if (tool === "select" || tool === "cut" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -165,11 +173,18 @@ function paintHud(force = false): void {
   });
   document.querySelector("#btn-pause")!.textContent = game.paused ? "Resume" : "Pause";
   cutBanner.classList.toggle("hidden", game.tool !== "cut");
+  cutText.textContent = `${TRAIL_KIND_SPEC[game.trailKind].label}: click downhill to draw it, then Finish. ${TRAIL_KIND_SPEC[game.trailKind].blurb} Trees in the way get cleared.`;
+  const picked = game.selected?.kind === "building" ? game.buildings.find((b) => b.id === game.selected!.id) : undefined;
+  moveBtn.classList.toggle("hidden", !picked);
+  if (picked) {
+    const fee = game.moveFee(picked);
+    moveBtn.textContent = `Move this ${BUILDING_LABEL[picked.type].toLowerCase()} (${fee ? `$${fee.toLocaleString()}` : "free"})`;
+  }
   const info = game.draftInfo();
   if (info) {
     cutDiff.textContent = info.length < 8 ? "Click downhill" : DIFF[info.difficulty].name;
     cutCost.textContent = `$${info.cost}`;
-    finishBtn.disabled = game.draft.length < 2 || info.length < 90;
+    finishBtn.disabled = game.draft.length < 2 || info.length < 120;
   } else {
     cutDiff.textContent = "Click to start";
     cutCost.textContent = "$0";
@@ -216,12 +231,16 @@ function paintMountains(): void {
 
 function paintStaff(): void {
   const required = game.staffRequired();
-  staffSection.classList.toggle("locked", !required);
+  const school = game.empireCount("school") > 0;
+  staffSection.classList.toggle("locked", !required && !school);
   staffLock.textContent = required
     ? "After Little Hawk you must staff the place. Short crews slow shop take and sour the mood."
-    : "Payroll starts when you buy the next mountain. Then you need ski patrol, food, lifts, delivery, and maintenance.";
+    : school
+      ? "The ski school needs instructors (paid from day one). Full payroll starts when you buy the next mountain."
+      : "Payroll starts when you buy the next mountain. A ski school needs instructors right away.";
   const need = game.staffNeeds();
-  staffList.innerHTML = STAFF_ROLES.map((role) => {
+  const roles = required ? STAFF_ROLES : school ? (["instructor"] as const) : [];
+  staffList.innerHTML = roles.map((role) => {
     return `<div class="staff-row" data-role="${role}">
       <span>${STAFF_LABEL[role]} · ${game.staff[role]}/${need[role]} need</span>
       <button type="button" data-act="fire">−</button>
@@ -288,13 +307,28 @@ function loop(now: number): void {
     }
   } else if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
     const hit = world.hitAt(pointer.x, pointer.y);
-    if (hit && hit.mountain === game.currentMountain) {
+    const feature = game.featureTool();
+    const moving = game.movingBuilding();
+    if (hit && hit.mountain === game.currentMountain && feature) {
+      const err = game.canPlaceFeature(feature, hit.x, hit.y);
+      world.showGhost(`feature:${feature}`, hit.x, hit.y, !err, game.featureAngle(hit.x, hit.y));
+      placeHint.classList.remove("hidden");
+      placeHint.classList.toggle("ok", !err);
+      placeHint.textContent = err ?? `Click to build a ${FEATURE_SPEC[feature].label.toLowerCase()} · $${FEATURE_SPEC[feature].cost.toLocaleString()}`;
+    } else if (hit && hit.mountain === game.currentMountain && moving) {
+      const err = game.canMoveTo(hit.x, hit.y);
+      world.showGhost(moving.type, hit.x, hit.y, !err);
+      placeHint.classList.remove("hidden");
+      placeHint.classList.toggle("ok", !err);
+      const fee = game.moveFee(moving);
+      placeHint.textContent = err ?? `Click to move the ${BUILDING_LABEL[moving.type].toLowerCase()} here · ${fee ? `$${fee.toLocaleString()}` : "free"} · Esc to cancel`;
+    } else if (hit && hit.mountain === game.currentMountain && !feature && !moving) {
       const type = game.tool as BuildingType;
       const err = game.canPlace(type, hit.x, hit.y);
       world.showGhost(type, hit.x, hit.y, !err);
       placeHint.classList.remove("hidden");
       placeHint.classList.toggle("ok", !err);
-      placeHint.textContent = err ?? `Click to place ${type} in the village (sugar shacks can go on the hill).`;
+      placeHint.textContent = err ?? `Click to place the ${BUILDING_LABEL[type].toLowerCase()}.`;
     } else {
       world.hideGhost();
       placeHint.classList.add("hidden");
@@ -430,6 +464,8 @@ ticketRange.addEventListener("input", () => {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeMenus();
+    settingsEl.classList.add("hidden");
+    settingsBtn.classList.remove("on");
     game.cancel();
     paintHud();
   }
@@ -466,6 +502,23 @@ function toggleSlopeView(): void {
   document.querySelector(".legend")!.classList.toggle("slope-on", on);
 }
 slopeBtn.addEventListener("click", toggleSlopeView);
+
+moveBtn.addEventListener("click", () => {
+  if (game.selected?.kind !== "building") return;
+  game.startMove(game.selected.id);
+  audio.click();
+  paintHud();
+});
+settingsBtn.addEventListener("click", () => {
+  const open = settingsEl.classList.toggle("hidden") === false;
+  settingsBtn.setAttribute("aria-expanded", String(open));
+  settingsBtn.classList.toggle("on", open);
+});
+moveFeeOpt.addEventListener("change", () => {
+  game.moveFeeOn = moveFeeOpt.checked;
+  game.toast(game.moveFeeOn ? "Moving buildings costs 25% of their price." : "Moving buildings is free.");
+  paintHud();
+});
 
 removeLiftBtn.addEventListener("click", () => {
   if (game.selected?.kind !== "lift") return;

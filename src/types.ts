@@ -10,10 +10,20 @@ export type BuildingType =
   | "restaurant"
   | "shop"
   | "condo"
-  | "patrol";
+  | "patrol"
+  | "school";
 export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
-export type Tool = "select" | "cut" | BuildingType | `lift:${LiftType}`;
-export type StaffRole = "patrol" | "food" | "lift" | "delivery" | "maintenance";
+export type TrailKind = "slope" | "slalom" | "moguls" | "park";
+export type FeatureType = "jump" | "rail" | "box" | "halfpipe";
+export type Tool =
+  | "select"
+  | "cut"
+  | "move"
+  | BuildingType
+  | `lift:${LiftType}`
+  | `trail:${TrailKind}`
+  | `feature:${FeatureType}`;
+export type StaffRole = "patrol" | "food" | "lift" | "delivery" | "maintenance" | "instructor";
 export type SkierState =
   | "arriving"
   | "booth"
@@ -37,6 +47,18 @@ export interface Trail {
   difficulty: Difficulty;
   length: number;
   drop: number;
+  kind: TrailKind;
+}
+
+/** A terrain-park feature or jump sitting on the snow. */
+export interface Feature {
+  id: number;
+  type: FeatureType;
+  x: number;
+  y: number;
+  /** Direction skiers travel over it (radians, in map x/y). */
+  angle: number;
+  trailId: number | null;
 }
 
 export interface Lift {
@@ -73,6 +95,11 @@ export interface Skier {
   trailId: number | null;
   liftId: number | null;
   rideT: number;
+  /** Favourite kind of run. */
+  likes: TrailKind;
+  /** Seconds of airtime left after hitting a jump or feature. */
+  air: number;
+  lesson: boolean;
   dist: number;
   wait: number;
   runsLeft: number;
@@ -107,9 +134,11 @@ export interface Goal {
   done: boolean;
 }
 
-export const WORLD_W = 640;
-export const WORLD_H = 820;
-export const VERTICAL_M = 128;
+/** The maps were 640 x 820; everything scales from that. */
+export const MAP_SCALE = 2.5;
+export const WORLD_W = 640 * MAP_SCALE;
+export const WORLD_H = 820 * MAP_SCALE;
+export const VERTICAL_M = 128 * MAP_SCALE;
 export const UNIT_M = 0.62;
 
 export const MOUNTAINS: {
@@ -157,6 +186,7 @@ export const COSTS: Record<BuildingType, number> = {
   shop: 3200,
   condo: 9500,
   patrol: 1600,
+  school: 3800,
 };
 
 /** Dollars per minute at a busy hill, 1× speed. */
@@ -171,6 +201,7 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   restaurant: 175,
   condo: 200,
   hotel: 220,
+  school: 150,
 };
 
 export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
@@ -187,11 +218,12 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   shop: 3,
   condo: 3,
   patrol: 2,
+  school: 1,
 };
 
 export const EXPANSION_BUILDINGS: BuildingType[] = ["hotel", "restaurant", "shop", "condo", "patrol"];
 
-export const STAFF_ROLES: StaffRole[] = ["patrol", "food", "lift", "delivery", "maintenance"];
+export const STAFF_ROLES: StaffRole[] = ["patrol", "instructor", "food", "lift", "delivery", "maintenance"];
 
 export const STAFF_LABEL: Record<StaffRole, string> = {
   patrol: "Ski patrol",
@@ -199,6 +231,7 @@ export const STAFF_LABEL: Record<StaffRole, string> = {
   lift: "Lift attendants",
   delivery: "Delivery",
   maintenance: "Maintenance",
+  instructor: "Ski instructors",
 };
 
 export const STAFF_WAGE_PER_MIN: Record<StaffRole, number> = {
@@ -207,6 +240,7 @@ export const STAFF_WAGE_PER_MIN: Record<StaffRole, number> = {
   lift: 16,
   delivery: 12,
   maintenance: 15,
+  instructor: 15,
 };
 
 export const START_MONEY = 2200;
@@ -230,6 +264,7 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   shop: "Shop",
   condo: "Condo",
   patrol: "Ski patrol hut",
+  school: "Ski school",
 };
 
 /** Height in world units of one unit of elevation, as drawn (true classifier scale × 1.3). */
@@ -264,7 +299,7 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Magic carpet",
     short: "Carpet",
     seats: 1,
-    speed: 14,
+    speed: 20,
     spacing: 7,
     baseCost: 500,
     costPerUnit: 3,
@@ -279,12 +314,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "T-bar",
     short: "T-bar",
     seats: 2,
-    speed: 30,
+    speed: 60,
     spacing: 30,
     baseCost: 1400,
-    costPerUnit: 4,
+    costPerUnit: 3,
     minLength: 90,
-    maxLength: 620,
+    maxLength: 1300,
     surface: true,
     maxGrade: 0.45,
     towerH: 9,
@@ -294,12 +329,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Double chair",
     short: "Double",
     seats: 2,
-    speed: 30,
+    speed: 60,
     spacing: 30,
     baseCost: 3500,
-    costPerUnit: 8,
+    costPerUnit: 5,
     minLength: 120,
-    maxLength: 900,
+    maxLength: 1900,
     surface: false,
     maxGrade: 9,
     towerH: 15,
@@ -309,12 +344,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Quad chair",
     short: "Quad",
     seats: 4,
-    speed: 40,
+    speed: 80,
     spacing: 36,
     baseCost: 6000,
-    costPerUnit: 12,
+    costPerUnit: 7,
     minLength: 150,
-    maxLength: 1000,
+    maxLength: 2300,
     surface: false,
     maxGrade: 9,
     towerH: 17,
@@ -324,12 +359,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "Covered six-pack",
     short: "Six-pack",
     seats: 6,
-    speed: 48,
+    speed: 95,
     spacing: 42,
     baseCost: 10000,
-    costPerUnit: 16,
+    costPerUnit: 9,
     minLength: 180,
-    maxLength: 1100,
+    maxLength: 2600,
     surface: false,
     maxGrade: 9,
     towerH: 19,
@@ -339,12 +374,12 @@ export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
     label: "8-person gondola",
     short: "Gondola",
     seats: 8,
-    speed: 56,
+    speed: 110,
     spacing: 54,
     baseCost: 16000,
-    costPerUnit: 22,
+    costPerUnit: 12,
     minLength: 220,
-    maxLength: 1300,
+    maxLength: 3200,
     surface: false,
     maxGrade: 9,
     towerH: 24,
@@ -358,3 +393,27 @@ export function liftCost(type: LiftType, length: number): number {
 }
 
 export const MAX_LIFTS = 6;
+
+export const TRAIL_KINDS: TrailKind[] = ["slope", "slalom", "moguls", "park"];
+
+export const TRAIL_KIND_SPEC: Record<
+  TrailKind,
+  { label: string; blurb: string; costMul: number; speedMul: number; width: number; diffBump: number }
+> = {
+  slope: { label: "Groomed slope", blurb: "A regular groomed run.", costMul: 1, speedMul: 1, width: 10, diffBump: 0 },
+  slalom: { label: "Slalom course", blurb: "Gates down the run. Racers love it.", costMul: 1.3, speedMul: 0.9, width: 10, diffBump: 0 },
+  moguls: { label: "Mogul run", blurb: "Left ungroomed. Bumps rate it one notch harder.", costMul: 1.15, speedMul: 0.72, width: 10, diffBump: 1 },
+  park: { label: "Terrain park", blurb: "Wide run for jumps, rails, boxes and a halfpipe.", costMul: 1.5, speedMul: 0.85, width: 18, diffBump: 0 },
+};
+
+export const FEATURE_TYPES: FeatureType[] = ["jump", "rail", "box", "halfpipe"];
+
+export const FEATURE_SPEC: Record<FeatureType, { label: string; cost: number; parkOnly: boolean; blurb: string }> = {
+  jump: { label: "Jump", cost: 300, parkOnly: false, blurb: "A kicker. Goes on any run, or anywhere on the hill." },
+  rail: { label: "Rail", cost: 450, parkOnly: true, blurb: "Grind rail. Terrain parks only." },
+  box: { label: "Box", cost: 350, parkOnly: true, blurb: "Wide fun-box. Terrain parks only." },
+  halfpipe: { label: "Halfpipe", cost: 2400, parkOnly: true, blurb: "A big pipe. Terrain parks only." },
+};
+
+/** Fee to move a building, as a share of its price. */
+export const MOVE_FEE = 0.25;
