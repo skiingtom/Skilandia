@@ -166,14 +166,14 @@ export const BASE = { x: 13650, y: 7672 };
  * labels); the sim snaps each one to the true high point nearby.
  */
 export const PEAKS: { id: string; name: string; x: number; y: number }[] = [
-  { id: "sproatt", name: "Mount Sproatt", x: 590 * 14, y: (1188 - 535) * 14 },
-  { id: "whistler", name: "Whistler Mountain", x: 962 * 14, y: (1188 - 1052) * 14 },
-  { id: "piccolo", name: "Piccolo Summit", x: 1030 * 14, y: (1188 - 1150) * 14 },
-  { id: "blackcomb", name: "Blackcomb Peak", x: 1383 * 14, y: (1188 - 873) * 14 },
-  { id: "spearhead", name: "The Spearhead", x: 1418 * 14, y: (1188 - 840) * 14 },
-  { id: "decker", name: "Decker Mountain", x: 1462 * 14, y: (1188 - 968) * 14 },
-  { id: "rainbow", name: "Rainbow Mountain", x: 468 * 14, y: (1188 - 106) * 14 },
-  { id: "wedge", name: "Wedge Mountain", x: 1768 * 14, y: (1188 - 478) * 14 },
+  { id: "hollin", name: "Hollin Knob", x: 590 * 14, y: (1188 - 535) * 14 },
+  { id: "ravenhorn", name: "Ravenhorn", x: 962 * 14, y: (1188 - 1052) * 14 },
+  { id: "ember", name: "Little Ember", x: 1030 * 14, y: (1188 - 1150) * 14 },
+  { id: "corvid", name: "Corvid Peak", x: 1383 * 14, y: (1188 - 873) * 14 },
+  { id: "lance", name: "The Lance", x: 1418 * 14, y: (1188 - 840) * 14 },
+  { id: "frostmere", name: "Frostmere", x: 1462 * 14, y: (1188 - 968) * 14 },
+  { id: "halcyon", name: "Halcyon Dome", x: 468 * 14, y: (1188 - 106) * 14 },
+  { id: "kingsfang", name: "Kingsfang", x: 1768 * 14, y: (1188 - 478) * 14 },
 ];
 
 /** A lift top this close to a summit (and nearly as high) conquers it. */

@@ -15,7 +15,7 @@ F11 toggles fullscreen.
 
 The whole game is one big real landscape: a 28 × 17 km valley and the peaks around it, built from a topographic map (1 unit = 1 metre, real elevations from about 500 m to 2,770 m). You start with one small T-bar and two green runs at the base village.
 
-Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Mount Sproatt (1,910 m) to Wedge Mountain (2,765 m); conquer them all to win. The **Conquer the mountain** panel lists them; click one to fly there.
+Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Hollin Knob (1,910 m) to Kingsfang (2,765 m); conquer them all to win. The **Conquer the mountain** panel lists them; click one to fly there.
 
 Conquering peaks grows the resort:
 
