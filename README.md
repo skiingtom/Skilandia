@@ -15,7 +15,9 @@ F11 toggles fullscreen.
 
 The whole game is one big real landscape: a 28 × 17 km valley and the peaks around it, built from a topographic map (1 unit = 1 metre, real elevations from about 500 m to 2,780 m). You start with one small T-bar and two green runs at the base village.
 
-Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Hollin Knob (1,916 m) to Kingsfang (2,777 m); conquer them all to win. The **Conquer the mountain** panel lists them; click one to fly there.
+Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Hollin Knob (1,916 m) to Kingsfang (2,777 m); conquer them all to win. The **Goals** dropdown at the top right shows your tier, a bar of the 8 peaks and your next goal; open it for the full list and the peaks (click one to fly there).
+
+Every goal on the list pays a cash bonus when you reach it (a road in $1,500, a lodge $3,000, a black run $4,000, ski patrol $8,000, each new tier $25,000 to $400,000, all 8 peaks $1,000,000), and every peak pays its own bonus, more for higher summits ($15,000 for Hollin Knob up to about $66,000 for Kingsfang). A popup celebrates each one.
 
 Conquering peaks grows the resort:
 
@@ -56,6 +58,12 @@ Run difficulty uses real-world pitches: green under 25%, blue under 40%, black u
 - Pick **Roads**, click on the highway (or any road, or the parking lot), click along the way, and end on a road or the lot to finish. Roads cost $6/m, clear the trees in their path, and can't climb steeper than 14%, so zig-zag up steep ground
 - Cars drive the route in and out, busier when the hill is busy
 
+### Footpaths
+
+- Pick **Footpath** in the **Roads** menu. Click to start (on a building, a lift's bottom station, the ticket booth, a parking lot or another path, or anywhere), click along the way, and end on a building, lift or path to finish. The painter stays on, so you can lay the next path straight away
+- People on foot (arriving, heading to a lift, visiting shops and food, walking back to the car) follow the paths whenever that's quicker than wading through the snow. They walk 1.7× faster on a path and enjoy it a little
+- $2/m, at most 30% grade, and they clear the trees in their way. Demolish gives 25% back
+
 ### Parking
 
 Every skier arrives by car, so **parking is a fourth limit** on how many skiers come, next to lifts, runs and the resort tier. The lot you start with holds 400 skiers. Build more from the **Roads** menu:
@@ -88,6 +96,7 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 ### Lifts
 
 - Magic carpet, T-bar, double, quad, covered six-pack and 8-person gondola. Click the bottom station, then the top
+- Chairlifts have detachable terminals with the lift's name on the side; gondola cabins ride into a station hall at each end
 - Carpets and T-bars ride on the snow, so the ground must climb the whole way (and stay gentle for a carpet). Chairs and the gondola fly over anything uphill
 - Select a lift to see its capacity, or take it down for 40% back
 
@@ -99,7 +108,8 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 - **Dining**: restaurant, après bar, brewpub, fondue stübli, sushi bar, steakhouse, summit restaurant (on the mountain; needs a regional resort, 3 peaks)
 - **Shops**: gift shop, ski & board shop, village market, shop, chocolatier, outdoor outfitter, fashion boutique. Skiers finishing their day often browse the nearest shop on the way to the car
 - **Hotels**: motel, bed & breakfast, hostel, mountain inn, condo, hotel, boutique hotel (needs a regional resort, 3 peaks), grand hotel (needs a destination resort, 5 peaks)
-- **Resort**: spa, cabin rental office, ski-in cabins, heli-ski base
+- **Resort**: scenic lookout, spa, cabin rental office, ski-in cabins, heli-ski base
+- **Scenic lookout** ($1,800, up to 6): a timber deck with two fire pits, Adirondack chairs, a log bench, a picnic table and coin binoculars. Goes anywhere, village or mountain. About a third of the skiers getting off a lift within 350 m of one stop by once a day to warm up before their run, and the higher the lookout, the happier they leave
 - Each different kind of food, shop and hotel adds to the resort's appeal, which raises the fair ticket price and draws more skiers. Gift shops, ski shops, markets, motels, B&Bs and the quick-bite places are open from the start; the fancier ones (and hostels, spas, bars, hotels, condos, patrol) unlock after your first peak
 - **Ski school** sells lessons to beginners (some graduate to blues). It needs instructors, who are paid from day one
 - **Heli-ski base** ($450,000) flies expert skiers off the map to the backcountry, eight at a time, for $650 a seat. It costs $1,500/min to run plus $600 fuel a flight; a busy one clears about $7,700/min

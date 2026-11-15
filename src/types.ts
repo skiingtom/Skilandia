@@ -26,6 +26,7 @@ export type BuildingType =
   | "cabinOffice"
   | "cabin"
   | "heli"
+  | "lookout"
   // Quick bites
   | "pizza"
   | "burger"
@@ -59,6 +60,7 @@ export type Tool =
   | "select"
   | "cut"
   | "road"
+  | "path"
   | "demolish"
   | "clearTrees"
   | "plantTrees"
@@ -166,6 +168,13 @@ export interface Skier {
   visitType: BuildingType | null;
   bubble: string | null;
   bubbleT: number;
+  /** Already stopped at a lookout today. */
+  sawView?: boolean;
+  /** Footpath waypoints still to walk, and the destination they lead to. */
+  route?: Vec2[];
+  routeFor?: string;
+  /** Walking along a footpath right now. */
+  onPath?: boolean;
 }
 
 export interface Fx {
@@ -271,6 +280,7 @@ export const COSTS: Record<BuildingType, number> = {
   cabinOffice: 3400,
   cabin: 1500,
   heli: 45000,
+  lookout: 1800,
   pizza: 1300,
   burger: 1150,
   bakery: 980,
@@ -320,6 +330,7 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   cabinOffice: 60,
   cabin: 75,
   heli: 0,
+  lookout: 30,
   pizza: 150,
   burger: 135,
   bakery: 105,
@@ -344,8 +355,8 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   grandHotel: 600,
 };
 
-export const PLACE_ANYWHERE: BuildingType[] = ["shack", "foodTruck"];
-export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "foodTruck", "waffle", "summit", "patrol", "clinic", "cabin"];
+export const PLACE_ANYWHERE: BuildingType[] = ["shack", "foodTruck", "lookout"];
+export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "foodTruck", "waffle", "summit", "patrol", "clinic", "cabin", "lookout"];
 /** Small enough to sit right beside a run. */
 export const TRAILSIDE: BuildingType[] = ["shack", "foodTruck", "waffle"];
 
@@ -373,6 +384,7 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   cabinOffice: 1,
   cabin: 30,
   heli: 1,
+  lookout: 6,
   pizza: 2,
   burger: 2,
   bakery: 1,
@@ -415,7 +427,7 @@ export const STARTER_LOT_SKIERS = 400;
 export function buildingRadius(type: BuildingType): number {
   return (
     PARKING[type]?.radius ??
-    (type === "heli" ? 40 : type === "grandHotel" ? 32 : type === "cabin" ? 24 : type === "foodTruck" || type === "waffle" ? 14 : 22)
+    (type === "heli" ? 40 : type === "grandHotel" ? 32 : type === "cabin" || type === "lookout" ? 24 : type === "foodTruck" || type === "waffle" ? 14 : 22)
   );
 }
 
@@ -454,6 +466,7 @@ export const LODGING_BUILDINGS: BuildingType[] = [...HOTEL_BUILDINGS, ...SHOP_BU
  * ticket price and how many skiers come). Repeats of one type add nothing.
  */
 export const APPEAL: Partial<Record<BuildingType, number>> = {
+  lookout: 0.07,
   pizza: 0.09,
   burger: 0.08,
   bakery: 0.07,
@@ -569,6 +582,7 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   cabinOffice: "Cabin rental office",
   cabin: "Ski-in cabin",
   heli: "Heli-ski base",
+  lookout: "Scenic lookout",
   pizza: "Pizzeria",
   burger: "Burger joint",
   bakery: "Bakery",
@@ -595,6 +609,7 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
 
 /** One line on what each building is, for the build menu. */
 export const BUILDING_BLURB: Partial<Record<BuildingType, string>> = {
+  lookout: "A timber deck with fire pits and benches. Skiers off a nearby lift stop to warm up and take in the view. Higher is better.",
   pizza: "Wood-fired slices. Fast and filling.",
   burger: "Burgers and fries, cheap and quick.",
   bakery: "Croissants and cinnamon buns for the morning crowd.",

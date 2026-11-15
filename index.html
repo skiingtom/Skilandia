@@ -97,13 +97,25 @@
         </div>
 
         <aside class="panel" id="panel">
-          <section>
-            <h2>Conquer the mountain</h2>
-            <div id="mountains" class="mountains"></div>
-          </section>
-          <section>
-            <h2>Today’s list</h2>
-            <ul id="goals" class="goals"></ul>
+          <section id="goals-drop" class="goals-drop">
+            <button type="button" id="goals-toggle" class="goals-toggle" aria-expanded="false" aria-controls="goals-body">
+              <span class="gt-text">
+                <small>Goals</small>
+                <b id="goals-tier">Local hill</b>
+              </span>
+              <span id="goals-meta" class="gt-meta">0/8 peaks</span>
+              <svg class="gt-chev" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div id="goals-pips" class="goals-pips" aria-hidden="true"></div>
+            <p id="goals-next" class="goals-next"></p>
+            <div id="goals-body" class="goals-body">
+              <div class="goals-inner">
+                <h2>Today’s list</h2>
+                <ul id="goals" class="goals"></ul>
+                <h2>Conquer the mountain</h2>
+                <div id="mountains" class="mountains"></div>
+              </div>
+            </div>
           </section>
           <section>
             <h2>The hill is saying</h2>
@@ -203,6 +215,18 @@
         <div id="place-hint" class="place-hint hidden"></div>
 
         <div id="toasts" class="toasts"></div>
+
+        <div id="reward" class="reward hidden" role="dialog" aria-live="polite" aria-labelledby="reward-title">
+          <div class="reward-card">
+            <div class="reward-burst" aria-hidden="true"></div>
+            <span id="reward-icon" class="reward-icon" aria-hidden="true">⭐</span>
+            <p id="reward-kind" class="eyebrow">Goal reached</p>
+            <h3 id="reward-title">Goal reached</h3>
+            <p id="reward-text" class="reward-text"></p>
+            <p id="reward-bonus" class="reward-bonus">+$0 bonus</p>
+            <button type="button" id="reward-ok">Collect</button>
+          </div>
+        </div>
 
         <div id="dock-menus" class="dock-menus"></div>
 

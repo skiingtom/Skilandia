@@ -1,3 +1,4 @@
+import { PATH_COST_PER_M, PATH_MAX_GRADE, PATH_MIN_LEG, PATH_SNAP, PATH_SPEED, PATH_WIDTH, Path, PathNet } from "./paths";
 import { HIGHWAY, ROAD_COST_PER_M, ROAD_MAX_GRADE, ROAD_MIN_LEG, ROAD_SNAP, ROAD_WIDTH, Road, legGrade, nearestOnRoad, roadLength, routeTo } from "./roads";
 import { SculptMode, TREELINE_M, flattenPad, isRock, rockAt, sculpt } from "./height";
 import { elevation, elevationM, gradeAt, lerp, nearSegment, noise2, pointOnPolyline, polylineLength } from "./height";
@@ -159,6 +160,14 @@ export class Game {
   roads: Road[] = [{ id: 0, points: HIGHWAY.map((p) => ({ ...p })), highway: true }];
   /** Bumped whenever the road network changes. */
   roadVersion = 0;
+  /** Footpaths people walk on between buildings. */
+  paths: Path[] = [];
+  pathVersion = 0;
+  private pathNetCache: { v: number; net: PathNet } | null = null;
+  /** Goals already paid out, and celebrations waiting to be shown. */
+  goalsPaid = new Set<string>();
+  rewards: Reward[] = [];
+  private goalCheckT = 0;
   /** Circles of forest the player has felled with the tree brush. */
   clearings: { x: number; y: number; r: number }[] = [];
   /** Trees the player has planted (on top of the procedural forest). */
@@ -465,6 +474,9 @@ export class Game {
     for (const b of this.buildings) add(b.x, b.y, b.x, b.y, buildingRadius(b.type));
     for (const f of this.features) add(f.x, f.y, f.x, f.y, f.type === "halfpipe" ? 40 : 12);
     for (const [a, b, w] of this.roadSegsIn(x0, y0, x1, y1)) add(a.x, a.y, b.x, b.y, w / 2 + 5);
+    for (const pth of this.paths) {
+      for (let i = 1; i < pth.points.length; i++) add(pth.points[i - 1].x, pth.points[i - 1].y, pth.points[i].x, pth.points[i].y, PATH_WIDTH / 2 + 2);
+    }
     for (const c of this.clearings) add(c.x, c.y, c.x, c.y, c.r, false, true);
     return { x0, y0, cell, cols, cells };
   }
@@ -680,7 +692,16 @@ export class Game {
       );
       if (!reached) continue;
       this.conquered.add(p.id);
-      this.toast(`🚩 ${p.name} (${p.elevation.toLocaleString()} m) conquered! ${this.conquered.size}/${SUMMITS.length} peaks.`);
+      const bonus = peakBonus(p.elevation);
+      this.money += bonus;
+      this.rewards.push({
+        id: this.id(),
+        kind: "peak",
+        title: `${p.name} conquered`,
+        text: `${p.elevation.toLocaleString()} m summit · ${this.conquered.size} of ${SUMMITS.length} peaks`,
+        bonus,
+      });
+      this.toast(`🚩 ${p.name} (${p.elevation.toLocaleString()} m) conquered! ${this.conquered.size}/${SUMMITS.length} peaks. Bonus +$${bonus.toLocaleString()}.`);
       this.sfx.push("build");
     }
     const after = this.tier();
@@ -861,8 +882,8 @@ export class Game {
       this.lastBrush = null;
       return;
     }
-    if (tool === "road") {
-      this.tool = "road";
+    if (tool === "road" || tool === "path") {
+      this.tool = tool;
       this.draft = [];
       this.selected = null;
       return;
@@ -1437,6 +1458,10 @@ export class Game {
       const d = nearestOnRoad(r.points, x, y).d;
       if (d < ROAD_WIDTH / 2 + 6) offer({ kind: "road", id: r.id, label: "Road", refund: Math.round(roadLength(r.points) * ROAD_COST_PER_M * 0.25) }, d);
     }
+    for (const pth of this.paths) {
+      const d = nearestOnRoad(pth.points, x, y).d;
+      if (d < PATH_WIDTH / 2 + 5) offer({ kind: "path", id: pth.id, label: "Path", refund: Math.round(roadLength(pth.points) * PATH_COST_PER_M * 0.25) }, d + 1);
+    }
     return best;
   }
 
@@ -1454,7 +1479,7 @@ export class Game {
   private demolishAt(x: number, y: number): "ok" | "shake" | "none" {
     const t = this.demolishTarget(x, y) as DemolishTarget | null;
     if (!t) {
-      this.toast("Nothing to demolish there. Click a building, lift, run, park feature or road.", true);
+      this.toast("Nothing to demolish there. Click a building, lift, run, park feature, road or path.", true);
       return "shake";
     }
     if (t.kind === "lift" && this.lifts.length <= 1) {
@@ -1488,6 +1513,9 @@ export class Game {
       // Park features go with the run they were built on.
       this.features = this.features.filter((f) => f.trailId !== tr.id);
       for (const s of this.skiers) if (s.trailId === tr.id) s.trailId = null;
+    } else if (t.kind === "path") {
+      this.paths = this.paths.filter((q) => q.id !== t.id);
+      this.pathVersion++;
     } else {
       const r = this.roads.find((q) => q.id === t.id)!;
       this.stampClearing(r.points, ROAD_WIDTH / 2 + 5);
@@ -1689,6 +1717,164 @@ export class Game {
     return "ok";
   }
 
+  // ---------- footpaths
+
+  /** Walking network over the footpaths (rebuilt when they change). */
+  pathNet(): PathNet {
+    if (!this.pathNetCache || this.pathNetCache.v !== this.pathVersion) this.pathNetCache = { v: this.pathVersion, net: new PathNet(this.paths) };
+    return this.pathNetCache.net;
+  }
+
+  /**
+   * Snap a path click onto something people walk to or from: another path,
+   * a building's door, a lift's bottom station, the ticket booth or the lot.
+   */
+  private snapPath(x: number, y: number): { p: Vec2; joins: boolean } | null {
+    let best: { p: Vec2; d: number; joins: boolean } | null = null;
+    const offer = (p: Vec2, d: number, reach: number) => {
+      if (d < reach && (!best || d < best.d)) best = { p: { x: p.x, y: p.y }, d, joins: true };
+    };
+    for (const pth of this.paths) {
+      const n = nearestOnRoad(pth.points, x, y);
+      offer(n.p, n.d, PATH_SNAP);
+    }
+    for (const b of this.buildings) {
+      if (PARKING[b.type]) continue;
+      offer(b, Math.hypot(b.x - x, b.y - y), buildingRadius(b.type) + 8);
+    }
+    for (const l of this.lifts) offer(l.bottom, Math.hypot(l.bottom.x - x, l.bottom.y - y), 22);
+    const booth = this.booth();
+    offer(booth, Math.hypot(booth.x - x, booth.y - y), 18);
+    for (const lot of this.parkingLots()) offer(lot, Math.hypot(lot.x - x, lot.y - y), lot.id === null ? 40 : 30);
+    return best;
+  }
+
+  pathDraftInfo(): { length: number; cost: number; grade: number } {
+    const length = roadLength(this.draft);
+    let grade = 0;
+    for (let i = 1; i < this.draft.length; i++) grade = Math.max(grade, legGrade(this.draft[i - 1], this.draft[i]));
+    return { length, cost: Math.round(length * PATH_COST_PER_M), grade };
+  }
+
+  private clickPath(x: number, y: number): "ok" | "shake" | "none" {
+    if (x < 12 || x > WORLD_W - 12 || y < 12 || y > WORLD_H - 12) {
+      this.toast("That's off the map.", true);
+      return "shake";
+    }
+    const snap = this.snapPath(x, y);
+    const p = snap?.p ?? { x, y };
+    if (this.draft.length === 0) {
+      this.draft.push(p);
+      return "ok";
+    }
+    const last = this.draft[this.draft.length - 1];
+    if (Math.hypot(p.x - last.x, p.y - last.y) < PATH_MIN_LEG) return "none";
+    const g = legGrade(last, p);
+    if (g > PATH_MAX_GRADE) {
+      this.toast(`Too steep for a footpath (${Math.round(g * 100)}%, max ${Math.round(PATH_MAX_GRADE * 100)}%). Wind it across the slope.`, true);
+      return "shake";
+    }
+    this.draft.push(p);
+    // Reaching another path, a building, a lift or the lot finishes it.
+    if (snap?.joins) return this.finishPath();
+    return "ok";
+  }
+
+  finishPath(): "ok" | "shake" | "none" {
+    if (this.draft.length < 2) {
+      this.toast("Click along the way you want people to walk.", true);
+      return "shake";
+    }
+    const { length, cost } = this.pathDraftInfo();
+    if (this.money < cost) {
+      this.toast(`Need $${(cost - this.money).toLocaleString()} more for this path.`, true);
+      return "shake";
+    }
+    const points = this.draft.map((p) => ({ ...p }));
+    // Join up: split any path an end lands on, so they share a point.
+    for (const end of [points[0], points[points.length - 1]]) {
+      for (const r of this.paths) {
+        const n = nearestOnRoad(r.points, end.x, end.y);
+        if (n.d > 0.5) continue;
+        const a = r.points[n.seg];
+        const b = r.points[n.seg + 1];
+        if (b && Math.hypot(a.x - end.x, a.y - end.y) > 0.5 && Math.hypot(b.x - end.x, b.y - end.y) > 0.5) r.points.splice(n.seg + 1, 0, { x: end.x, y: end.y });
+        break;
+      }
+    }
+    this.money -= cost;
+    this.paths.push({ id: this.id(), points });
+    this.pathVersion++;
+    this.clearTrees();
+    const tail = points[points.length - 1];
+    this.float(tail.x, tail.y, `-${cost}`, "#d9785f");
+    this.toast(`Footpath laid: ${Math.round(length)} m for $${cost.toLocaleString()}. People on foot will use it.`);
+    // Stay on the painter so the next path can start right away.
+    this.draft = [];
+    return "ok";
+  }
+
+  /** Off the lift: a lookout close by draws some people over for the view (once a day each). */
+  private maybeLookout(s: Skier): void {
+    if (s.sawView || !this.has("lookout")) return;
+    const spot = this.nearestOf(["lookout"], s.x, s.y);
+    if (!spot || Math.hypot(spot.x - s.x, spot.y - s.y) > LOOKOUT_REACH || Math.random() > 0.3) return;
+    s.sawView = true;
+    s.state = "visit";
+    s.visitType = "lookout";
+    s.wait = 0;
+  }
+
+  /** Walk toward a spot, along the footpaths when that's the better way. */
+  private walkTo(s: Skier, x: number, y: number, step: number, dt: number): void {
+    if (!this.paths.length) {
+      s.onPath = false;
+      this.walkToward(s, x, y, step);
+      return;
+    }
+    const key = `${Math.round(x)},${Math.round(y)}:${this.pathVersion}`;
+    if (s.routeFor !== key) {
+      s.routeFor = key;
+      s.route = this.pathNet().route(s, { x, y }) ?? undefined;
+      s.onPath = false;
+    }
+    const r = s.route;
+    if (r && r.length) {
+      const wp = r[0];
+      this.walkToward(s, wp.x, wp.y, s.onPath ? step * PATH_SPEED : step);
+      if (Math.hypot(s.x - wp.x, s.y - wp.y) < 1) {
+        r.shift();
+        s.onPath = r.length > 0;
+      }
+      // A cleared walkway beats wading through the drifts.
+      if (s.onPath) s.mood = Math.min(100, s.mood + dt * 0.4);
+      return;
+    }
+    s.onPath = false;
+    this.walkToward(s, x, y, step);
+  }
+
+  // ---------- goals and rewards
+
+  /** Pay out goals as they're reached, and queue a celebration for each. */
+  private checkGoals(): void {
+    for (const g of this.goals()) {
+      if (!g.done || this.goalsPaid.has(g.id)) continue;
+      this.goalsPaid.add(g.id);
+      const bonus = GOAL_BONUS[g.id] ?? 2000;
+      this.money += bonus;
+      const tierIdx = g.id.startsWith("tier") ? Number(g.id.slice(4)) : 0;
+      const tier = tierIdx ? TIERS[tierIdx] : null;
+      this.rewards.push({
+        id: this.id(),
+        kind: g.id === "all" ? "win" : "goal",
+        title: tier ? `You're a ${tier.name.toLowerCase()}!` : g.id === "all" ? "You conquered the mountain!" : "Goal reached",
+        text: tier ? `Room for ${tier.capacity.toLocaleString()} skiers and ${tier.maxLifts} lifts.` : g.text.replace(/ \(\$[\d,]+\)$/, ""),
+        bonus,
+      });
+    }
+  }
+
   canPlace(type: BuildingType, x: number, y: number, opts: { ignoreId?: number; cost?: number } = {}): string | null {
     const moving = opts.ignoreId != null;
     const others = this.buildings.filter((b) => b.id !== opts.ignoreId);
@@ -1732,6 +1918,7 @@ export class Game {
     if (!this.managing) return "none";
     if (this.tool === "cut") return this.clickCut(x, y);
     if (this.tool === "road") return this.clickRoad(x, y);
+    if (this.tool === "path") return this.clickPath(x, y);
     if (this.tool === "demolish") return this.demolishAt(x, y);
     if (this.tool === "clearTrees") return this.paintClearing(x, y);
     if (this.tool === "plantTrees") return this.paintPlanting(x, y);
@@ -1830,6 +2017,7 @@ export class Game {
           ? "Ski-in / ski-out: guests step out the door onto a run. Fully booked."
           : `No run within ${CABIN_REACH} m any more, so it rents for a fraction of the price. Cut a run past it.`,
         heli: "",
+        lookout: `Fire pits and benches with a view. ${this.skiers.filter((k) => k.visitType === "lookout").length} people up here now. Skiers stop by from lifts within ${LOOKOUT_REACH} m.`,
       };
       if (b.type === "heli") {
         const waiting = this.skiers.filter((k) => k.state === "heliWait").length;
@@ -1913,6 +2101,7 @@ export class Game {
 
   finishTrail(): "ok" | "shake" | "none" {
     if (this.tool === "road") return this.finishRoad();
+    if (this.tool === "path") return this.finishPath();
     if (this.draft.length < 2) {
       this.toast("Click a few downhill points first.", true);
       return "shake";
@@ -2071,6 +2260,11 @@ export class Game {
       return;
     }
     if (this.managing) {
+      this.goalCheckT -= capped;
+      if (this.goalCheckT <= 0) {
+        this.goalCheckT = 1;
+        this.checkGoals();
+      }
       const snowing = this.weather().snow > 0.15;
       this.dayT += capped;
       if (this.dayT >= 52) {
@@ -2083,6 +2277,7 @@ export class Game {
         this.upkeepToday = 0;
         this.heliFlightsToday = 0;
         this.heliTakeToday = 0;
+        for (const k of this.skiers) k.sawView = false;
         this.toast(`Day ${this.day} in Skilandia.`);
       }
       const wNow = this.weather();
@@ -2411,6 +2606,7 @@ export class Game {
                 ? -lift.id
                 : this.chooseTrail(s, lift)?.id ?? null;
             s.dist = 0;
+            this.maybeLookout(s);
           }
           c.riders = [];
         }
@@ -2510,7 +2706,7 @@ export class Game {
     if (s.air > 0) s.air = Math.max(0, s.air - dt);
     if (s.state === "arriving") {
       const b = this.booth();
-      this.walkToward(s, b.x, b.y, 42 * WALK * dt);
+      this.walkTo(s, b.x, b.y, 42 * WALK * dt, dt);
       if (Math.hypot(s.x - b.x, s.y - b.y) < 10) s.state = "booth";
       return;
     }
@@ -2557,7 +2753,10 @@ export class Game {
         }
       }
       const q = this.queueSlot(s);
-      this.walkToward(s, q.x, q.y, 46 * WALK * dt);
+      const lift = this.lifts.find((l) => l.id === s.liftId)!;
+      // Head for the station along the paths, then find a spot in line.
+      if (Math.hypot(s.x - lift.bottom.x, s.y - lift.bottom.y) > 40) this.walkTo(s, lift.bottom.x, lift.bottom.y, 46 * WALK * dt, dt);
+      else this.walkToward(s, q.x, q.y, 46 * WALK * dt);
       if (Math.hypot(s.x - q.x, s.y - q.y) < 8) s.state = "queue";
       return;
     }
@@ -2587,6 +2786,7 @@ export class Game {
       const c = lift?.carriers.find((k) => k.riders.includes(s.id));
       if (!lift || !c) {
         s.state = "toTrail";
+        this.maybeLookout(s);
         return;
       }
       const t = Math.min(c.t, 0.97);
@@ -2685,13 +2885,30 @@ export class Game {
     if (s.state === "visit") {
       const b = s.visitType ? this.nearestOf([s.visitType], s.x, s.y) : undefined;
       if (!b) {
-        this.goToLift(s);
+        if (s.visitType === "lookout") {
+          s.visitType = null;
+          s.state = "toTrail";
+        } else this.goToLift(s);
         return;
       }
-      this.walkToward(s, b.x, b.y, 44 * WALK * dt);
+      this.walkTo(s, b.x, b.y, 44 * WALK * dt, dt);
       if (Math.hypot(s.x - b.x, s.y - b.y) < 12) {
         s.wait += dt;
-        if (s.wait > (s.visitType === "school" ? 3 : 1.6)) {
+        if (s.wait > (s.visitType === "school" || s.visitType === "lookout" ? 3 : 1.6)) {
+          if (s.visitType === "lookout") {
+            // Warmed up by the fire pit and soaked in the view: the higher, the better.
+            const high = clamp((elevationM(b.x, b.y) - 1000) / 1500, 0, 1);
+            s.mood = Math.min(100, s.mood + 6 + high * 10);
+            s.needFood = Math.max(0, s.needFood - 0.1);
+            if (Math.random() < 0.35) {
+              s.bubble = pick(high > 0.5 ? ["What a view!", "You can see forever", "Top of the world"] : ["Nice fire!", "Toasty", "Pretty view"]);
+              s.bubbleT = 2.2;
+            }
+            s.wait = 0;
+            s.visitType = null;
+            s.state = "toTrail";
+            return;
+          }
           if (s.visitType === "school") {
             // A lesson: happier, and some beginners graduate to blues.
             const fee = 25;
@@ -2736,7 +2953,7 @@ export class Game {
     if (s.state === "heli") return; // off the map, skiing the backcountry
     if (s.state === "leaving") {
       const exit = s.lot;
-      this.walkToward(s, exit.x, exit.y, 48 * WALK * dt);
+      this.walkTo(s, exit.x, exit.y, 48 * WALK * dt, dt);
       s.wait = 0;
     }
   }
@@ -2926,8 +3143,31 @@ const PLANT_PER_STAMP = 9;
 const PLANT_GAP = 6;
 const PLANT_CELL = 64;
 
+/** How far from a lift's top station people will wander to a lookout. */
+export const LOOKOUT_REACH = 350;
+
+export type Reward = { id: number; kind: "goal" | "peak" | "win"; title: string; text: string; bonus: number };
+
+/** Cash bonus for reaching each goal on the list. */
+const GOAL_BONUS: Record<string, number> = {
+  road: 1500,
+  lodge: 3000,
+  black: 4000,
+  patrol: 8000,
+  tier1: 25000,
+  tier2: 60000,
+  tier3: 150000,
+  tier4: 400000,
+  all: 1000000,
+};
+
+/** Higher summits pay more. */
+export function peakBonus(elevation: number): number {
+  return Math.round((8000 + Math.max(0, elevation - 1800) * 60) / 500) * 500;
+}
+
 export type DemolishTarget = {
-  kind: "building" | "feature" | "lift" | "trail" | "road";
+  kind: "building" | "feature" | "lift" | "trail" | "road" | "path";
   id: number;
   label: string;
   refund: number;

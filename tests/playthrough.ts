@@ -551,5 +551,68 @@ ok(g.capacity() === TIERS[TIERS.length - 1].capacity, "should reach the top tier
 for (let i = 0; i < 2000; i++) g.tick(0.05);
 ok(Number.isFinite(g.money), "money NaN after conquering");
 
+// --- goals pay a bonus and queue a celebration, once each
+{
+  ok(g.rewards.filter((r) => r.kind === "peak").length === 8, `expected 8 peak rewards, got ${g.rewards.filter((r) => r.kind === "peak").length}`);
+  ok(g.goalsPaid.has("tier1") && g.goalsPaid.has("all"), "tier and win goals should be paid out");
+  const n = g.rewards.length;
+  for (let i = 0; i < 200; i++) g.tick(0.05);
+  ok(g.rewards.length === n, "goals should only pay out once");
+}
+
+// --- footpaths: walkers use them between the booth, buildings, lifts and the lot
+{
+  const booth = g.booth();
+  const lodge = g.buildings.find((b) => b.type === "lodge")!;
+  g.setTool("path");
+  ok(g.click(booth.x, booth.y) === "ok", "path should start at the booth");
+  g.click((booth.x + lodge.x) / 2 + 30, (booth.y + lodge.y) / 2);
+  const r = g.click(lodge.x, lodge.y);
+  ok(r === "ok" && g.paths.length === 1, `path to the lodge failed: ${g.toasts.at(-1)?.text}`);
+  const exit = g.exit();
+  g.click(exit.x, exit.y);
+  g.click(booth.x - 20, booth.y + 40);
+  g.click(booth.x, booth.y);
+  g.setTool("select");
+  ok(g.paths.length >= 1, "second path failed");
+  let walkedOnPath = 0;
+  for (let i = 0; i < 4000; i++) {
+    g.tick(0.05);
+    if (i % 20 === 0) walkedOnPath += g.skiers.filter((s) => s.onPath).length;
+  }
+  ok(walkedOnPath > 0, "nobody walked on the footpaths");
+  g.setTool("demolish");
+  const p0 = g.paths[0].points[1];
+  ok(g.click(p0.x, p0.y) === "ok", `couldn't demolish a path: ${g.toasts.at(-1)?.text}`);
+  g.setTool("select");
+  for (let i = 0; i < 400; i++) g.tick(0.05);
+  ok(g.skiers.every((s) => Number.isFinite(s.x) && Number.isFinite(s.y)), "walker position broke after removing a path");
+}
+
+// --- lookouts: people stepping off a nearby lift stop by the fire pits
+{
+  const busiest = [...g.lifts].sort((a, b) => b.carriers.reduce((n, c) => n + c.riders.length, 0) - a.carriers.reduce((n, c) => n + c.riders.length, 0))[0];
+  let spot: Vec2 | null = null;
+  for (let r = 50; r < 320 && !spot; r += 15) {
+    for (let a = 0; a < Math.PI * 2 && !spot; a += 0.35) {
+      const q = { x: busiest.top.x + Math.cos(a) * r, y: busiest.top.y + Math.sin(a) * r };
+      if (g.canPlace("lookout", q.x, q.y) === null) spot = q;
+    }
+  }
+  ok(!!spot, "no spot for a lookout near a lift top");
+  if (spot) {
+    g.setTool("lookout");
+    ok(g.click(spot.x, spot.y) === "ok", `lookout failed: ${g.toasts.at(-1)?.text}`);
+    g.setTool("select");
+    let seen = 0;
+    for (let i = 0; i < 4000; i++) {
+      g.tick(0.05);
+      if (i % 10 === 0) seen += g.skiers.filter((s) => s.visitType === "lookout").length;
+    }
+    ok(seen > 0, "nobody stopped at the lookout");
+    ok(g.skiers.every((s) => s.state !== "visit" || s.visitType !== null), "a visitor lost track of where they were going");
+  }
+}
+
 console.log(problems.length ? `PROBLEMS (${problems.length}):\n` + problems.join("\n") : "ALL CHECKS PASSED");
 if (problems.length) process.exit(1);

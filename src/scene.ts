@@ -2,9 +2,10 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { HEIGHT_CELL_M, elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
-import { PostFx, SkyUniforms, TerrainUniforms, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial } from "./look";
+import { PostFx, SkyUniforms, TerrainUniforms, gableRoof, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial, rbox } from "./look";
 import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
+import { PATH_MAX_GRADE, PATH_WIDTH, Path } from "./paths";
 import { Game } from "./sim";
 import { SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
@@ -149,10 +150,14 @@ export class World3D {
   private redrapeBox: { i0: number; i1: number; j0: number; j1: number } | null = null;
   private helicopter = makeHelicopter();
   private rotorSpin = 0;
+  /** Fire-pit flames to flicker each frame. */
+  private flames: THREE.Object3D[] = [];
   private mid: MountainId = 0;
   private trailGroup = new THREE.Group();
   private roadGroup = new THREE.Group();
   private roadStamp = -1;
+  private pathGroup = new THREE.Group();
+  private pathStamp = -1;
   private cars = new Fleet([...CAR_MODELS, "semi"], MAX_CARS, { dynamic: true });
   private carColor = new THREE.Color();
   private buildingGroup = new THREE.Group();
@@ -231,7 +236,7 @@ export class World3D {
     this.treesHi = this.makeEmptyTrees(true);
     this.treesLo = this.makeEmptyTrees(false);
     this.scene.add(this.treesHi, this.treesLo, this.boulders, this.brushRing);
-    this.scene.add(this.roadGroup, this.cars.group);
+    this.scene.add(this.roadGroup, this.pathGroup, this.cars.group);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -304,6 +309,7 @@ export class World3D {
     this.mid = id;
     this.stamp = "";
     this.roadStamp = -1;
+    this.pathStamp = -1;
     this.draftKey = "";
     this.liftPreviewKey = "";
     const slope = this.slopeApplied;
@@ -471,6 +477,7 @@ export class World3D {
     this.syncTerrain(game);
     this.syncStatic(game);
     this.syncRoads(game);
+    this.syncPaths(game);
     this.syncBrush(game);
     this.syncCars(game);
     this.syncTrees(game);
@@ -489,6 +496,13 @@ export class World3D {
     const dt = Math.min(0.1, (now - this.frameT) / 1000);
     this.frameT = now;
     this.treeTime.value = (this.treeTime.value + dt) % 10000;
+    const ft = this.treeTime.value;
+    for (const f of this.flames) {
+      const ph = f.userData.flame as number;
+      const k = 1 + Math.sin(ft * 9 + ph) * 0.16 + Math.sin(ft * 23.7 + ph * 2.1) * 0.09;
+      f.scale.set(1 + Math.sin(ft * 13 + ph) * 0.07, k, 1 + Math.cos(ft * 11 + ph) * 0.07);
+      f.rotation.y = ft * 1.7 + ph;
+    }
     this.treeWind.value = this.weather.wind;
     this.sky.mesh.position.copy(this.camera.position);
     this.post.render(dt);
@@ -660,6 +674,7 @@ export class World3D {
         this.redrapeAt = 0;
         this.redrapeBox = null;
         this.stamp = "";
+        this.pathStamp = -1;
         // Roads are long (the highway is 25 km): only re-drape them when the edit reached one.
         // Dirty boxes are heightmap cells (HEIGHT_CELL_M), not mesh vertices.
         const pad = 60;
@@ -999,6 +1014,14 @@ export class World3D {
     this.brushRing.geometry.computeBoundingSphere();
   }
 
+  private syncPaths(game: Game): void {
+    if (this.pathStamp === game.pathVersion) return;
+    this.pathStamp = game.pathVersion;
+    for (const c of this.pathGroup.children) if (c instanceof THREE.Mesh) c.geometry.dispose();
+    this.pathGroup.clear();
+    for (const p of game.paths) this.pathGroup.add(makePathRibbon(p, this.mid));
+  }
+
   private syncRoads(game: Game): void {
     if (this.roadStamp === game.roadVersion) return;
     this.roadStamp = game.roadVersion;
@@ -1092,6 +1115,7 @@ export class World3D {
 
   private layoutBuildings(game: Game): void {
     this.buildingGroup.clear();
+    this.flames = [];
     this.buildingGroup.add(makeVillageProps(this.mid, game.booth(), game.exit(), game.villageRadius()));
     for (const b of game.buildings) {
       const mesh = makeBuildingMesh(b.type, false);
@@ -1113,6 +1137,9 @@ export class World3D {
         });
       }
       this.buildingGroup.add(mesh);
+      mesh.traverse((o) => {
+        if (o.userData.flame !== undefined) this.flames.push(o);
+      });
     }
   }
 
@@ -1279,7 +1306,13 @@ export class World3D {
       // Colour each leg by its own pitch so you can see where the run gets steep.
       const pts = game.draft.length === 1 ? [last, { x: last.x, y: last.y - 0.5 }] : game.draft;
       const road = game.tool === "road";
-      const geo = buildRibbon(pts, this.mid, road ? ROAD_WIDTH : 5, 1.1, (seg) => {
+      const path = game.tool === "path";
+      const geo = buildRibbon(pts, this.mid, road ? ROAD_WIDTH : path ? PATH_WIDTH : 5, 1.1, (seg) => {
+        if (path) {
+          const g = legGrade(pts[seg], pts[seg + 1]);
+          const c = g > PATH_MAX_GRADE * 0.8 ? ROAD_DRAFT_STEEP : PATH_DRAFT_OK;
+          return [c, c];
+        }
         if (road) {
           // Grey while it's buildable, amber near the limit.
           const g = legGrade(pts[seg], pts[seg + 1]);
@@ -1568,47 +1601,54 @@ function makeBackdrop(id: MountainId): THREE.Group {
   return g;
 }
 
-function makeSignSprite(text: string): THREE.Sprite {
+/**
+ * A crisp pill-shaped label drawn at 2x resolution, sized to its text, with a
+ * soft shadow and a hairline border. `height` is its height in world units.
+ */
+function makePillSprite(text: string, height: number, opts: { font?: string; fg?: string; bg?: string; renderOrder?: number } = {}): THREE.Sprite {
+  const S = 2;
+  const font = opts.font ?? "800 28px Nunito, Segoe UI, sans-serif";
+  const measure = document.createElement("canvas").getContext("2d")!;
+  measure.font = font;
+  const padX = 22;
+  const h = 56;
+  const w = Math.ceil(measure.measureText(text).width + padX * 2 + 8);
   const c = document.createElement("canvas");
-  c.width = 512;
-  c.height = 80;
+  c.width = w * S;
+  c.height = (h + 8) * S;
   const ctx = c.getContext("2d")!;
-  ctx.fillStyle = "rgba(19, 32, 44, 0.9)";
+  ctx.scale(S, S);
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = 6;
+  ctx.shadowOffsetY = 2;
+  ctx.fillStyle = opts.bg ?? "rgba(22, 33, 44, 0.86)";
   ctx.beginPath();
-  ctx.roundRect(8, 8, 496, 64, 16);
+  ctx.roundRect(4, 3, w - 8, h - 4, (h - 4) / 2);
   ctx.fill();
-  ctx.fillStyle = "#e2b857";
-  ctx.font = "700 28px Nunito, Segoe UI, sans-serif";
+  ctx.shadowColor = "transparent";
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+  ctx.stroke();
+  ctx.fillStyle = opts.fg ?? "#f0c96a";
+  ctx.font = font;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, 256, 40);
+  ctx.fillText(text, w / 2, h / 2 + 2);
   const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  sprite.scale.set(48, 7.5, 1);
-  sprite.renderOrder = 3;
+  sprite.scale.set((height * c.width) / c.height, height, 1);
+  sprite.renderOrder = opts.renderOrder ?? 2;
   return sprite;
 }
 
+function makeSignSprite(text: string): THREE.Sprite {
+  return makePillSprite(text, 7.5, { renderOrder: 3 });
+}
+
 function makeRateSprite(text: string): THREE.Sprite {
-  const c = document.createElement("canvas");
-  c.width = 256;
-  c.height = 64;
-  const ctx = c.getContext("2d")!;
-  ctx.fillStyle = "rgba(19, 32, 44, 0.88)";
-  ctx.beginPath();
-  ctx.roundRect(8, 8, 240, 48, 14);
-  ctx.fill();
-  ctx.fillStyle = "#e2b857";
-  ctx.font = "700 28px Nunito, Segoe UI, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, 128, 32);
-  const tex = new THREE.CanvasTexture(c);
-  tex.needsUpdate = true;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  sprite.scale.set(16, 4, 1);
-  sprite.renderOrder = 2;
-  return sprite;
+  return makePillSprite(text, 4, { font: "800 26px Nunito, Segoe UI, sans-serif" });
 }
 
 type BuildingLook = { body: string; roof: string; w: number; d: number; h: number; awning?: string };
@@ -1661,6 +1701,7 @@ const BUILDING_LOOK: Partial<Record<BuildingType, BuildingLook>> = {
 
 /** Where a building's price tag floats. */
 function tagHeight(type: BuildingType): number {
+  if (type === "lookout") return 9;
   if (type === "garage") return 26;
   if (PARKING[type]) return 10;
   if (type === "foodTruck") return 9;
@@ -1672,6 +1713,7 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
   if (PARKING[type]) return makeParkingMesh(type, ghost);
   if (type === "cabin") return makeLogCabin(ghost);
+  if (type === "lookout") return makeLookout(ghost);
   if (type === "foodTruck") return makeFoodTruck(ghost);
   const p = BUILDING_LOOK[type]!;
   const g = makeChalet(p, { ghost, tall: p.h > 14, door: true });
@@ -1689,18 +1731,212 @@ function makeAwning(p: BuildingLook, ghost: boolean): THREE.Group {
   const colour = std(p.awning!, { metalness: 0 });
   const cream = std("#f4efe2", { metalness: 0 });
   for (let i = 0; i < stripes; i++) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.18, depth), i % 2 ? cream : colour);
+    const m = new THREE.Mesh(rbox(sw, 0.18, depth), i % 2 ? cream : colour);
     m.position.set(-w / 2 + sw * (i + 0.5), 0, depth / 2);
     m.castShadow = !ghost;
     g.add(m);
   }
   // Valance hanging off the front edge.
-  const valance = new THREE.Mesh(new THREE.BoxGeometry(w, 0.6, 0.12), colour);
+  const valance = new THREE.Mesh(rbox(w, 0.6, 0.12), colour);
   valance.position.set(0, -0.3, depth);
   g.add(valance);
   g.rotation.x = 0.32;
   const plinth = Math.min(2, p.h * 0.18);
   g.position.set(0, plinth + (p.h < 6 ? 3 : 4.1), p.d / 2 + 0.1);
+  return g;
+}
+
+/** Soft warm glow for fire pits and lanterns. */
+let GLOW_TEX: THREE.Texture | null = null;
+function glowTexture(): THREE.Texture {
+  if (!GLOW_TEX) {
+    GLOW_TEX = canvasTexture(64, (g, n) => {
+      const r = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+      r.addColorStop(0, "rgba(255, 214, 140, 1)");
+      r.addColorStop(0.35, "rgba(255, 150, 60, 0.45)");
+      r.addColorStop(1, "rgba(255, 120, 40, 0)");
+      g.fillStyle = r;
+      g.fillRect(0, 0, n, n);
+    });
+  }
+  return GLOW_TEX;
+}
+
+/**
+ * A scenic lookout: a timber deck on a stone base with a railing along the
+ * view side, two crackling fire pits ringed with Adirondack chairs, a log
+ * bench, a picnic table, lantern posts and a pair of coin binoculars.
+ * Faces +z (the view).
+ */
+function makeLookout(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const shadow = !ghost;
+  const mat = (color: string, extra: THREE.MeshStandardMaterialParameters = {}) =>
+    new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra });
+  const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number, ry = 0) => {
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = ry;
+    mesh.castShadow = shadow;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+    return mesh;
+  };
+  const stone = mat("#8a8379", { roughness: 0.95 });
+  const stoneDark = mat("#6f6a62", { roughness: 0.95 });
+  const deckA = mat("#9a7048");
+  const deckB = mat("#8c6440");
+  const timber = mat("#5a3d26", { roughness: 0.9 });
+  const snow = mat("#f2f5f8", { roughness: 0.7 });
+  const W = 18;
+  const D = 13;
+  const top = 1.3;
+  // Stone base and plank deck.
+  add(rbox(W + 0.8, 1.2, D + 0.8), stone, 0, 0.35, 0);
+  const planks = 10;
+  for (let i = 0; i < planks; i++) {
+    add(rbox(W, 0.32, D / planks - 0.06, 0.08), i % 2 ? deckA : deckB, 0, top - 0.16, -D / 2 + (D / planks) * (i + 0.5));
+  }
+  // Railing along the front and both sides.
+  const rail = (x0: number, z0: number, x1: number, z1: number) => {
+    const len = Math.hypot(x1 - x0, z1 - z0);
+    const ry = Math.atan2(x1 - x0, z1 - z0);
+    const n = Math.max(2, Math.round(len / 2.2));
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      add(rbox(0.28, 1.15, 0.28, 0.06), timber, x0 + (x1 - x0) * t, top + 0.57, z0 + (z1 - z0) * t);
+    }
+    add(rbox(0.22, 0.2, len + 0.3, 0.07), timber, (x0 + x1) / 2, top + 1.18, (z0 + z1) / 2, ry);
+    add(rbox(0.12, 0.12, len, 0.04), timber, (x0 + x1) / 2, top + 0.6, (z0 + z1) / 2, ry);
+    // A ridge of snow along the top rail.
+    add(rbox(0.3, 0.14, len, 0.06), snow, (x0 + x1) / 2, top + 1.33, (z0 + z1) / 2, ry);
+  };
+  const ex = W / 2 - 0.3;
+  const ez = D / 2 - 0.3;
+  rail(-ex, ez, ex, ez);
+  rail(-ex, -ez + 2.5, -ex, ez);
+  rail(ex, -ez + 2.5, ex, ez);
+  // Two fire pits, each ringed by chairs.
+  const pits: [number, number][] = [
+    [-4.4, 1.2],
+    [4.6, -0.6],
+  ];
+  const chairCols = ["#b8433a", "#2f6f8f", "#d9a43a", "#3f7a4a", "#e8e2d4"];
+  const ash = mat("#2b2522");
+  const logMat = mat("#5a3b24");
+  const ember = mat("#3a1a10", { emissive: "#ff5a1a", emissiveIntensity: 1.6 });
+  const flameOuter = new THREE.MeshBasicMaterial({ color: "#ff8a2a", transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
+  const flameInner = new THREE.MeshBasicMaterial({ color: "#ffd27a", transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+  const stoneGeo = rbox(0.62, 0.5, 0.48, 0.16);
+  pits.forEach(([px, pz], pi) => {
+    const R = 1.15;
+    for (let k = 0; k < 11; k++) {
+      const a = (k / 11) * Math.PI * 2;
+      add(stoneGeo, k % 3 ? stone : stoneDark, px + Math.cos(a) * R, top + 0.25, pz + Math.sin(a) * R, -a);
+    }
+    add(new THREE.CylinderGeometry(R - 0.15, R - 0.15, 0.1, 20), ash, px, top + 0.06, pz);
+    const logGeo = new THREE.CylinderGeometry(0.13, 0.15, 1.5, 8);
+    for (let k = 0; k < 3; k++) {
+      const log = add(logGeo, logMat, px, top + 0.3, pz, (k * Math.PI) / 3);
+      log.rotation.z = Math.PI / 2 - 0.35;
+    }
+    add(new THREE.CylinderGeometry(0.55, 0.65, 0.12, 12), ember, px, top + 0.16, pz);
+    // Flames: a few flickering tongues, brighter in the middle, and a glow.
+    const fire = new THREE.Group();
+    fire.position.set(px, top + 0.2, pz);
+    for (let k = 0; k < 4; k++) {
+      const h = 1.3 + (k % 2) * 0.5;
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.34 - k * 0.03, h, 7, 1, true), flameOuter);
+      cone.geometry.translate(0, h / 2, 0);
+      const a = (k / 4) * Math.PI * 2 + pi;
+      cone.position.set(Math.cos(a) * 0.22, 0, Math.sin(a) * 0.22);
+      cone.userData.flame = k * 1.7 + pi * 3.1;
+      fire.add(cone);
+    }
+    const core = new THREE.Mesh(new THREE.ConeGeometry(0.24, 1.1, 7, 1, true), flameInner);
+    core.geometry.translate(0, 0.55, 0);
+    core.userData.flame = pi * 2.3 + 0.5;
+    fire.add(core);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: "#ffb060", transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.8 }));
+    glow.scale.set(5, 5, 1);
+    glow.position.y = 0.8;
+    fire.add(glow);
+    g.add(fire);
+    // Adirondack chairs facing the fire.
+    const seats = 5;
+    for (let k = 0; k < seats; k++) {
+      const a = (k / seats) * Math.PI * 2 + 0.4 + pi;
+      const cx = px + Math.cos(a) * 2.7;
+      const cz = pz + Math.sin(a) * 2.7;
+      // Skip chairs that would poke through the railing or off the deck.
+      if (Math.abs(cx) > ex - 0.9 || Math.abs(cz) > ez - 0.9) continue;
+      const chair = new THREE.Group();
+      const paint = mat(chairCols[(k + pi * 2) % chairCols.length], { roughness: 0.6 });
+      const seat = new THREE.Mesh(rbox(0.95, 0.14, 0.95, 0.05), paint);
+      seat.position.set(0, 0.45, 0);
+      seat.rotation.x = -0.12;
+      const back = new THREE.Mesh(rbox(0.95, 1.15, 0.12, 0.05), paint);
+      back.position.set(0, 0.95, -0.55);
+      back.rotation.x = -0.32;
+      chair.add(seat, back);
+      for (const sx of [-1, 1]) {
+        const arm = new THREE.Mesh(rbox(0.16, 0.08, 1.1, 0.03), paint);
+        arm.position.set(sx * 0.58, 0.72, -0.05);
+        const leg = new THREE.Mesh(rbox(0.1, 0.72, 0.1, 0.03), paint);
+        leg.position.set(sx * 0.58, 0.36, 0.38);
+        chair.add(arm, leg);
+      }
+      chair.traverse((c) => {
+        if (c instanceof THREE.Mesh) {
+          c.castShadow = shadow;
+          c.receiveShadow = true;
+        }
+      });
+      chair.position.set(cx, top, cz);
+      // Seat faces +z by default: turn it to face the pit.
+      chair.rotation.y = Math.atan2(px - cx, pz - cz);
+      g.add(chair);
+    }
+  });
+  // A split-log bench along the back, on two stumps.
+  const bench = add(new THREE.CylinderGeometry(0.34, 0.34, 5, 12), logMat, -1.5, top + 0.75, -ez + 0.9);
+  bench.rotation.z = Math.PI / 2;
+  for (const sx of [-1.8, 1.8]) add(new THREE.CylinderGeometry(0.35, 0.4, 0.45, 10), timber, -1.5 + sx, top + 0.22, -ez + 0.9);
+  // Picnic table in the back corner.
+  const tx = ex - 2.6;
+  const tz = -ez + 1.6;
+  add(rbox(2.6, 0.14, 1.1, 0.05), deckA, tx, top + 0.85, tz);
+  for (const sz of [-1, 1]) add(rbox(2.6, 0.12, 0.38, 0.04), deckA, tx, top + 0.48, tz + sz * 0.85);
+  for (const sx of [-1, 1]) add(rbox(0.14, 0.85, 1.9, 0.04), timber, tx + sx * 1.0, top + 0.42, tz);
+  // Coin binoculars at the front rail.
+  add(new THREE.CylinderGeometry(0.1, 0.14, 1.3, 8), mat("#3a4048", { metalness: 0.5, roughness: 0.4 }), 1.2, top + 0.65, ez - 0.9);
+  const scope = add(rbox(0.5, 0.36, 0.7, 0.12), mat("#2f6f8f", { metalness: 0.4, roughness: 0.35 }), 1.2, top + 1.45, ez - 0.9);
+  scope.rotation.x = 0.25;
+  // Lantern posts at the back corners, warm-lit.
+  const lamp = mat("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 1.4 });
+  for (const sx of [-1, 1]) {
+    const x = sx * (ex - 0.4);
+    const z = -ez + 0.4;
+    add(new THREE.CylinderGeometry(0.09, 0.12, 2.6, 8), timber, x, top + 1.3, z);
+    add(rbox(0.42, 0.55, 0.42, 0.08), lamp, x, top + 2.75, z);
+    add(rbox(0.6, 0.12, 0.6, 0.05), snow, x, top + 3.1, z);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: "#ffd9a0", transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.6 }));
+    glow.scale.set(2.4, 2.4, 1);
+    glow.position.set(x, top + 2.75, z);
+    g.add(glow);
+  }
+  // Drifted snow banked against the stone base.
+  const drift = new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+  for (const [x, z, sx, sz] of [
+    [-W / 2 - 0.3, -D / 2 + 1, 1.6, 2.4],
+    [W / 2 + 0.4, 2, 1.4, 3],
+    [-3, D / 2 + 0.4, 3, 1.2],
+    [5, -D / 2 - 0.4, 2.6, 1.3],
+  ]) {
+    const m = add(drift, snow, x, 0, z);
+    m.scale.set(sx, 0.9, sz);
+  }
+  g.userData = { kind: "building" };
   return g;
 }
 
@@ -1715,15 +1951,15 @@ function makeFoodTruck(ghost: boolean): THREE.Group {
     return m;
   };
   const paint = std("#e8b33c", { metalness: 0.2 });
-  add(new THREE.Mesh(new THREE.BoxGeometry(6.4, 3.2, 2.8), paint), -0.8, 2.4, 0);
-  add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.2, 2.7), paint), 3.5, 1.9, 0);
-  add(new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.1, 2.3), std("#2a3a48", { metalness: 0.5 })), 4.62, 2.4, 0);
-  add(new THREE.Mesh(new THREE.BoxGeometry(6.6, 0.25, 3), std("#f4efe2")), -0.8, 4.1, 0);
+  add(new THREE.Mesh(rbox(6.4, 3.2, 2.8), paint), -0.8, 2.4, 0);
+  add(new THREE.Mesh(rbox(2.2, 2.2, 2.7), paint), 3.5, 1.9, 0);
+  add(new THREE.Mesh(rbox(0.1, 1.1, 2.3), std("#2a3a48", { metalness: 0.5 })), 4.62, 2.4, 0);
+  add(new THREE.Mesh(rbox(6.6, 0.25, 3), std("#f4efe2")), -0.8, 4.1, 0);
   // Serving hatch, lit from inside, with a propped-up flap.
-  add(new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.3, 0.1), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.9 })), -1, 2.7, 1.42);
-  const flap = add(new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.12, 1.4), std("#c8102e", { metalness: 0 })), -1, 3.55, 2.05);
+  add(new THREE.Mesh(rbox(3.6, 1.3, 0.1), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.9 })), -1, 2.7, 1.42);
+  const flap = add(new THREE.Mesh(rbox(3.9, 0.12, 1.4), std("#c8102e", { metalness: 0 })), -1, 3.55, 2.05);
   flap.rotation.x = -0.35;
-  add(new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.15, 0.6), std("#9aa1a8", { metalness: 0.5 })), -1, 2.05, 1.7);
+  add(new THREE.Mesh(rbox(3.6, 0.15, 0.6), std("#9aa1a8", { metalness: 0.5 })), -1, 2.05, 1.7);
   const wheel = new THREE.CylinderGeometry(0.55, 0.55, 0.4, 14);
   wheel.rotateX(Math.PI / 2);
   const tyre = std("#1d1f22", { metalness: 0 });
@@ -1731,10 +1967,10 @@ function makeFoodTruck(ghost: boolean): THREE.Group {
   // A couple of picnic tables out front.
   const wood = std("#8a6a48", { metalness: 0 });
   for (const x of [-3, 1.5]) {
-    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.15, 1), wood), x, 1, 5);
-    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 0.4), wood), x, 0.55, 4.1);
-    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 0.4), wood), x, 0.55, 5.9);
-    add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 1, 0.8), wood), x, 0.5, 5);
+    add(new THREE.Mesh(rbox(2.4, 0.15, 1), wood), x, 1, 5);
+    add(new THREE.Mesh(rbox(2.4, 0.12, 0.4), wood), x, 0.55, 4.1);
+    add(new THREE.Mesh(rbox(2.4, 0.12, 0.4), wood), x, 0.55, 5.9);
+    add(new THREE.Mesh(rbox(0.2, 1, 0.8), wood), x, 0.5, 5);
   }
   g.userData = { kind: "building" };
   return g;
@@ -1748,7 +1984,7 @@ function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: numb
   hut.position.copy(to3(booth.x, booth.y, 0, mid));
   hut.userData = { kind: "hill" };
   g.add(hut);
-  const lot = new THREE.Mesh(new THREE.BoxGeometry(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
+  const lot = new THREE.Mesh(rbox(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
   lot.position.copy(to3(exit.x, exit.y, 0.2, mid));
   g.add(lot);
   const fleet = new Fleet(CAR_MODELS, 60);
@@ -1778,7 +2014,7 @@ function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: numb
   ring.computeLineDistances();
   g.add(ring);
   const sign = makeSignSprite("BASE VILLAGE — build here");
-  sign.scale.multiplyScalar(2.4);
+  sign.scale.multiplyScalar(1.6);
   sign.position.copy(to3(BASE.x, BASE.y, 30, mid));
   g.add(sign);
   return g;
@@ -1789,7 +2025,7 @@ const MAX_SKIERS_DRAWN = 20000;
 
 function makeCrowd(max: number): { group: THREE.Group; body: THREE.InstancedMesh; head: THREE.InstancedMesh; skis: THREE.InstancedMesh } {
   const group = new THREE.Group();
-  const body = new THREE.InstancedMesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
+  const body = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.62, 1.0, 4, 10), new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
   const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.55, 10, 8), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }), max);
   const skiGeo = mergeGeometries([
     new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(-0.4, 0.2, 0.2),
@@ -1868,7 +2104,7 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
     const g0 = ground(0);
     const g1 = ground(1);
     for (const p of [g0, g1]) {
-      const pad = new THREE.Mesh(new THREE.BoxGeometry(6, 0.6, 6), std("#8a949e"));
+      const pad = new THREE.Mesh(rbox(6, 0.6, 6), std("#8a949e"));
       pad.position.copy(p).setY(p.y + 0.3);
       pad.rotation.y = heading;
       group.add(pad);
@@ -1898,9 +2134,33 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
       }
     }
   }
+  // Stations hold the haul rope low (chairs load at knee height, cabins at
+  // the platform); the line climbs to the first tower.
+  const stationH = STATION_CABLE_H[lift.type];
+  /** Points along the line that carry rope but no tower (the level run through a station). */
+  const noTower = new Set<number>();
+  if (stationH) {
+    tops[0] = ground(0).y + stationH;
+    tops[tops.length - 1] = ground(1).y + stationH;
+    // Keep the rope level through each station so carriers ride in and out
+    // of the building at platform height before climbing to the first tower.
+    const flat = (lift.type === "gondola" ? 26 : 24) / len;
+    if (ts[1] - flat > flat * 0.6) {
+      ts.splice(1, 0, flat);
+      tops.splice(1, 0, ground(0).y + stationH);
+      noTower.add(flat);
+    }
+    const n = ts.length;
+    if (1 - flat - ts[n - 2] > flat * 0.6) {
+      ts.splice(n - 1, 0, 1 - flat);
+      tops.splice(n - 1, 0, ground(1).y + stationH);
+      noTower.add(1 - flat);
+    }
+  }
   const cableY = (t: number) => {
-    const i = Math.min(ts.length - 2, Math.floor(t * nT));
-    const u = (t - ts[i]) / (ts[i + 1] - ts[i]);
+    let i = 0;
+    while (i < ts.length - 2 && t > ts[i + 1]) i++;
+    const u = (t - ts[i]) / (ts[i + 1] - ts[i] || 1);
     return lerp(tops[i], tops[i + 1], Math.max(0, Math.min(1, u)));
   };
   const gauge = look.gauge;
@@ -1915,12 +2175,12 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
     const g = ground(ts[i]);
     const h = tops[i] - g.y;
     const station = i === 0 || i === ts.length - 1;
-    if (station && lift.type !== "tbar") continue;
+    if ((station && lift.type !== "tbar") || noTower.has(ts[i])) continue;
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 12), steel);
     pole.position.copy(g).setY(g.y + h / 2);
     pole.castShadow = true;
     group.add(pole);
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(Math.max(2.5, gauge + 1.6), 0.5, 0.6), std(lift.type === "tbar" ? "#c45c4a" : look.steel));
+    const arm = new THREE.Mesh(rbox(Math.max(2.5, gauge + 1.6), 0.5, 0.6), std(lift.type === "tbar" ? "#c45c4a" : look.steel));
     arm.position.copy(g).setY(tops[i] + 0.3);
     arm.rotation.y = heading + Math.PI / 2;
     group.add(arm);
@@ -1937,7 +2197,7 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
   for (const end of [0, 1]) {
     const g = ground(end);
     const y = tops[end === 0 ? 0 : tops.length - 1];
-    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look));
+    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look, lift.name));
   }
 
   // Carriers.
@@ -1978,6 +2238,79 @@ function highlight(g: THREE.Object3D): void {
   });
 }
 
+/** Haul-rope height at the stations (0 = as tall as a tower). */
+const STATION_CABLE_H: Record<LiftType, number> = { carpet: 0, tbar: 0, double: 5.2, quad: 5.4, six: 5.8, gondola: 9.5 };
+
+/** The lift's name in white capitals for the side of a terminal, the way resorts letter them. */
+function makeNameplate(name: string, width: number, height: number): THREE.Mesh {
+  const S = 2;
+  const text = name.toUpperCase();
+  const c = document.createElement("canvas");
+  const font = "800 64px Nunito, Segoe UI, sans-serif";
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = font;
+  const tw = Math.max(200, m.measureText(text).width + 60);
+  c.width = Math.ceil(tw * S);
+  c.height = Math.ceil(96 * S);
+  const ctx = c.getContext("2d")!;
+  ctx.scale(S, S);
+  ctx.font = font;
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, tw / 2, 50);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  // Keep the letters in proportion: fit the width, or the height if the name is short.
+  const aspect = c.width / c.height;
+  const w = Math.min(width, height * aspect);
+  const plate = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, w / aspect),
+    new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.5, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2 }),
+  );
+  return plate;
+}
+
+/** A rounded-rectangle outline in the x/y plane, for extruding soft-cornered shells. */
+function roundedRect(w: number, d: number, r: number): THREE.Shape {
+  const s = new THREE.Shape();
+  const x = -w / 2;
+  const y = -d / 2;
+  r = Math.min(r, w / 2 - 0.01, d / 2 - 0.01);
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y);
+  s.quadraticCurveTo(x + w, y, x + w, y + r);
+  s.lineTo(x + w, y + d - r);
+  s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
+  s.lineTo(x + r, y + d);
+  s.quadraticCurveTo(x, y + d, x, y + d - r);
+  s.lineTo(x, y + r);
+  s.quadraticCurveTo(x, y, x + r, y);
+  return s;
+}
+
+/**
+ * A soft-edged slab: a rounded rectangle (w across, d along the line) given
+ * height h and rounded top and bottom edges. Sits on y = 0.
+ */
+function shell(w: number, d: number, h: number, corner: number, bevel: number): THREE.BufferGeometry {
+  const b = Math.min(bevel, h / 2 - 0.01, w / 2 - 0.2);
+  const geo = new THREE.ExtrudeGeometry(roundedRect(w - b * 2, d - b * 2, Math.max(0.05, corner - b)), {
+    depth: Math.max(0.01, h - b * 2),
+    bevelEnabled: true,
+    bevelThickness: b,
+    bevelSize: b,
+    bevelSegments: 4,
+    curveSegments: 10,
+  });
+  // Extruded along +z: stand it up so the depth becomes height.
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(0, b, 0);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function makeTerminal(
   type: LiftType,
   g: THREE.Vector3,
@@ -1985,63 +2318,154 @@ function makeTerminal(
   heading: number,
   bottom: boolean,
   look: (typeof LIFT_LOOK)[LiftType],
+  name: string,
 ): THREE.Group {
   const t = new THREE.Group();
   t.position.copy(g);
   t.rotation.y = heading;
   const h = cableY - g.y;
+  // Which way the line runs out of this station (+z from the bottom, -z from the top).
+  const out = bottom ? 1 : -1;
+  const snow = std("#f2f5f8", { metalness: 0, roughness: 0.7 });
+  const add = <T extends THREE.Object3D>(o: T, x: number, y: number, z: number): T => {
+    o.position.set(x, y, z);
+    o.traverse((c) => {
+      if (c instanceof THREE.Mesh) {
+        c.castShadow = true;
+        c.receiveShadow = true;
+      }
+    });
+    t.add(o);
+    return o;
+  };
+  /** A little operator's hut: plaster walls, a lit window and a snowy pitched roof. */
+  const hut = (w: number, d: number, wallH: number, x: number, z: number, body: string, roofCol: string) => {
+    const hg = new THREE.Group();
+    const walls = new THREE.Mesh(rbox(w, wallH, d), std(body, { metalness: 0, roughness: 0.85 }));
+    walls.position.y = wallH / 2;
+    const win = new THREE.Mesh(rbox(w * 0.6, wallH * 0.36, 0.2), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.8 }));
+    win.position.set(0, wallH * 0.6, d / 2 + 0.05);
+    const roof = gableRoof(d, w + 1.2, THREE.MathUtils.degToRad(34), 0.6, std(roofCol, { metalness: 0, roughness: 0.8 }), snow, true);
+    roof.group.position.y = wallH;
+    const tri = new THREE.Shape();
+    tri.moveTo(-d / 2, 0);
+    tri.lineTo(d / 2, 0);
+    tri.lineTo(0, roof.rise);
+    tri.closePath();
+    const gableGeo = new THREE.ExtrudeGeometry(tri, { depth: w - 0.1, bevelEnabled: false });
+    gableGeo.translate(0, 0, -(w - 0.1) / 2);
+    const gable = new THREE.Mesh(gableGeo, walls.material);
+    gable.rotation.y = Math.PI / 2;
+    gable.position.y = wallH;
+    hg.add(walls, win, roof.group, gable);
+    return add(hg, x, 0, z);
+  };
   if (type === "tbar") {
-    if (bottom) {
-      const hut = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 5), std("#c9b08a", { metalness: 0 }));
-      hut.position.set(5, 2.5, -2);
-      hut.castShadow = true;
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(5, 2.4, 4), std("#6b3a2a", { metalness: 0 }));
-      roof.position.set(5, 6.2, -2);
-      roof.rotation.y = Math.PI / 4;
-      t.add(hut, roof);
-    }
-    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.4, 14), std("#3a3f45"));
-    wheel.position.y = h + 0.8;
-    t.add(wheel);
+    if (bottom) hut(6, 5, 4.4, 5, -2, "#c9b08a", "#6b3a2a");
+    const wheel = new THREE.Mesh(new THREE.TorusGeometry(1.4, 0.22, 8, 32), std("#3a3f45", { metalness: 0.5, roughness: 0.4 }));
+    wheel.rotation.x = Math.PI / 2;
+    add(wheel, 0, h + 0.8, 0);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.5, 14), std("#3a3f45"));
+    add(hub, 0, h + 0.8, 0);
     return t;
   }
   if (type === "gondola") {
-    // Enclosed station building the cabins run through.
-    const w = look.gauge + 8;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h + 4, 18), std("#cfc6b6", { metalness: 0 }));
-    body.position.set(0, (h + 4) / 2, bottom ? -6 : 6);
-    body.castShadow = true;
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 3.5, 14), std("#6fa3c8", { roughness: 0.1, metalness: 0.4 }));
-    glass.position.set(0, h - 4, bottom ? -6 : 6);
-    const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 3, 1.2, 21), std(look.color));
-    roof.position.set(0, h + 4.6, bottom ? -6 : 6);
-    roof.castShadow = true;
-    t.add(body, glass, roof);
+    // A station hall the cabins ride into: the rope comes in through a big
+    // portal in the end wall and turns around the bullwheel inside.
+    const R = look.gauge / 2 + 0.3;
+    const w = look.gauge + 11;
+    const D = 30;
+    const back = R + 5;
+    const zc = out * (D / 2 - back);
+    const wallH = h + 4.5;
+    const stone = std("#8a8379", { metalness: 0, roughness: 0.95 });
+    const plaster = std("#e8dfcf", { metalness: 0, roughness: 0.85 });
+    const timber = std("#4a3424", { metalness: 0, roughness: 0.9 });
+    const glass = std("#2a3540", { roughness: 0.15, metalness: 0.4, emissive: "#ffcf8a", emissiveIntensity: 0.35 });
+    add(new THREE.Mesh(rbox(w + 1, 2.4, D + 1), stone), 0, 0.9, zc);
+    add(new THREE.Mesh(rbox(w, wallH - 2.1, D), plaster), 0, 2.1 + (wallH - 2.1) / 2, zc);
+    // Long glazed galleries on both sides at platform level.
+    add(new THREE.Mesh(rbox(w + 0.3, 3.4, D - 6), glass), 0, h - 4.6, zc);
+    add(new THREE.Mesh(rbox(w + 0.5, 0.5, D - 5), timber), 0, h - 2.65, zc);
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, -0.33, 0.33, 1]) add(new THREE.Mesh(rbox(0.8, wallH - 2.1, 0.8), timber), (sx * w) / 2, 2.1 + (wallH - 2.1) / 2, zc + (sz * D) / 2);
+      add(new THREE.Mesh(rbox(0.5, 0.5, D + 0.6), timber), (sx * w) / 2 + sx * 0.05, wallH, zc);
+    }
+    // The portal the cabins sail through: a dark opening wide enough for both
+    // lines, framed in timber, with the lift's name above it.
+    const face = zc + out * (D / 2 + 0.06);
+    const portalW = look.gauge + 5.5;
+    const portalH = 7.5;
+    const portalY = h - 4.6;
+    const portal = new THREE.Mesh(new THREE.PlaneGeometry(portalW, portalH), new THREE.MeshBasicMaterial({ color: "#14181c" }));
+    portal.rotation.y = bottom ? 0 : Math.PI;
+    add(portal, 0, portalY, face);
+    add(new THREE.Mesh(rbox(portalW + 1.6, 0.9, 0.9), timber), 0, portalY + portalH / 2 + 0.4, face);
+    for (const sx of [-1, 1]) add(new THREE.Mesh(rbox(0.9, portalH, 0.9), timber), sx * (portalW / 2 + 0.4), portalY, face);
+    // Name on a painted signboard in the lift's colour above the portal.
+    const plate = makeNameplate(name, w - 5, 1.5);
+    const boardW = (plate.geometry as THREE.PlaneGeometry).parameters.width + 1.6;
+    add(new THREE.Mesh(rbox(boardW, 2.3, 0.4, 0.15), std(look.color === "#d8a031" ? "#2c3a48" : look.color, { metalness: 0.2, roughness: 0.45 })), 0, portalY + portalH / 2 + 2.1, face + out * 0.2);
+    plate.rotation.y = bottom ? 0 : Math.PI;
+    t.add(plate);
+    plate.position.set(0, portalY + portalH / 2 + 2.1, face + out * 0.42);
+    const roof = gableRoof(w, D + 4, THREE.MathUtils.degToRad(28), 1.8, std(look.color, { metalness: 0.1, roughness: 0.6 }), snow, true);
+    roof.group.rotation.y = Math.PI / 2;
+    add(roof.group, 0, wallH, zc);
+    const tri = new THREE.Shape();
+    tri.moveTo(-w / 2, 0);
+    tri.lineTo(w / 2, 0);
+    tri.lineTo(0, roof.rise);
+    tri.closePath();
+    const gableGeo = new THREE.ExtrudeGeometry(tri, { depth: D - 0.2, bevelEnabled: false });
+    gableGeo.translate(0, 0, -(D - 0.2) / 2);
+    add(new THREE.Mesh(gableGeo, timber), 0, wallH, zc);
     return t;
   }
-  // Chairlift terminal: legs, housing, and a bullwheel the width of the gauge.
-  const leg = std(look.steel);
+  // Detachable chairlift terminal: a long, rounded two-tone shell over the
+  // bullwheel, a band of tinted windows along the top, the lift's name on a
+  // painted band, all held up on one central pedestal. Chairs slow down and
+  // swing out underneath it.
+  const R = look.gauge / 2 + 0.3;
+  const W = look.gauge + 2.8;
+  const L = look.gauge * 2 + 9;
+  const zc = out * (L / 2 - R - 1.6);
+  const band = std(look.color, { metalness: 0.3, roughness: 0.35 });
+  const silver = std("#dde1e5", { metalness: 0.35, roughness: 0.3 });
+  const tint = std("#1f2a35", { metalness: 0.6, roughness: 0.12 });
+  const concrete = std("#a7abb0", { metalness: 0.1, roughness: 0.8 });
+  const bandH = 1.9;
+  const topH = 2.5;
+  const y0 = h - 0.7;
+  add(new THREE.Mesh(shell(W, L, bandH, W * 0.5, 0.35), band), 0, y0, zc);
+  add(new THREE.Mesh(shell(W - 0.25, L - 0.4, topH, W * 0.48, 0.9), silver), 0, y0 + bandH - 0.15, zc);
+  // White trim between the two tones.
+  add(new THREE.Mesh(shell(W + 0.1, L + 0.1, 0.18, W * 0.5, 0.06), std("#eef1f4", { metalness: 0.2, roughness: 0.5 })), 0, y0 + bandH - 0.12, zc);
+  // Tinted windows down both long sides, in panes.
+  const panes = Math.max(3, Math.round((L - W) / 2.6));
+  const run = L - W * 0.7;
   for (const sx of [-1, 1]) {
-    const l = new THREE.Mesh(new THREE.BoxGeometry(0.9, h, 0.9), leg);
-    l.position.set(sx * 1.6, h / 2, bottom ? -3 : 3);
-    l.castShadow = true;
-    t.add(l);
+    for (let k = 0; k < panes; k++) {
+      const z = zc - run / 2 + (run * (k + 0.5)) / panes;
+      add(new THREE.Mesh(rbox(0.14, 1.25, run / panes - 0.35, 0.06), tint), sx * ((W - 0.25) / 2 + 0.03), y0 + bandH + 0.95, z);
+    }
+    const plate = makeNameplate(name, L * 0.7, bandH * 0.62);
+    plate.rotation.y = sx * (Math.PI / 2);
+    t.add(plate);
+    plate.position.set(sx * (W / 2 + 0.04), y0 + bandH * 0.48, zc);
   }
-  const wheel = new THREE.Mesh(new THREE.CylinderGeometry(look.gauge / 2 + 0.3, look.gauge / 2 + 0.3, 0.5, 20), std("#2e3338"));
-  wheel.position.set(0, h, 0);
-  const housing = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 2, 2.6, 6), std(look.color));
-  housing.position.set(0, h + 1.6, bottom ? -2 : 2);
-  housing.castShadow = true;
-  t.add(wheel, housing);
-  // Loading ramp / unload hump.
-  const ramp = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 4, 0.8, 9), std("#e9eef3", { metalness: 0 }));
-  ramp.position.set(0, 0.4, bottom ? 2 : -2);
-  t.add(ramp);
+  // The pedestal and a cross-head under the shell.
+  add(new THREE.Mesh(rbox(2.2, y0, 3.6, 0.5), concrete), 0, y0 / 2, zc);
+  add(new THREE.Mesh(rbox(W - 1.2, 0.6, 4.4, 0.25), std("#3a3f45", { metalness: 0.5, roughness: 0.4 })), 0, y0 - 0.25, zc);
+  // Bullwheel just under the back of the shell.
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(R, 0.24, 10, 48), std("#2e3338", { metalness: 0.6, roughness: 0.35 }));
+  rim.rotation.x = Math.PI / 2;
+  add(rim, 0, h, 0);
+  // Loading carpet / unload ramp where the chairs come out from under the shell.
+  add(new THREE.Mesh(rbox(look.gauge + 4, 0.8, 9, 0.38), std("#e9eef3", { metalness: 0 })), 0, 0.4, zc + out * (L / 2 + 1));
   if (bottom) {
-    const shack = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), std("#d6cdbd", { metalness: 0 }));
-    shack.position.set(look.gauge / 2 + 5, 2, 0);
-    shack.castShadow = true;
-    t.add(shack);
+    add(new THREE.Mesh(rbox(look.gauge + 3, 0.12, 0.5, 0.05), std("#d2343a", { metalness: 0 })), 0, 0.86, zc + out * (L / 2 - 2));
+    hut(4.6, 4.2, 3.4, W / 2 + 4.2, zc + out * (L / 2 - 2), "#d6dbe0", "#3f4a55");
   }
   return t;
 }
@@ -2051,7 +2475,7 @@ function makeTBar(): THREE.Group {
   const dark = new THREE.MeshBasicMaterial({ color: "#2a3038" });
   const hang = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 4), dark);
   hang.position.y = -3;
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
+  const bar = new THREE.Mesh(rbox(4.2, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
   bar.position.y = -6;
   g.add(hang, bar);
   return g;
@@ -2060,16 +2484,25 @@ function makeTBar(): THREE.Group {
 function makeChair(seats: number, color: string, bubble: boolean): THREE.Group {
   const g = new THREE.Group();
   const w = seats * 1.25 + 0.4;
-  const frame = std("#3a3f45");
-  const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.2, 4, 0.2), frame);
+  const frame = std("#3a3f45", { metalness: 0.5, roughness: 0.4 });
+  const pad = std(color, { metalness: 0.05, roughness: 0.55 });
+  const hanger = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 4, 8), frame);
   hanger.position.set(0, -2, 0);
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(w, 0.35, 1.4), std(color));
+  const seat = new THREE.Mesh(rbox(w, 0.45, 1.4, 0.2), pad);
   seat.position.set(0, -4.1, 0.1);
-  const back = new THREE.Mesh(new THREE.BoxGeometry(w, 1.5, 0.25), std(color));
+  const back = new THREE.Mesh(rbox(w, 1.5, 0.32, 0.15), pad);
   back.position.set(0, -3.3, -0.6);
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, 0.12), frame);
+  back.rotation.x = -0.12;
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, w, 8), frame);
+  bar.rotation.z = Math.PI / 2;
   bar.position.set(0, -3, 1.1);
   g.add(hanger, seat, back, bar);
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.6, 6), frame);
+    arm.rotation.x = Math.PI / 2;
+    arm.position.set((sx * w) / 2, -3.2, 0.25);
+    g.add(arm);
+  }
   if (bubble) {
     // Tinted bubble hinged above the chair, closed down over the riders' front.
     const dome = new THREE.Mesh(
@@ -2088,14 +2521,15 @@ function makeChair(seats: number, color: string, bubble: boolean): THREE.Group {
 
 function makeCabin(color: string): THREE.Group {
   const g = new THREE.Group();
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.4, 0.25), std("#3a3f45"));
+  const frame = std("#3a3f45", { metalness: 0.5, roughness: 0.4 });
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2.4, 8), frame);
   grip.position.y = -1.2;
-  const body = new THREE.Mesh(new THREE.BoxGeometry(3.6, 3.4, 3.6), std(color));
+  const body = new THREE.Mesh(rbox(3.6, 3.4, 3.6, 1.0), std(color, { metalness: 0.2, roughness: 0.4 }));
   body.position.y = -4.4;
-  const windows = new THREE.Mesh(new THREE.BoxGeometry(3.7, 1.3, 3.7), std("#284a66", { roughness: 0.1, metalness: 0.5 }));
-  windows.position.y = -3.8;
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.5, 3.2), std("#e6e9ec"));
-  roof.position.y = -2.5;
+  const windows = new THREE.Mesh(rbox(3.72, 1.4, 3.72, 0.9), std("#284a66", { roughness: 0.08, metalness: 0.6 }));
+  windows.position.y = -3.9;
+  const roof = new THREE.Mesh(rbox(2.6, 0.5, 2.6, 0.24), std("#e6e9ec", { metalness: 0.3, roughness: 0.4 }));
+  roof.position.y = -2.6;
   g.add(grip, body, windows, roof);
   g.traverse((c) => {
     if (c instanceof THREE.Mesh) c.castShadow = true;
@@ -2191,7 +2625,7 @@ function makeFeatureMesh(type: FeatureType, ghost: boolean): THREE.Group {
     m.castShadow = !ghost;
     m.receiveShadow = true;
     g.add(m);
-    const lip = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.25, 0.4), accent);
+    const lip = new THREE.Mesh(rbox(7.2, 0.25, 0.4), accent);
     lip.position.set(0, 3.7, 5.5);
     g.add(lip);
   } else if (type === "rail") {
@@ -2200,19 +2634,19 @@ function makeFeatureMesh(type: FeatureType, ghost: boolean): THREE.Group {
     bar.position.y = 1.8;
     g.add(bar);
     for (const z of [-6.5, 6.5]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.8, 0.4), accent);
+      const post = new THREE.Mesh(rbox(0.4, 1.8, 0.4), accent);
       post.position.set(0, 0.9, z);
       g.add(post);
     }
-    const ramp = new THREE.Mesh(new THREE.BoxGeometry(3, 1.2, 5), snow);
+    const ramp = new THREE.Mesh(rbox(3, 1.2, 5), snow);
     ramp.position.set(0, 0.6, -10);
     g.add(ramp);
   } else if (type === "box") {
-    const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.8, 13), std("#3e78c4"));
+    const top = new THREE.Mesh(rbox(2.6, 0.8, 13), std("#3e78c4"));
     top.position.y = 1.2;
     top.castShadow = !ghost;
     g.add(top);
-    const legs = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 11), steel);
+    const legs = new THREE.Mesh(rbox(2, 0.8, 11), steel);
     legs.position.y = 0.4;
     g.add(legs);
   } else {
@@ -2225,11 +2659,11 @@ function makeFeatureMesh(type: FeatureType, ghost: boolean): THREE.Group {
     pipe.receiveShadow = true;
     g.add(pipe);
     for (const sx of [-1, 1]) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(3, r, len), snow);
+      const wall = new THREE.Mesh(rbox(3, r, len), snow);
       wall.position.set(sx * (r + 1.5), r / 2, 0);
       wall.castShadow = !ghost;
       g.add(wall);
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, len), accent);
+      const deck = new THREE.Mesh(rbox(0.3, 0.3, len), accent);
       deck.position.set(sx * r, r + 0.15, 0);
       g.add(deck);
     }
@@ -2297,14 +2731,14 @@ function makeHelipad(ghost: boolean): THREE.Group {
   g.add(ring);
   const paint = std("#ffffff", { metalness: 0 });
   for (const x of [-3, 3]) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 9), paint);
+    const bar = new THREE.Mesh(rbox(1.2, 0.2, 9), paint);
     bar.position.set(x, 0.7, 0);
     g.add(bar);
   }
-  const cross = new THREE.Mesh(new THREE.BoxGeometry(6, 0.2, 1.2), paint);
+  const cross = new THREE.Mesh(rbox(6, 0.2, 1.2), paint);
   cross.position.set(0, 0.7, 0);
   g.add(cross);
-  const hangar = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 12), std("#c9cdd2", { metalness: 0.3 }));
+  const hangar = new THREE.Mesh(rbox(14, 8, 12), std("#c9cdd2", { metalness: 0.3 }));
   hangar.position.set(26, 4, 0);
   hangar.castShadow = !ghost;
   g.add(hangar);
@@ -2334,11 +2768,11 @@ function makeHelicopter(): THREE.Group {
   const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 7, 14), std("#c8332b"));
   boom.rotation.x = Math.PI / 2;
   boom.position.set(0, 3.2, -6.5);
-  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.2, 1.2), std("#e6e9ec"));
+  const fin = new THREE.Mesh(rbox(0.25, 2.2, 1.2), std("#e6e9ec"));
   fin.position.set(0, 4, -9.8);
   const skid = std("#3a3f45");
   for (const x of [-1.6, 1.6]) {
-    const s = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 6), skid);
+    const s = new THREE.Mesh(rbox(0.25, 0.25, 6), skid);
     s.position.set(x, 0.2, 0);
     g.add(s);
   }
@@ -2347,7 +2781,7 @@ function makeHelicopter(): THREE.Group {
   const rotor = new THREE.Group();
   rotor.name = "rotor";
   for (const a of [0, Math.PI / 2]) {
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(14, 0.12, 0.5), skid);
+    const blade = new THREE.Mesh(rbox(14, 0.12, 0.5), skid);
     blade.rotation.y = a;
     rotor.add(blade);
   }
@@ -2495,8 +2929,37 @@ function makeSunDisc(): THREE.Sprite {
 const MAX_CARS = 70;
 const ROAD_DRAFT_OK = new THREE.Color("#596069");
 const ROAD_DRAFT_STEEP = new THREE.Color("#d99a2b");
+const PATH_DRAFT_OK = new THREE.Color("#b49a72");
 
 /** Asphalt with snowy shoulders, draped on the terrain. The highway is wider. */
+/** A packed, swept footpath: warm gravel with a darker trodden kerb. */
+function makePathRibbon(p: Path, mid: MountainId): THREE.Mesh {
+  const kerb = new THREE.Color("#8d8170");
+  const gravel = new THREE.Color("#b9ab92");
+  const geo = buildRibbon(p.points, mid, PATH_WIDTH, 0.55, () => [kerb, gravel], 0.18);
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.95,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
+  mesh.receiveShadow = true;
+  mesh.userData = { kind: "path", id: p.id };
+  // Round paved landings where the path starts and ends.
+  const pad = new THREE.CircleGeometry(PATH_WIDTH * 0.75, 20).rotateX(-Math.PI / 2);
+  for (const e of [p.points[0], p.points[p.points.length - 1]]) {
+    const m = new THREE.Mesh(pad, mesh.material);
+    m.position.copy(onGround(e.x, e.y, 0.5, mid));
+    m.receiveShadow = true;
+    mesh.add(m);
+  }
+  return mesh;
+}
+
 function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
   const shoulder = new THREE.Color("#c8cfd6");
   const asphalt = new THREE.Color(r.highway ? "#3a3e44" : "#454a51");
@@ -2633,7 +3096,7 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type !== "garage") {
     // A pad graded into the slope: thick enough that its downhill edge never floats.
     const depth = spec.maxGrade * spec.w + 1.5;
-    const pad = new THREE.Mesh(new THREE.BoxGeometry(spec.w, depth, spec.d), new THREE.MeshStandardMaterial({ color: "#4b525b", roughness: 0.92 }));
+    const pad = new THREE.Mesh(rbox(spec.w, depth, spec.d), new THREE.MeshStandardMaterial({ color: "#4b525b", roughness: 0.92 }));
     pad.position.y = 0.35 - depth / 2;
     pad.receiveShadow = true;
     g.add(pad);
@@ -2644,7 +3107,7 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
       [2.5, spec.d, -spec.w / 2 - 0.6, 0],
       [2.5, spec.d, spec.w / 2 + 0.6, 0],
     ]) {
-      const b = new THREE.Mesh(new THREE.BoxGeometry(bw, 1.4, bd), berm);
+      const b = new THREE.Mesh(rbox(bw, 1.4, bd), berm);
       b.position.set(x, 0.5, z);
       g.add(b);
     }
@@ -2654,7 +3117,7 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     for (const [x, z] of poles) {
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 9, 6), concrete);
       pole.position.set(x, 4.8, z);
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.35, 0.7), new THREE.MeshStandardMaterial({ color: "#3a3f45", emissive: "#fff2c4", emissiveIntensity: 0.25 }));
+      const lamp = new THREE.Mesh(rbox(1.8, 0.35, 0.7), new THREE.MeshStandardMaterial({ color: "#3a3f45", emissive: "#fff2c4", emissiveIntensity: 0.25 }));
       lamp.position.set(x, 9.3, z);
       pole.castShadow = !ghost;
       g.add(pole, lamp);
@@ -2663,13 +3126,13 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     const levels = 5;
     const lh = 3.4;
     // Plinth down into the slope, then open decks on columns with low walls.
-    const plinth = new THREE.Mesh(new THREE.BoxGeometry(spec.w, 9, spec.d), concrete);
+    const plinth = new THREE.Mesh(rbox(spec.w, 9, spec.d), concrete);
     plinth.position.y = -4.4;
     g.add(plinth);
     const wall = new THREE.MeshStandardMaterial({ color: "#d4d8dc", roughness: 0.8 });
     for (let i = 0; i <= levels; i++) {
       const y = i * lh;
-      const slab = new THREE.Mesh(new THREE.BoxGeometry(spec.w, 0.5, spec.d), concrete);
+      const slab = new THREE.Mesh(rbox(spec.w, 0.5, spec.d), concrete);
       slab.position.y = y;
       slab.castShadow = !ghost;
       slab.receiveShadow = true;
@@ -2681,14 +3144,14 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
         [0.4, spec.d, spec.w / 2, 0],
         [0.4, spec.d, -spec.w / 2, 0],
       ]) {
-        const p = new THREE.Mesh(new THREE.BoxGeometry(bw, 1.1, bd), wall);
+        const p = new THREE.Mesh(rbox(bw, 1.1, bd), wall);
         p.position.set(x, y + 0.8, z);
         g.add(p);
       }
     }
     for (let x = -spec.w / 2 + 1; x <= spec.w / 2 - 1; x += (spec.w - 2) / 5) {
       for (const z of [-spec.d / 2 + 1, 0, spec.d / 2 - 1]) {
-        const col = new THREE.Mesh(new THREE.BoxGeometry(0.8, levels * lh, 0.8), concrete);
+        const col = new THREE.Mesh(rbox(0.8, levels * lh, 0.8), concrete);
         col.position.set(x, (levels * lh) / 2, z);
         g.add(col);
       }
@@ -2696,12 +3159,12 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     // Cars on every deck (the roof is the emptiest).
     for (let i = 0; i < levels; i++) g.add(...parkingDeck(spec.w - 6, spec.d - 6, i * lh + 0.25, 3 + i * 5, i === levels - 1 ? 0.3 : 0.7, ghost));
     // Stair and lift tower, with a big P.
-    const tower = new THREE.Mesh(new THREE.BoxGeometry(7, levels * lh + 4, 7), new THREE.MeshStandardMaterial({ color: "#2f5f99", roughness: 0.6 }));
+    const tower = new THREE.Mesh(rbox(7, levels * lh + 4, 7), new THREE.MeshStandardMaterial({ color: "#2f5f99", roughness: 0.6 }));
     tower.position.set(spec.w / 2 - 2, (levels * lh + 4) / 2, spec.d / 2 + 2);
     tower.castShadow = !ghost;
     g.add(tower);
     // Entry ramp up the long side.
-    const ramp = new THREE.Mesh(new THREE.BoxGeometry(22, 0.5, 7), concrete);
+    const ramp = new THREE.Mesh(rbox(22, 0.5, 7), concrete);
     ramp.position.set(-spec.w / 2 + 14, lh / 2, spec.d / 2 + 4);
     ramp.rotation.z = Math.atan2(lh, 22);
     g.add(ramp);

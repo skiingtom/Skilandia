@@ -1,6 +1,7 @@
 import { AmbientState, AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
+import { PATH_COST_PER_M, PATH_MAX_GRADE } from "./paths";
 import { World3D, from3 } from "./scene";
 import { EARTH_COST_PER_M3, Game, SUMMITS, TREE_FELL_COST, TREE_PLANT_COST } from "./sim";
 import { MAX_EARTHWORK_M, SculptMode, earthworkAt } from "./height";
@@ -254,10 +255,10 @@ function paintHud(force = false): void {
   paintClock();
   paintMountains();
   paintStaff();
-  goalsEl.innerHTML = game
-    .goals()
-    .map((g) => `<li class="${g.done ? "done" : ""}">${g.text}</li>`)
-    .join("");
+  const goals = game.goals();
+  goalsEl.innerHTML = goals.map((g) => `<li class="${g.done ? "done" : ""}">${g.text}</li>`).join("");
+  paintGoalsHead(goals);
+  paintReward();
   complaintsEl.innerHTML = game.complaints().map((c) => `<li>${c}</li>`).join("");
   const sel = game.selectionText();
   selTitle.textContent = sel.title;
@@ -279,7 +280,7 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
-    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool === "plantTrees" || tool === "shape" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
+    if (tool === "select" || tool === "cut" || tool === "road" || tool === "path" || tool === "demolish" || tool === "clearTrees" || tool === "plantTrees" || tool === "shape" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -298,7 +299,7 @@ function paintHud(force = false): void {
   pauseBtn.classList.toggle("paused", game.paused);
   pauseBtn.title = game.paused ? "Resume (Space)" : "Pause (Space)";
   pauseBtn.setAttribute("aria-label", game.paused ? "Resume" : "Pause");
-  const drafting = game.tool === "cut" || game.tool === "road";
+  const drafting = game.tool === "cut" || game.tool === "road" || game.tool === "path";
   shapeBanner.classList.toggle("hidden", game.tool !== "shape");
   plantBanner.classList.toggle("hidden", game.tool !== "plantTrees");
   plantBanner.querySelectorAll<HTMLButtonElement>(".plant-mode").forEach((b) => b.classList.toggle("on", b.dataset.mode === game.plantMode));
@@ -311,18 +312,25 @@ function paintHud(force = false): void {
   shapeText.textContent = `${SHAPE_HELP[game.shapeMode]} Hold the left button and drag. ${game.freeShaping ? "Free (see Settings)" : `$${EARTH_COST_PER_M3}/m³ of earth moved`}; building pads stay put.`;
   cutBanner.classList.toggle("hidden", !drafting);
   cutText.textContent =
-    game.tool === "road"
+    game.tool === "path"
+      ? `Footpath painter: click to start (on a building, lift, path or the lot, or anywhere), click along the way, and end on a building, lift or path. People on foot walk faster on paths and stay out of the snow. $${PATH_COST_PER_M}/m, at most ${Math.round(PATH_MAX_GRADE * 100)}% grade.`
+      : game.tool === "road"
       ? `Road: start on the highway, another road or the parking lot, click along the way, and end on a road or the lot. $${ROAD_COST_PER_M}/m, at most ${Math.round(ROAD_MAX_GRADE * 100)}% grade, so zig-zag up steep ground.`
       : `${TRAIL_KIND_SPEC[game.trailKind].label}: click downhill to draw it, then Finish. ${TRAIL_KIND_SPEC[game.trailKind].blurb} Trees in the way get cleared.`;
-  finishBtn.textContent = game.tool === "road" ? "Finish road" : "Finish trail";
+  finishBtn.textContent = game.tool === "road" ? "Finish road" : game.tool === "path" ? "Finish path" : "Finish trail";
   const picked = game.selected?.kind === "building" ? game.buildings.find((b) => b.id === game.selected!.id) : undefined;
   moveBtn.classList.toggle("hidden", !picked);
   if (picked) {
     const fee = game.moveFee(picked);
     moveBtn.textContent = `Move this ${BUILDING_LABEL[picked.type].toLowerCase()} (${fee ? `$${fee.toLocaleString()}` : "free"})`;
   }
-  const info = game.tool === "road" ? null : game.draftInfo();
-  if (game.tool === "road") {
+  const info = game.tool === "road" || game.tool === "path" ? null : game.draftInfo();
+  if (game.tool === "path") {
+    const r = game.pathDraftInfo();
+    cutDiff.textContent = game.draft.length ? `${Math.round(r.length)} m · steepest ${Math.round(r.grade * 100)}%` : "Click to start";
+    cutCost.textContent = `$${r.cost.toLocaleString()}`;
+    finishBtn.disabled = game.draft.length < 2;
+  } else if (game.tool === "road") {
     const r = game.roadDraftInfo();
     cutDiff.textContent = game.draft.length ? `${Math.round(r.length)} m · steepest ${Math.round(r.grade * 100)}%` : "Click a road or the lot";
     cutCost.textContent = `$${r.cost.toLocaleString()}`;
@@ -355,11 +363,72 @@ function paintHud(force = false): void {
   }
 }
 
-/** Peaks panel: the resort tier, and every summit to conquer (click to fly there). */
+// ---------- goals dropdown and reward popup
+
+const goalsDrop = document.querySelector<HTMLElement>("#goals-drop")!;
+const goalsToggle = document.querySelector<HTMLButtonElement>("#goals-toggle")!;
+const goalsTierEl = document.querySelector("#goals-tier")!;
+const goalsMetaEl = document.querySelector("#goals-meta")!;
+const goalsNextEl = document.querySelector("#goals-next")!;
+const goalsPipsEl = document.querySelector("#goals-pips")!;
+goalsToggle.addEventListener("click", () => {
+  const open = !goalsDrop.classList.contains("open");
+  goalsDrop.classList.toggle("open", open);
+  goalsToggle.setAttribute("aria-expanded", String(open));
+  audio.click();
+});
+
+function paintGoalsHead(goals: { done: boolean; text: string }[]): void {
+  const tier = game.tier();
+  const next = TIERS[tier + 1];
+  goalsTierEl.textContent = TIERS[tier].name;
+  goalsMetaEl.textContent = `${game.conquered.size}/${SUMMITS.length} peaks`;
+  const todo = goals.find((g) => !g.done);
+  goalsNextEl.innerHTML = todo
+    ? `<span>Next</span>${todo.text}`
+    : `<span>Done</span>Every goal reached${next ? "" : ". The mountain is yours"}.`;
+  const pips = SUMMITS.map((p) => `<i class="${game.conquered.has(p.id) ? "on" : ""}"></i>`).join("");
+  if (goalsPipsEl.innerHTML !== pips) goalsPipsEl.innerHTML = pips;
+}
+
+const rewardEl = document.querySelector<HTMLElement>("#reward")!;
+const rewardKindEl = document.querySelector("#reward-kind")!;
+const rewardTitleEl = document.querySelector("#reward-title")!;
+const rewardTextEl = document.querySelector("#reward-text")!;
+const rewardBonusEl = document.querySelector("#reward-bonus")!;
+const rewardIconEl = document.querySelector("#reward-icon")!;
+let rewardOpen = false;
+
+function paintReward(): void {
+  if (rewardOpen || !started) return;
+  const r = game.rewards.shift();
+  if (!r) return;
+  rewardOpen = true;
+  rewardKindEl.textContent = r.kind === "peak" ? "Peak conquered" : r.kind === "win" ? "Champion" : "Goal reached";
+  rewardIconEl.textContent = r.kind === "peak" ? "🚩" : r.kind === "win" ? "🏆" : "⭐";
+  rewardTitleEl.textContent = r.title;
+  rewardTextEl.textContent = r.text;
+  rewardBonusEl.textContent = `+$${r.bonus.toLocaleString()} bonus`;
+  rewardEl.classList.remove("hidden");
+  rewardEl.classList.remove("pop");
+  void rewardEl.offsetWidth;
+  rewardEl.classList.add("pop");
+  audio.cash();
+  audio.buildBig();
+}
+
+document.querySelector("#reward-ok")!.addEventListener("click", () => {
+  rewardOpen = false;
+  rewardEl.classList.add("hidden");
+  audio.click();
+  paintHud();
+});
+
+/** Peaks panel: every summit to conquer (click to fly there). */
 function paintMountains(): void {
   const tier = game.tier();
   const next = TIERS[tier + 1];
-  const head = `<div class="tier"><b>${TIERS[tier].name}</b><small>${game.conquered.size}/${SUMMITS.length} peaks · holds ${game.capacity().toLocaleString()} skiers${
+  const head = `<div class="tier"><b>${TIERS[tier].name}</b><small>Holds ${game.capacity().toLocaleString()} skiers${
     next ? ` · ${next.peaksNeeded - game.conquered.size} more peak${next.peaksNeeded - game.conquered.size === 1 ? "" : "s"} to grow` : ""
   }</small></div>`;
   const peaks = [...SUMMITS]
@@ -465,8 +534,8 @@ function loop(now: number): void {
     placeHint.classList.remove("hidden");
     placeHint.classList.toggle("ok", !!t);
     placeHint.textContent = t
-      ? `Click to demolish ${t.kind === "trail" ? `the run “${t.label}”` : t.label.toLowerCase() === "road" ? "this road" : t.label}${t.refund ? ` · salvage $${t.refund.toLocaleString()}` : ""}`
-      : "Demolish: point at a building, lift, run, park feature or road.";
+      ? `Click to demolish ${t.kind === "trail" ? `the run “${t.label}”` : t.kind === "road" ? "this road" : t.kind === "path" ? "this footpath" : t.label}${t.refund ? ` · salvage $${t.refund.toLocaleString()}` : ""}`
+      : "Demolish: point at a building, lift, run, park feature, road or path.";
   } else if (pointer.over && game.tool === "shape") {
     world.hideGhost();
     const hit = world.hitAt(pointer.x, pointer.y);
@@ -500,7 +569,7 @@ function loop(now: number): void {
     placeHint.classList.remove("hidden");
     placeHint.classList.add("ok");
     placeHint.textContent = `${game.plantMode === "single" ? "Single tree" : "Area brush"} · ${game.treesPlanted.toLocaleString()} planted so far`;
-  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road" && game.tool !== "shape") {
+  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road" && game.tool !== "path" && game.tool !== "shape") {
     const hit = world.hitAt(pointer.x, pointer.y);
     const feature = game.featureTool();
     const moving = game.movingBuilding();
@@ -613,7 +682,7 @@ canvas.addEventListener("pointerup", (e) => {
 });
 
 canvas.addEventListener("dblclick", (e) => {
-  if (game.tool !== "cut" && game.tool !== "road") return;
+  if (game.tool !== "cut" && game.tool !== "road" && game.tool !== "path") return;
   e.preventDefault();
   const result = game.finishTrail();
   if (result === "ok") audio.buildBig();
@@ -698,7 +767,7 @@ window.addEventListener("keydown", (e) => {
     game.cancel();
     paintHud();
   }
-  if (e.key === "Enter" && (game.tool === "cut" || game.tool === "road")) {
+  if (e.key === "Enter" && (game.tool === "cut" || game.tool === "road" || game.tool === "path")) {
     const result = game.finishTrail();
     if (result === "ok") audio.buildBig();
     if (result === "shake") audio.error();
