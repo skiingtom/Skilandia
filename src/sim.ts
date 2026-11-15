@@ -9,7 +9,9 @@ import {
   EXPANSION_BUILDINGS,
   FEATURE_SPEC,
   Feature,
+  FOOD_BUILDINGS,
   HELI,
+  LODGING_BUILDINGS,
   OPERATING_COST_PER_MIN,
   FeatureType,
   INCOME_PER_MIN,
@@ -371,15 +373,21 @@ export class Game {
     n += Math.min(2, this.count("restroom")) * 0.1;
     if (this.has("coffee")) n += 0.12;
     if (this.has("sandwich")) n += 0.12;
+    if (this.has("cafeteria")) n += 0.12;
+    if (this.has("bar")) n += 0.13;
     n += Math.min(3, this.count("shack")) * 0.08;
     if (this.has("hotel")) n += 0.16;
+    if (this.has("hostel")) n += 0.11;
     if (this.has("restaurant")) n += 0.14;
     if (this.has("shop")) n += 0.1;
     if (this.has("condo")) n += 0.14;
+    if (this.has("spa")) n += 0.15;
     if (this.has("patrol")) n += 0.08;
+    if (this.has("clinic")) n += 0.1;
+    if (this.has("rental")) n += 0.11;
     if (this.has("school")) n += 0.12;
     if (this.has("heli")) n += 0.15;
-    return Math.min(1.5, n);
+    return Math.min(1.65, n);
   }
 
   fairPrice(): number {
@@ -532,8 +540,14 @@ export class Game {
       out.push("Freestylers want a terrain park.");
     }
     if (this.ticketPrice > this.fairPrice() + 8) out.push("Tickets feel expensive for what is here.");
-    if (this.has("lodge") && !this.has("coffee") && !this.has("sandwich") && this.count("shack") === 0) {
+    if (
+      this.has("lodge") &&
+      !FOOD_BUILDINGS.some((t) => (t === "shack" ? this.count("shack") > 0 : this.has(t)))
+    ) {
       out.push("Hungry skiers wish there was food.");
+    }
+    if (this.has("lodge") && !this.has("rental") && this.skiers.filter((k) => k.skill === 0).length >= 4) {
+      out.push("Beginners keep asking where to rent skis.");
     }
     if (this.staffRequired()) {
       const need = this.staffNeeds();
@@ -597,7 +611,7 @@ export class Game {
     const build = tool as BuildingType | "select" | "cut" | "move";
     if (build === "move") return;
     if (build !== "select" && build !== "cut" && EXPANSION_BUILDINGS.includes(build) && !this.expansionUnlocked()) {
-      this.toast("Hotels, shops, condos and patrol unlock after you buy the next mountain.", true);
+      this.toast("Hotels, spas, hostels, bars, shops, condos and patrol unlock after your first peak.", true);
       return;
     }
     if (build !== "select" && build !== "cut" && this.count(build) >= BUILDING_MAX[build]) {
@@ -936,7 +950,7 @@ export class Game {
     const others = this.buildings.filter((b) => b.id !== opts.ignoreId);
     const cost = opts.cost ?? COSTS[type];
     if (!moving && EXPANSION_BUILDINGS.includes(type) && !this.expansionUnlocked()) {
-      return "Buy the next mountain to unlock this.";
+      return "Conquer your first peak to unlock this.";
     }
     if (!moving && this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
     const anywhere = PLACE_ANYWHERE.includes(type);
@@ -1032,11 +1046,17 @@ export class Game {
         coffee: "Cafe sales. Faster than a shack, slower than a restaurant.",
         sandwich: "Solid lunch money.",
         shack: "Tiny snack hut. Drop it beside a trail or on the summit.",
+        cafeteria: "Tray-line meals. Steady lunch traffic.",
+        bar: "Après drinks. Guests linger and spend.",
         hotel: "Overnight guests — top earner.",
         restaurant: "Sit-down meals. Faster than sandwiches.",
         shop: "Retail on the village street.",
         condo: "Sold as lodging. Big checks, village only.",
-        patrol: "Barely earns. After the starter hill you also need hired patrol.",
+        hostel: "Budget beds. Cheaper than a hotel, still fills the village.",
+        spa: "Soaks and massages. Guests leave happier.",
+        patrol: "Barely earns. After the first peak you also need hired patrol.",
+        clinic: "Bandages and ice packs. Can sit on the mountain.",
+        rental: "Boots and boards for day-trippers.",
         school: `Lessons for beginners. Needs instructors: ${this.staff.instructor} hired.`,
         heli: "",
       };
@@ -1429,12 +1449,8 @@ export class Game {
     if (!this.staffRequired()) {
       return { patrol: 0, food: 0, lift: 0, delivery: 0, maintenance: 0, instructor };
     }
-    const foodBuildings =
-      this.empireCount("coffee") +
-      this.empireCount("sandwich") +
-      this.empireCount("shack") +
-      this.empireCount("restaurant");
-    const lodgings = this.empireCount("hotel") + this.empireCount("condo") + this.empireCount("shop");
+    const foodBuildings = FOOD_BUILDINGS.reduce((n, t) => n + this.empireCount(t), 0);
+    const lodgings = LODGING_BUILDINGS.reduce((n, t) => n + this.empireCount(t), 0);
     const trails = this.trails.length;
     return {
       patrol: Math.max(1, Math.ceil(this.skiers.length / 150) + this.tier()),
@@ -1485,7 +1501,7 @@ export class Game {
 
 
   private nearestFood(x: number, y: number): Building | undefined {
-    const foods = this.buildings.filter((b) => ["coffee", "sandwich", "shack", "restaurant"].includes(b.type));
+    const foods = this.buildings.filter((b) => FOOD_BUILDINGS.includes(b.type));
     foods.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
     return foods[0];
   }

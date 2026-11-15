@@ -714,7 +714,8 @@ export class World3D {
       mesh.position.copy(to3(b.x, b.y, 0, this.mid));
       mesh.userData = { kind: "building", id: b.id };
       const tag = makeRateSprite(b.type === "heli" ? `$${HELI.fare}/seat` : `$${INCOME_PER_MIN[b.type]}/min`);
-      tag.position.y = b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" ? 20 : 14;
+      tag.position.y =
+        b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" || b.type === "hostel" ? 20 : 14;
       mesh.add(tag);
       if (game.selected?.kind === "building" && game.selected.id === b.id) {
         mesh.traverse((c) => {
@@ -1225,11 +1226,17 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     coffee: { body: "#efe6d2", roof: "#6f4e37", w: 14, d: 11, h: 7 },
     sandwich: { body: "#e7edd8", roof: "#355e3b", w: 14, d: 11, h: 7 },
     shack: { body: "#c4a574", roof: "#6b3a2a", w: 8, d: 7, h: 5 },
+    cafeteria: { body: "#ebe3d4", roof: "#5a6b4a", w: 22, d: 16, h: 8 },
+    bar: { body: "#dcc8b0", roof: "#3d2a24", w: 18, d: 14, h: 9 },
     hotel: { body: "#e8e0d4", roof: "#4a3a32", w: 34, d: 22, h: 22 },
     restaurant: { body: "#ead7c3", roof: "#7a2e2a", w: 20, d: 16, h: 9 },
     shop: { body: "#f0e6c8", roof: "#355e3b", w: 16, d: 12, h: 8 },
     condo: { body: "#d7dde4", roof: "#2c3d4f", w: 24, d: 18, h: 16 },
+    hostel: { body: "#cfd8c8", roof: "#4a5c3a", w: 20, d: 14, h: 12 },
+    spa: { body: "#e4eef0", roof: "#5a7d86", w: 22, d: 16, h: 8 },
     patrol: { body: "#dfe7ee", roof: "#c45c4a", w: 12, d: 10, h: 7 },
+    clinic: { body: "#f2f4f6", roof: "#c45c4a", w: 16, d: 12, h: 8 },
+    rental: { body: "#e6dcc8", roof: "#2f5f7a", w: 18, d: 13, h: 8 },
     school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
     heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
   };

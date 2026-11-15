@@ -8,11 +8,17 @@ export type BuildingType =
   | "coffee"
   | "sandwich"
   | "shack"
+  | "cafeteria"
+  | "bar"
   | "hotel"
   | "restaurant"
   | "shop"
   | "condo"
+  | "hostel"
+  | "spa"
   | "patrol"
+  | "clinic"
+  | "rental"
   | "school"
   | "heli";
 export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
@@ -205,11 +211,17 @@ export const COSTS: Record<BuildingType, number> = {
   coffee: 920,
   sandwich: 1050,
   shack: 620,
+  cafeteria: 1600,
+  bar: 2800,
   hotel: 12000,
   restaurant: 4800,
   shop: 3200,
   condo: 9500,
+  hostel: 5200,
+  spa: 8500,
   patrol: 1600,
+  clinic: 2100,
+  rental: 2400,
   school: 3800,
   heli: 45000,
 };
@@ -218,12 +230,18 @@ export const COSTS: Record<BuildingType, number> = {
 export const INCOME_PER_MIN: Record<BuildingType, number> = {
   restroom: 24,
   patrol: 8,
+  clinic: 30,
   lodge: 55,
   shack: 42,
   coffee: 95,
+  cafeteria: 115,
   shop: 120,
   sandwich: 140,
+  rental: 130,
+  bar: 165,
   restaurant: 175,
+  hostel: 155,
+  spa: 185,
   condo: 200,
   hotel: 220,
   school: 150,
@@ -231,7 +249,7 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
 };
 
 export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
-export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol"];
+export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol", "clinic"];
 
 export const BUILDING_MAX: Record<BuildingType, number> = {
   lodge: 1,
@@ -239,16 +257,37 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   coffee: 1,
   sandwich: 1,
   shack: 8,
+  cafeteria: 2,
+  bar: 2,
   hotel: 2,
   restaurant: 2,
   shop: 3,
   condo: 3,
+  hostel: 2,
+  spa: 1,
   patrol: 2,
+  clinic: 2,
+  rental: 2,
   school: 1,
   heli: 1,
 };
 
-export const EXPANSION_BUILDINGS: BuildingType[] = ["hotel", "restaurant", "shop", "condo", "patrol"];
+/** Places skiers visit when hungry. */
+export const FOOD_BUILDINGS: BuildingType[] = ["coffee", "sandwich", "shack", "cafeteria", "bar", "restaurant"];
+
+/** Overnight / lodging stock that drives delivery staffing. */
+export const LODGING_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "shop", "spa"];
+
+export const EXPANSION_BUILDINGS: BuildingType[] = [
+  "hotel",
+  "restaurant",
+  "shop",
+  "condo",
+  "hostel",
+  "spa",
+  "bar",
+  "patrol",
+];
 
 export const STAFF_ROLES: StaffRole[] = ["patrol", "instructor", "food", "lift", "delivery", "maintenance"];
 
@@ -286,11 +325,17 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   coffee: "Coffee shop",
   sandwich: "Sandwich shop",
   shack: "Sugar shack",
+  cafeteria: "Cafeteria",
+  bar: "Après bar",
   hotel: "Hotel",
   restaurant: "Restaurant",
   shop: "Shop",
   condo: "Condo",
+  hostel: "Hostel",
+  spa: "Spa",
   patrol: "Ski patrol hut",
+  clinic: "First-aid clinic",
+  rental: "Ski rental",
   school: "Ski school",
   heli: "Heli-ski base",
 };

@@ -64,10 +64,13 @@ Run difficulty uses real-world pitches: green under 25%, blue under 40%, black u
 ### Buildings and staff
 
 - Select a building to move it. Moving costs 25% of its price unless you switch the fee off under ⚙ Settings
+- **Base**: lodge, restroom, ski rental, ski school, first-aid clinic, ski patrol hut. Clinics and patrol huts can sit on the mountain
+- **Food**: sugar shack, coffee, cafeteria, sandwich shop, après bar, restaurant. Hungry skiers visit the nearest one
+- **Resort**: shop, hostel, condo, spa, hotel, heli-ski base. Hostels, spas, bars, hotels, shops, condos and patrol unlock after your first peak
 - **Ski school** sells lessons to beginners (some graduate to blues). It needs instructors, who are paid from day one
 - **Heli-ski base** ($450,000) flies expert skiers off the map to the backcountry, eight at a time, for $650 a seat. It costs $1,500/min to run plus $600 fuel a flight; a busy one clears about $7,700/min
 - Sugar shacks can sit beside trails
-- After you buy the next mountain, hire ski patrol and a crew
+- After your first peak, hire ski patrol and a crew
 
 ## Develop
 
