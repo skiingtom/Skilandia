@@ -94,6 +94,7 @@
               One T-bar, three runs, and a parking lot. Sell tickets, then grow the
               place.
             </p>
+            <button type="button" id="btn-remove-lift" class="ghost hidden">Take down this lift (40% back)</button>
           </section>
         </aside>
 
@@ -132,55 +133,9 @@
 
         <div id="toasts" class="toasts"></div>
 
-        <nav class="dock" aria-label="Build tools">
-          <button type="button" class="tool on" data-tool="select">
-            <span>Look around</span>
-          </button>
-          <button type="button" class="tool" data-tool="cut">
-            <span>Cut trail</span>
-            <small>length fee</small>
-          </button>
-          <button type="button" class="tool" data-tool="lodge">
-            <span>Lodge</span>
-            <small id="cost-lodge">$2,900</small>
-          </button>
-          <button type="button" class="tool" data-tool="restroom">
-            <span>Restroom</span>
-            <small id="cost-restroom">$480</small>
-          </button>
-          <button type="button" class="tool" data-tool="coffee">
-            <span>Coffee shop</span>
-            <small id="cost-coffee">$920</small>
-          </button>
-          <button type="button" class="tool" data-tool="sandwich">
-            <span>Sandwich shop</span>
-            <small id="cost-sandwich">$1,050</small>
-          </button>
-          <button type="button" class="tool" data-tool="shack">
-            <span>Sugar shack</span>
-            <small id="cost-shack">$620</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="hotel">
-            <span>Hotel</span>
-            <small id="cost-hotel">$12,000</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="restaurant">
-            <span>Restaurant</span>
-            <small id="cost-restaurant">$4,800</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="shop">
-            <span>Shop</span>
-            <small id="cost-shop">$3,200</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="condo">
-            <span>Condo</span>
-            <small id="cost-condo">$9,500</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="patrol">
-            <span>Patrol hut</span>
-            <small id="cost-patrol">$1,600</small>
-          </button>
-        </nav>
+        <div id="dock-menus" class="dock-menus"></div>
+
+        <nav id="dock" class="dock" aria-label="Build tools"></nav>
       </div>
 
       <div id="welcome">

@@ -4,7 +4,23 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { elevation, gradeAt, lerp, noise2 } from "./height";
 import { Game } from "./sim";
 import { classifyGrade } from "./sim";
-import { BuildingType, DIFF, Difficulty, INCOME_PER_MIN, MountainId, Trail, UNIT_M, Vec2, VERTICAL_M, WORLD_H, WORLD_W } from "./types";
+import {
+  BuildingType,
+  DIFF,
+  Difficulty,
+  INCOME_PER_MIN,
+  LIFT_SPECS,
+  Lift,
+  LiftType,
+  MountainId,
+  TERRAIN_SCALE,
+  Trail,
+  UNIT_M,
+  Vec2,
+  VERTICAL_M,
+  WORLD_H,
+  WORLD_W,
+} from "./types";
 
 /**
  * World units of height per unit of elevation. The trail classifier treats
@@ -12,8 +28,7 @@ import { BuildingType, DIFF, Difficulty, INCOME_PER_MIN, MountainId, Trail, UNIT
  * VERTICAL_M / UNIT_M is the "true" scale; a little extra exaggeration makes
  * steep pitches read clearly from the orbit camera.
  */
-const TRUE_SCALE = VERTICAL_M / UNIT_M;
-const H = TRUE_SCALE * 1.3;
+const H = TERRAIN_SCALE;
 export const TERRAIN_H = [H, H, H];
 
 /** Slope-overlay colours by difficulty band (green, blue, black, double black). */
@@ -56,7 +71,9 @@ export class World3D {
   private trailGroup = new THREE.Group();
   private buildingGroup = new THREE.Group();
   private liftGroup = new THREE.Group();
-  private carriers: THREE.Group[] = [];
+  private liftVis = new Map<number, LiftVis>();
+  private liftPreview = new THREE.Group();
+  private liftPreviewKey = "";
   private skiers: THREE.Group[] = [];
   private ghost = new THREE.Group();
   private draft: THREE.Mesh;
@@ -120,7 +137,7 @@ export class World3D {
     this.scene.add(this.draft);
     this.snow = this.makeSnow();
     this.scene.add(this.snow);
-    this.carriers = [];
+    this.scene.add(this.liftPreview);
     for (let i = 0; i < 40; i++) {
       const s = makeSkierMesh("#c45c4a");
       s.visible = false;
@@ -272,12 +289,14 @@ export class World3D {
       this.flyKeys(dt);
       this.controls.update();
     }
-    // Steepness tint is always on while drawing a run.
-    this.applySlopeColors(this.slopeView || game.tool === "cut");
+    // Steepness tint is always on while drawing a run or placing a surface lift.
+    const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
+    this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
     this.syncLift(game);
     this.syncSkiers(game);
     this.syncDraft(game);
+    this.syncLiftPreview(game);
     this.tickSnow(dt, game.paused ? 0.15 : game.speed);
   }
 
@@ -487,7 +506,7 @@ export class World3D {
   }
 
   private syncStatic(game: Game): void {
-    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.length}:${game.trees.length}:${game.selected?.kind}:${game.selected?.id}:${game.owned.join(",")}`;
+    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.length}:${game.trees.length}:${game.selected?.kind}:${game.selected?.id}:${game.owned.join(",")}:${game.lifts.map((l) => l.id).join(",")}`;
     if (key === this.stamp) return;
     this.stamp = key;
     this.layoutTrees(game);
@@ -564,52 +583,74 @@ export class World3D {
 
   private layoutLift(game: Game): void {
     this.liftGroup.clear();
-    this.carriers = [];
-    const bot = to3(game.lift.bottom.x, game.lift.bottom.y, 0, this.mid);
-    const top = to3(game.lift.top.x, game.lift.top.y, 0, this.mid);
-    const cableH = 16;
-    for (const p of [bot, top]) {
-      const tower = makeTower();
-      tower.position.copy(p);
-      tower.userData = { kind: "lift", id: 0 };
-      this.liftGroup.add(tower);
-    }
-    const midCount = 3;
-    for (let i = 1; i <= midCount; i++) {
-      const t = i / (midCount + 1);
-      const p = bot.clone().lerp(top, t);
-      const g = from3(p, this.mid);
-      const ground = to3(g.x, g.y, 0, this.mid).y;
-      const cableY = lerp(bot.y, top.y, t) + cableH;
-      p.y = ground;
-      const tower = makeTower();
-      tower.scale.set(0.8, Math.max(0.5, (cableY - ground) / cableH), 0.8);
-      tower.position.copy(p);
-      tower.userData = { kind: "lift", id: 0 };
-      this.liftGroup.add(tower);
-    }
-    const c0 = bot.clone();
-    c0.y += cableH;
-    const c1 = top.clone();
-    c1.y += cableH;
-    const cableGeo = new THREE.BufferGeometry().setFromPoints([c0, c1]);
-    const cable = new THREE.Line(cableGeo, new THREE.LineBasicMaterial({ color: "#22262c" }));
-    cable.userData = { kind: "lift", id: 0 };
-    this.liftGroup.add(cable);
-    for (let i = 0; i < game.lift.carriers.length; i++) {
-      const bar = makeTBar();
-      this.liftGroup.add(bar);
-      this.carriers.push(bar);
+    this.liftVis.clear();
+    for (const lift of game.lifts) {
+      const selected = game.selected?.kind === "lift" && game.selected.id === lift.id;
+      const vis = buildLift(lift, this.mid, selected);
+      this.liftGroup.add(vis.group);
+      this.liftVis.set(lift.id, vis);
     }
   }
 
   private syncLift(game: Game): void {
-    const bot = to3(game.lift.bottom.x, game.lift.bottom.y, 16, this.mid);
-    const top = to3(game.lift.top.x, game.lift.top.y, 16, this.mid);
-    for (let i = 0; i < this.carriers.length; i++) {
-      const t = game.lift.carriers[i]?.t ?? 0;
-      this.carriers[i].position.lerpVectors(bot, top, t);
+    for (const lift of game.lifts) {
+      const vis = this.liftVis.get(lift.id);
+      if (!vis) continue;
+      for (let i = 0; i < vis.up.length; i++) {
+        const t = lift.carriers[i]?.t ?? 0;
+        placeCarrier(vis, vis.up[i], t, 1);
+        if (vis.down[i]) placeCarrier(vis, vis.down[i], 1 - t, -1);
+      }
     }
+  }
+
+  private syncLiftPreview(game: Game): void {
+    const type = game.liftTool();
+    if (!type || !game.liftStart) {
+      this.liftPreview.visible = false;
+      this.liftPreviewKey = "";
+      return;
+    }
+    const pv = game.liftPreview();
+    const a = game.liftStart;
+    const b = pv?.b;
+    const key = `${type}:${a.x}:${a.y}:${b ? `${Math.round(b.x)}:${Math.round(b.y)}:${pv?.error ?? ""}` : ""}`;
+    if (key === this.liftPreviewKey) return;
+    this.liftPreviewKey = key;
+    this.liftPreview.clear();
+    const ok = !pv || !pv.error;
+    const color = new THREE.Color(ok ? "#7dcea0" : "#e0664f");
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthTest: false });
+    const marker = (p: Vec2) => {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(4, 4, 18, 12, 1, true), mat);
+      m.position.copy(to3(p.x, p.y, 9, this.mid));
+      m.renderOrder = 5;
+      this.liftPreview.add(m);
+    };
+    marker(a);
+    if (b) {
+      marker(b);
+      const spec = LIFT_SPECS[type];
+      const h = Math.max(2, spec.towerH);
+      const n = 24;
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const x = a.x + (b.x - a.x) * t;
+        const y = a.y + (b.y - a.y) * t;
+        // Surface lifts hug the snow; aerial lifts run a straight cable.
+        if (spec.surface) pts.push(to3(x, y, h, this.mid));
+        else {
+          const p = to3(x, y, 0, this.mid);
+          p.y = lerp(to3(a.x, a.y, h, this.mid).y, to3(b.x, b.y, h, this.mid).y, t);
+          pts.push(p);
+        }
+      }
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 1.1, 6), mat);
+      tube.renderOrder = 5;
+      this.liftPreview.add(tube);
+    }
+    this.liftPreview.visible = true;
   }
 
   private syncSkiers(game: Game): void {
@@ -622,6 +663,19 @@ export class World3D {
       }
       mesh.visible = true;
       const p = to3(s.x, s.y, 1.4, this.mid);
+      if (s.state === "riding" && s.liftId != null) {
+        const vis = this.liftVis.get(s.liftId);
+        if (vis && !vis.spec.surface) {
+          if (vis.type === "gondola") {
+            mesh.visible = false; // inside the cabin
+          } else {
+            const c = vis.at(s.rideT, 1);
+            p.x = to3(s.x, s.y, 0, this.mid).x + vis.side.x * vis.gauge * 0.5;
+            p.z = to3(s.x, s.y, 0, this.mid).z + vis.side.z * vis.gauge * 0.5;
+            p.y = c.y - vis.hang + 0.2;
+          }
+        }
+      }
       mesh.position.copy(p);
       mesh.userData = { kind: "skier", id: s.id };
       const body = mesh.children[0] as THREE.Mesh;
@@ -1033,31 +1087,6 @@ function makeVillageProps(mid: MountainId): THREE.Group {
   return g;
 }
 
-function makeTower(): THREE.Group {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.5, 0.7, 16, 6),
-    new THREE.MeshStandardMaterial({ color: "#3c2a1e" }),
-  );
-  pole.position.y = 8;
-  pole.castShadow = true;
-  const arm = new THREE.Mesh(new THREE.BoxGeometry(8, 0.5, 0.5), new THREE.MeshStandardMaterial({ color: "#c45c4a" }));
-  arm.position.y = 15.5;
-  g.add(pole, arm);
-  g.userData = { kind: "lift", id: 0 };
-  return g;
-}
-
-function makeTBar(): THREE.Group {
-  const g = new THREE.Group();
-  const hang = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 4), new THREE.MeshBasicMaterial({ color: "#2a3038" }));
-  hang.position.y = -3;
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.25, 0.25), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
-  bar.position.y = -6;
-  g.add(hang, bar);
-  return g;
-}
-
 function makeSkierMesh(color: string): THREE.Group {
   const g = new THREE.Group();
   const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color }));
@@ -1071,5 +1100,302 @@ function makeSkierMesh(color: string): THREE.Group {
   ski2.position.x = 0.4;
   g.add(body, head, ski, ski2);
   g.userData = { kind: "skier" };
+  return g;
+}
+
+interface LiftVis {
+  type: LiftType;
+  spec: (typeof LIFT_SPECS)[LiftType];
+  group: THREE.Group;
+  up: THREE.Object3D[];
+  down: THREE.Object3D[];
+  /** Unit vector across the line (toward the up-bound side). */
+  side: THREE.Vector3;
+  gauge: number;
+  /** Distance a carrier hangs below the cable. */
+  hang: number;
+  /** Cable position for side (+1 up / -1 return) at fraction t. */
+  at: (t: number, dir: number) => THREE.Vector3;
+  heading: number;
+}
+
+const LIFT_LOOK: Record<LiftType, { gauge: number; hang: number; color: string; steel: string }> = {
+  carpet: { gauge: 0, hang: 0, color: "#2b3036", steel: "#6b7480" },
+  tbar: { gauge: 0, hang: 6.5, color: "#b33b2b", steel: "#5a3c26" },
+  double: { gauge: 4.5, hang: 4.2, color: "#3f6b3a", steel: "#55606b" },
+  quad: { gauge: 5.5, hang: 4.4, color: "#2f5d8a", steel: "#4c5864" },
+  six: { gauge: 7, hang: 4.8, color: "#a8322d", steel: "#3f4a55" },
+  gondola: { gauge: 7.5, hang: 6.5, color: "#d8a031", steel: "#3a434d" },
+};
+
+function std(color: string, extra: THREE.MeshStandardMaterialParameters = {}): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.15, ...extra });
+}
+
+function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
+  const spec = LIFT_SPECS[lift.type];
+  const look = LIFT_LOOK[lift.type];
+  const group = new THREE.Group();
+  group.userData = { kind: "lift", id: lift.id };
+  const a = lift.bottom;
+  const b = lift.top;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const fwd = new THREE.Vector3(dx / len, 0, dy / len);
+  const side = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const heading = Math.atan2(fwd.x, fwd.z);
+  const ground = (t: number) => to3(a.x + dx * t, a.y + dy * t, 0, mid);
+
+  if (lift.type === "carpet") {
+    // Rubber belt on the snow with a covered gallery.
+    const geo = buildRibbon([a, b], mid, 4.2, 0.5, () => [new THREE.Color("#3a3f45"), new THREE.Color("#262a2f")], 0.12);
+    const belt = new THREE.Mesh(geo, std("#ffffff", { vertexColors: true, roughness: 0.9, metalness: 0 }));
+    belt.receiveShadow = true;
+    group.add(belt);
+    const frameMat = std("#5a8fc4");
+    const n = Math.max(2, Math.round(len / 9));
+    for (let i = 0; i <= n; i++) {
+      const p = ground(i / n);
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(3, 0.18, 4, 12, Math.PI), frameMat);
+      hoop.position.copy(p);
+      hoop.rotation.y = heading + Math.PI / 2;
+      group.add(hoop);
+    }
+    const g0 = ground(0);
+    const g1 = ground(1);
+    for (const p of [g0, g1]) {
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(6, 0.6, 6), std("#8a949e"));
+      pad.position.copy(p).setY(p.y + 0.3);
+      pad.rotation.y = heading;
+      group.add(pad);
+    }
+    if (selected) highlight(group);
+    return { type: lift.type, spec, group, up: [], down: [], side, gauge: 0, hang: 0, at: (t) => ground(t), heading };
+  }
+
+  // Towers: evenly spaced, tall enough that the cable clears every bump.
+  const towerGap = lift.type === "gondola" ? 90 : lift.type === "tbar" ? 55 : 70;
+  const nT = Math.max(1, Math.round(len / towerGap));
+  const ts: number[] = [];
+  for (let i = 0; i <= nT; i++) ts.push(i / nT);
+  const tops = ts.map((t) => ground(t).y + spec.towerH);
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 1; i < ts.length; i++) {
+      let need = 0;
+      for (let k = 1; k < 8; k++) {
+        const u = k / 8;
+        const t = lerp(ts[i - 1], ts[i], u);
+        const line = lerp(tops[i - 1], tops[i], u);
+        need = Math.max(need, ground(t).y + look.hang + 3 - line);
+      }
+      if (need > 0) {
+        tops[i - 1] += need;
+        tops[i] += need;
+      }
+    }
+  }
+  const cableY = (t: number) => {
+    const i = Math.min(ts.length - 2, Math.floor(t * nT));
+    const u = (t - ts[i]) / (ts[i + 1] - ts[i]);
+    return lerp(tops[i], tops[i + 1], Math.max(0, Math.min(1, u)));
+  };
+  const gauge = look.gauge;
+  const at = (t: number, dir: number) => {
+    const p = ground(t);
+    p.y = cableY(t);
+    return p.addScaledVector(side, (gauge / 2) * dir);
+  };
+
+  const steel = std(look.steel);
+  for (let i = 0; i < ts.length; i++) {
+    const g = ground(ts[i]);
+    const h = tops[i] - g.y;
+    const station = i === 0 || i === ts.length - 1;
+    if (station && lift.type !== "tbar") continue;
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 7), steel);
+    pole.position.copy(g).setY(g.y + h / 2);
+    pole.castShadow = true;
+    group.add(pole);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(Math.max(2.5, gauge + 1.6), 0.5, 0.6), std(lift.type === "tbar" ? "#c45c4a" : look.steel));
+    arm.position.copy(g).setY(tops[i] + 0.3);
+    arm.rotation.y = heading + Math.PI / 2;
+    group.add(arm);
+  }
+
+  // Cable loop (up line and return line).
+  const cableMat = new THREE.LineBasicMaterial({ color: "#1d2127" });
+  for (const dir of gauge ? [1, -1] : [0]) {
+    const pts = ts.map((t) => at(t, dir));
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), cableMat));
+  }
+
+  // Terminals.
+  for (const end of [0, 1]) {
+    const g = ground(end);
+    const y = tops[end === 0 ? 0 : tops.length - 1];
+    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look));
+  }
+
+  // Carriers.
+  const up: THREE.Object3D[] = [];
+  const down: THREE.Object3D[] = [];
+  const makeCarrier = () => {
+    if (lift.type === "tbar") return makeTBar();
+    if (lift.type === "gondola") return makeCabin(look.color);
+    return makeChair(spec.seats, look.color, lift.type === "six");
+  };
+  for (let i = 0; i < lift.carriers.length; i++) {
+    const c = makeCarrier();
+    group.add(c);
+    up.push(c);
+    if (gauge) {
+      const r = makeCarrier();
+      group.add(r);
+      down.push(r);
+    }
+  }
+  if (selected) highlight(group);
+  return { type: lift.type, spec, group, up, down, side, gauge, hang: look.hang, at, heading };
+}
+
+function placeCarrier(vis: LiftVis, obj: THREE.Object3D, t: number, dir: number): void {
+  const p = vis.at(Math.max(0, Math.min(1, t)), vis.gauge ? dir : 0);
+  obj.position.copy(p);
+  obj.rotation.y = vis.heading + (dir < 0 ? Math.PI : 0);
+}
+
+function highlight(g: THREE.Object3D): void {
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshStandardMaterial) {
+      c.material = c.material.clone();
+      c.material.emissive = new THREE.Color("#e2b857");
+      c.material.emissiveIntensity = 0.3;
+    }
+  });
+}
+
+function makeTerminal(
+  type: LiftType,
+  g: THREE.Vector3,
+  cableY: number,
+  heading: number,
+  bottom: boolean,
+  look: (typeof LIFT_LOOK)[LiftType],
+): THREE.Group {
+  const t = new THREE.Group();
+  t.position.copy(g);
+  t.rotation.y = heading;
+  const h = cableY - g.y;
+  if (type === "tbar") {
+    if (bottom) {
+      const hut = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 5), std("#c9b08a", { metalness: 0 }));
+      hut.position.set(5, 2.5, -2);
+      hut.castShadow = true;
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(5, 2.4, 4), std("#6b3a2a", { metalness: 0 }));
+      roof.position.set(5, 6.2, -2);
+      roof.rotation.y = Math.PI / 4;
+      t.add(hut, roof);
+    }
+    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.4, 14), std("#3a3f45"));
+    wheel.position.y = h + 0.8;
+    t.add(wheel);
+    return t;
+  }
+  if (type === "gondola") {
+    // Enclosed station building the cabins run through.
+    const w = look.gauge + 8;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h + 4, 18), std("#cfc6b6", { metalness: 0 }));
+    body.position.set(0, (h + 4) / 2, bottom ? -6 : 6);
+    body.castShadow = true;
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 3.5, 14), std("#6fa3c8", { roughness: 0.1, metalness: 0.4 }));
+    glass.position.set(0, h - 4, bottom ? -6 : 6);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 3, 1.2, 21), std(look.color));
+    roof.position.set(0, h + 4.6, bottom ? -6 : 6);
+    roof.castShadow = true;
+    t.add(body, glass, roof);
+    return t;
+  }
+  // Chairlift terminal: legs, housing, and a bullwheel the width of the gauge.
+  const leg = std(look.steel);
+  for (const sx of [-1, 1]) {
+    const l = new THREE.Mesh(new THREE.BoxGeometry(0.9, h, 0.9), leg);
+    l.position.set(sx * 1.6, h / 2, bottom ? -3 : 3);
+    l.castShadow = true;
+    t.add(l);
+  }
+  const wheel = new THREE.Mesh(new THREE.CylinderGeometry(look.gauge / 2 + 0.3, look.gauge / 2 + 0.3, 0.5, 20), std("#2e3338"));
+  wheel.position.set(0, h, 0);
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 2, 2.6, 6), std(look.color));
+  housing.position.set(0, h + 1.6, bottom ? -2 : 2);
+  housing.castShadow = true;
+  t.add(wheel, housing);
+  // Loading ramp / unload hump.
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 4, 0.8, 9), std("#e9eef3", { metalness: 0 }));
+  ramp.position.set(0, 0.4, bottom ? 2 : -2);
+  t.add(ramp);
+  if (bottom) {
+    const shack = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), std("#d6cdbd", { metalness: 0 }));
+    shack.position.set(look.gauge / 2 + 5, 2, 0);
+    shack.castShadow = true;
+    t.add(shack);
+  }
+  return t;
+}
+
+function makeTBar(): THREE.Group {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshBasicMaterial({ color: "#2a3038" });
+  const hang = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 4), dark);
+  hang.position.y = -3;
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
+  bar.position.y = -6;
+  g.add(hang, bar);
+  return g;
+}
+
+function makeChair(seats: number, color: string, bubble: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const w = seats * 1.25 + 0.4;
+  const frame = std("#3a3f45");
+  const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.2, 4, 0.2), frame);
+  hanger.position.set(0, -2, 0);
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(w, 0.35, 1.4), std(color));
+  seat.position.set(0, -4.1, 0.1);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(w, 1.5, 0.25), std(color));
+  back.position.set(0, -3.3, -0.6);
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, 0.12), frame);
+  bar.position.set(0, -3, 1.1);
+  g.add(hanger, seat, back, bar);
+  if (bubble) {
+    // Tinted bubble hinged above the chair, closed down over the riders' front.
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 20, 10, 0, Math.PI, 0, Math.PI * 0.62),
+      std("#ff8f3d", { transparent: true, opacity: 0.5, roughness: 0.08, metalness: 0.2, side: THREE.DoubleSide }),
+    );
+    dome.scale.set(w / 2 + 0.35, 2.6, 2.1);
+    dome.position.set(0, -4.1, 0.1);
+    g.add(dome);
+  }
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh) c.castShadow = true;
+  });
+  return g;
+}
+
+function makeCabin(color: string): THREE.Group {
+  const g = new THREE.Group();
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.4, 0.25), std("#3a3f45"));
+  grip.position.y = -1.2;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3.6, 3.4, 3.6), std(color));
+  body.position.y = -4.4;
+  const windows = new THREE.Mesh(new THREE.BoxGeometry(3.7, 1.3, 3.7), std("#284a66", { roughness: 0.1, metalness: 0.5 }));
+  windows.position.y = -3.8;
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.5, 3.2), std("#e6e9ec"));
+  roof.position.y = -2.5;
+  g.add(grip, body, windows, roof);
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh) c.castShadow = true;
+  });
   return g;
 }

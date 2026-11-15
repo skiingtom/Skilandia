@@ -11,7 +11,8 @@ export type BuildingType =
   | "shop"
   | "condo"
   | "patrol";
-export type Tool = "select" | "cut" | BuildingType;
+export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
+export type Tool = "select" | "cut" | BuildingType | `lift:${LiftType}`;
 export type StaffRole = "patrol" | "food" | "lift" | "delivery" | "maintenance";
 export type SkierState =
   | "arriving"
@@ -39,6 +40,8 @@ export interface Trail {
 }
 
 export interface Lift {
+  id: number;
+  type: LiftType;
   name: string;
   bottom: Vec2;
   top: Vec2;
@@ -47,7 +50,7 @@ export interface Lift {
 
 export interface Carrier {
   t: number;
-  skierId: number | null;
+  riders: number[];
 }
 
 export interface Building {
@@ -68,6 +71,8 @@ export interface Skier {
   y: number;
   state: SkierState;
   trailId: number | null;
+  liftId: number | null;
+  rideT: number;
   dist: number;
   wait: number;
   runsLeft: number;
@@ -226,3 +231,130 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   condo: "Condo",
   patrol: "Ski patrol hut",
 };
+
+/** Height in world units of one unit of elevation, as drawn (true classifier scale × 1.3). */
+export const TERRAIN_SCALE = (VERTICAL_M / UNIT_M) * 1.3;
+
+export interface LiftSpec {
+  label: string;
+  short: string;
+  /** Riders per carrier (chair, bar, cabin). A carpet carries one per slot. */
+  seats: number;
+  /** World units per second. */
+  speed: number;
+  /** World units between carriers. */
+  spacing: number;
+  baseCost: number;
+  costPerUnit: number;
+  minLength: number;
+  maxLength: number;
+  /** Surface lifts drag skiers over the snow: the ground must climb the whole way. */
+  surface: boolean;
+  /** Steepest pitch the line may cross (game grade, drop m / run m). */
+  maxGrade: number;
+  /** Height of cable / chairs above the ground at towers. */
+  towerH: number;
+  blurb: string;
+}
+
+export const LIFT_TYPES: LiftType[] = ["carpet", "tbar", "double", "quad", "six", "gondola"];
+
+export const LIFT_SPECS: Record<LiftType, LiftSpec> = {
+  carpet: {
+    label: "Magic carpet",
+    short: "Carpet",
+    seats: 1,
+    speed: 14,
+    spacing: 7,
+    baseCost: 500,
+    costPerUnit: 3,
+    minLength: 40,
+    maxLength: 150,
+    surface: true,
+    maxGrade: 0.2,
+    towerH: 0,
+    blurb: "Conveyor belt for beginners. Short, and only up gentle green terrain.",
+  },
+  tbar: {
+    label: "T-bar",
+    short: "T-bar",
+    seats: 2,
+    speed: 30,
+    spacing: 30,
+    baseCost: 1400,
+    costPerUnit: 4,
+    minLength: 90,
+    maxLength: 620,
+    surface: true,
+    maxGrade: 0.45,
+    towerH: 9,
+    blurb: "Drags two skiers up the snow. The ground has to climb the whole way.",
+  },
+  double: {
+    label: "Double chair",
+    short: "Double",
+    seats: 2,
+    speed: 30,
+    spacing: 30,
+    baseCost: 3500,
+    costPerUnit: 8,
+    minLength: 120,
+    maxLength: 900,
+    surface: false,
+    maxGrade: 9,
+    towerH: 15,
+    blurb: "Classic two-seat chair. Flies over any terrain.",
+  },
+  quad: {
+    label: "Quad chair",
+    short: "Quad",
+    seats: 4,
+    speed: 40,
+    spacing: 36,
+    baseCost: 6000,
+    costPerUnit: 12,
+    minLength: 150,
+    maxLength: 1000,
+    surface: false,
+    maxGrade: 9,
+    towerH: 17,
+    blurb: "Four across, faster haul. Shorter lift lines.",
+  },
+  six: {
+    label: "Covered six-pack",
+    short: "Six-pack",
+    seats: 6,
+    speed: 48,
+    spacing: 42,
+    baseCost: 10000,
+    costPerUnit: 16,
+    minLength: 180,
+    maxLength: 1100,
+    surface: false,
+    maxGrade: 9,
+    towerH: 19,
+    blurb: "Six-seat chair with a bubble cover. Happy, warm skiers.",
+  },
+  gondola: {
+    label: "8-person gondola",
+    short: "Gondola",
+    seats: 8,
+    speed: 56,
+    spacing: 54,
+    baseCost: 16000,
+    costPerUnit: 22,
+    minLength: 220,
+    maxLength: 1300,
+    surface: false,
+    maxGrade: 9,
+    towerH: 24,
+    blurb: "Enclosed eight-seat cabins. The fastest, longest lift.",
+  },
+};
+
+export function liftCost(type: LiftType, length: number): number {
+  const s = LIFT_SPECS[type];
+  return Math.round((s.baseCost + s.costPerUnit * length) / 10) * 10;
+}
+
+export const MAX_LIFTS = 6;

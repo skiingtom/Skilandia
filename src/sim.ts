@@ -19,7 +19,10 @@ import {
   Difficulty,
   Fx,
   Goal,
+  LIFT_SPECS,
   Lift,
+  LiftType,
+  MAX_LIFTS,
   Skier,
   START_MONEY,
   START_TICKET,
@@ -31,6 +34,7 @@ import {
   Vec2,
   WORLD_H,
   WORLD_W,
+  liftCost,
 } from "./types";
 
 const NAMES = [
@@ -42,6 +46,14 @@ const JACKETS = ["#c45c4a", "#3a6ea5", "#d98a2b", "#4f8a5b", "#7a4ea3", "#2c3d4f
 
 const TRAIL_PREFIX = ["Whisper", "Eagle", "Pine", "Goat", "Ridge", "Frost", "Cedar", "Hawk", "Willow", "Storm", "Fox", "Glacier"];
 const TRAIL_SUFFIX = ["Run", "Glade", "Alley", "Line", "Trail", "Chute", "Way", "Bowl"];
+const LIFT_PREFIX = ["Summit", "Lookout", "Aspen", "Powder", "Timber", "Falcon", "Bluebird", "Highline", "Raven", "Tamarack", "Cirque", "Sundance"];
+
+export interface LiftCheck {
+  error: string | null;
+  length: number;
+  rise: number;
+  cost: number;
+}
 
 function clamp(n: number, a: number, b: number): number {
   return Math.max(a, Math.min(b, n));
@@ -77,7 +89,7 @@ export function measureTrail(
 
 interface Snapshot {
   trails: Trail[];
-  lift: Lift;
+  lifts: Lift[];
   buildings: Building[];
   trees: Vec2[];
   ticketPrice: number;
@@ -98,7 +110,10 @@ export class Game {
   managing = false;
   tool: Tool = "select";
   trails: Trail[] = [];
-  lift: Lift;
+  lifts: Lift[] = [];
+  /** Bottom station picked while placing a lift, and the pointer for the preview. */
+  liftStart: Vec2 | null = null;
+  liftHover: Vec2 | null = null;
   buildings: Building[] = [];
   skiers: Skier[] = [];
   trees: Vec2[] = [];
@@ -127,12 +142,7 @@ export class Game {
   private snapshots: Partial<Record<MountainId, Snapshot>> = {};
 
   constructor() {
-    this.lift = {
-      name: "Little Hawk T-Bar",
-      bottom: { x: 328, y: 118 },
-      top: { x: 312, y: 628 },
-      carriers: Array.from({ length: 8 }, (_, i) => ({ t: i / 8, skierId: null })),
-    };
+    this.lifts = [this.makeLift("tbar", "Little Hawk T-Bar", { x: 328, y: 118 }, { x: 312, y: 628 })];
     this.trails = [
       this.makeTrail("Sunnyside", [
         { x: 328, y: 618 },
@@ -177,7 +187,7 @@ export class Game {
       const s = slopeAt(x, y, mid);
       if (h < 0.07 || h > 0.9 || s > 0.012) continue;
       if (this.trails.some((t) => distToTrail(t, x, y) < 16)) continue;
-      if (nearSegment(this.lift.bottom.x, this.lift.bottom.y, this.lift.top.x, this.lift.top.y, x, y, 22)) continue;
+      if (this.nearLift(x, y, 22)) continue;
       this.trees.push({ x, y });
     }
   }
@@ -307,12 +317,24 @@ export class Game {
   }
 
   setTool(tool: Tool): void {
-    if (tool !== "select" && tool !== "cut" && EXPANSION_BUILDINGS.includes(tool) && !this.expansionUnlocked()) {
+    this.liftStart = null;
+    if (tool.startsWith("lift:")) {
+      if (this.lifts.length >= MAX_LIFTS) {
+        this.toast(`${MAX_LIFTS} lifts is the limit for one mountain.`, true);
+        return;
+      }
+      this.tool = tool;
+      this.draft = [];
+      this.selected = null;
+      return;
+    }
+    const build = tool as BuildingType | "select" | "cut";
+    if (build !== "select" && build !== "cut" && EXPANSION_BUILDINGS.includes(build) && !this.expansionUnlocked()) {
       this.toast("Hotels, shops, condos and patrol unlock after you buy the next mountain.", true);
       return;
     }
-    if (tool !== "select" && tool !== "cut" && this.count(tool) >= BUILDING_MAX[tool]) {
-      this.toast(`That's as many ${BUILDING_LABEL[tool].toLowerCase()}s as this hill needs.`, true);
+    if (build !== "select" && build !== "cut" && this.count(build) >= BUILDING_MAX[build]) {
+      this.toast(`That's as many ${BUILDING_LABEL[build].toLowerCase()}s as this hill needs.`, true);
       return;
     }
     this.tool = tool;
@@ -337,6 +359,175 @@ export class Game {
   cancel(): void {
     this.tool = "select";
     this.draft = [];
+    this.liftStart = null;
+  }
+
+  liftTool(): LiftType | null {
+    return this.tool.startsWith("lift:") ? (this.tool.slice(5) as LiftType) : null;
+  }
+
+  nearLift(x: number, y: number, pad: number): boolean {
+    return this.lifts.some((l) => nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, x, y, pad));
+  }
+
+  /**
+   * Can a lift of this type run from bottom station `a` to top station `b`?
+   * Surface lifts (carpet, T-bar) drag people over the snow, so the ground
+   * itself must climb the whole way and stay under the type's max pitch.
+   * Chairs and gondolas fly, so they only need the top above the bottom.
+   */
+  checkLift(type: LiftType, a: Vec2, b: Vec2): LiftCheck {
+    const spec = LIFT_SPECS[type];
+    const mid = this.currentMountain;
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    const eA = elevation(a.x, a.y, mid);
+    const eB = elevation(b.x, b.y, mid);
+    const rise = (eB - eA) * VERTICAL_M;
+    const cost = liftCost(type, length);
+    const out = (error: string | null): LiftCheck => ({ error, length, rise, cost });
+    const noun = liftNoun(type);
+    const offProperty = (p: Vec2) => p.x < 14 || p.x > WORLD_W - 14 || p.y < 30 || p.y > WORLD_H - 12;
+    if (offProperty(a) || offProperty(b)) return out("That's off the property.");
+    if (this.lifts.length >= MAX_LIFTS) return out(`${MAX_LIFTS} lifts is the limit for one mountain.`);
+    if (length < spec.minLength) return out(`Too short — a ${noun} needs at least ${Math.round(spec.minLength * UNIT_M)} m.`);
+    if (length > spec.maxLength) return out(`Too long — a ${noun} tops out at ${Math.round(spec.maxLength * UNIT_M)} m.`);
+    if (eB - eA < 0.012) {
+      return out(
+        spec.surface
+          ? `A ${noun} can't go downhill — put the top station uphill of the bottom.`
+          : "Lifts carry skiers up — put the top station higher than the bottom.",
+      );
+    }
+    if (spec.surface) {
+      const n = Math.max(4, Math.ceil(length / 3));
+      const es: number[] = [];
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        es.push(elevation(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, mid));
+      }
+      // Pitch over ~12-unit windows so tiny bumps don't count.
+      const w = Math.max(1, Math.round(12 / (length / n)));
+      for (let i = w; i <= n; i += 1) {
+        const grade = ((es[i] - es[i - w]) * VERTICAL_M) / (((length / n) * w) * UNIT_M);
+        if (grade > spec.maxGrade) {
+          return out(
+            type === "carpet"
+              ? "Too steep for a magic carpet — keep it on gentle beginner terrain."
+              : "Too steep for a T-bar — this pitch needs a chairlift.",
+          );
+        }
+      }
+      let highest = eA;
+      for (let i = 1; i <= n; i++) {
+        if (es[i] < highest - 0.004) {
+          return out(`The ground dips along this line — a ${noun} rides on the snow, so it has to climb the whole way.`);
+        }
+        highest = Math.max(highest, es[i]);
+      }
+    }
+    if (this.buildings.some((bd) => nearSegment(a.x, a.y, b.x, b.y, bd.x, bd.y, 16))) return out("A building is in the way.");
+    for (const l of this.lifts) {
+      if (segmentsCross(a, b, l.bottom, l.top)) return out(`That would cross ${l.name}.`);
+      const close =
+        nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, a.x, a.y, 12) ||
+        nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, b.x, b.y, 12) ||
+        nearSegment(a.x, a.y, b.x, b.y, l.bottom.x, l.bottom.y, 12) ||
+        nearSegment(a.x, a.y, b.x, b.y, l.top.x, l.top.y, 12);
+      if (close) return out(`Too close to ${l.name}'s line.`);
+      if (Math.hypot(l.bottom.x - a.x, l.bottom.y - a.y) < 18 || Math.hypot(l.top.x - b.x, l.top.y - b.y) < 18) {
+        return out(`Too close to ${l.name}'s station.`);
+      }
+    }
+    if (this.money < cost) return out(`Need $${(cost - this.money).toLocaleString()} more.`);
+    return out(null);
+  }
+
+  liftPreview(): ({ type: LiftType; a: Vec2; b: Vec2 } & LiftCheck) | null {
+    const type = this.liftTool();
+    if (!type || !this.liftStart || !this.liftHover) return null;
+    return { type, a: this.liftStart, b: this.liftHover, ...this.checkLift(type, this.liftStart, this.liftHover) };
+  }
+
+  private clickLift(type: LiftType, x: number, y: number): "ok" | "shake" | "none" {
+    const spec = LIFT_SPECS[type];
+    if (!this.liftStart) {
+      if (x < 14 || x > WORLD_W - 14 || y < 30 || y > WORLD_H - 12) {
+        this.toast("That's off the property.", true);
+        return "shake";
+      }
+      if (this.buildings.some((b) => Math.hypot(b.x - x, b.y - y) < 18)) {
+        this.toast("A building is in the way.", true);
+        return "shake";
+      }
+      this.liftStart = { x, y };
+      this.toast(`Bottom station set. Now click uphill for the top of the ${liftNoun(type)}.`);
+      return "ok";
+    }
+    const a = this.liftStart;
+    const b = { x, y };
+    const check = this.checkLift(type, a, b);
+    if (check.error) {
+      this.toast(check.error, true);
+      return "shake";
+    }
+    this.money -= check.cost;
+    const used = new Set(this.lifts.map((l) => l.name));
+    let name = `${pick(LIFT_PREFIX)} ${spec.short}`;
+    for (let i = 0; i < 20 && used.has(name); i++) name = `${pick(LIFT_PREFIX)} ${spec.short}`;
+    const lift = this.makeLift(type, name, a, b);
+    this.lifts.push(lift);
+    this.trees = this.trees.filter((t) => !nearSegment(a.x, a.y, b.x, b.y, t.x, t.y, 14));
+    this.float(a.x, a.y, `-${check.cost}`, "#d9785f");
+    this.toast(`${name} is spinning. ${spec.label}, ${Math.round(check.length * UNIT_M)} m.`);
+    this.liftStart = null;
+    this.tool = "select";
+    this.selected = { kind: "lift", id: lift.id };
+    return "ok";
+  }
+
+  removeLift(id: number): void {
+    const l = this.lifts.find((x) => x.id === id);
+    if (!l) return;
+    if (this.lifts.length <= 1) {
+      this.toast("Keep at least one lift running.", true);
+      return;
+    }
+    const refund = Math.round(liftCost(l.type, Math.hypot(l.top.x - l.bottom.x, l.top.y - l.bottom.y)) * 0.4);
+    this.lifts = this.lifts.filter((x) => x !== l);
+    for (const s of this.skiers) {
+      if (s.liftId !== l.id) continue;
+      s.liftId = null;
+      if (s.state === "riding") {
+        s.state = "toTrail";
+        s.trailId = null;
+      }
+    }
+    this.money += refund;
+    this.selected = null;
+    this.toast(`Took down ${l.name}. Salvage +$${refund.toLocaleString()}.`);
+  }
+
+  private makeLift(type: LiftType, name: string, bottom: Vec2, top: Vec2): Lift {
+    const spec = LIFT_SPECS[type];
+    const len = Math.hypot(top.x - bottom.x, top.y - bottom.y);
+    const n = Math.max(2, Math.round(len / spec.spacing));
+    return {
+      id: this.id(),
+      type,
+      name,
+      bottom: { ...bottom },
+      top: { ...top },
+      carriers: Array.from({ length: n }, (_, i) => ({ t: i / n, riders: [] })),
+    };
+  }
+
+  /** Runs whose start is an easy hike from this lift's unload. */
+  trailsFrom(l: Lift): Trail[] {
+    const topE = elevation(l.top.x, l.top.y, this.currentMountain);
+    return this.trails.filter((t) => {
+      const p = t.points[0];
+      return Math.hypot(p.x - l.top.x, p.y - l.top.y) < 140 && elevation(p.x, p.y, this.currentMountain) < topE + 0.04;
+    });
   }
 
   draftInfo(): { length: number; drop: number; difficulty: Difficulty; cost: number } | null {
@@ -362,9 +553,7 @@ export class Game {
     if (this.buildings.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
-    if (nearSegment(this.lift.bottom.x, this.lift.bottom.y, this.lift.top.x, this.lift.top.y, x, y, 26)) {
-      return "Keep clear of the T-bar.";
-    }
+    if (this.nearLift(x, y, 26)) return "Keep clear of the lift line.";
     if (this.money < COSTS[type]) return `Need $${(COSTS[type] - this.money).toLocaleString()} more.`;
     return null;
   }
@@ -372,7 +561,9 @@ export class Game {
   click(x: number, y: number): "ok" | "shake" | "none" {
     if (!this.managing) return "none";
     if (this.tool === "cut") return this.clickCut(x, y);
-    if (this.tool !== "select") return this.clickBuild(this.tool, x, y);
+    const lt = this.liftTool();
+    if (lt) return this.clickLift(lt, x, y);
+    if (this.tool !== "select") return this.clickBuild(this.tool as BuildingType, x, y);
     this.selected = this.pick(x, y);
     return "ok";
   }
@@ -405,8 +596,10 @@ export class Game {
         best = { kind: "trail", id: t.id };
       }
     }
-    if (nearSegment(this.lift.bottom.x, this.lift.bottom.y, this.lift.top.x, this.lift.top.y, x, y, 16) && 14 < bestD) {
-      best = { kind: "lift", id: 0 };
+    for (const l of this.lifts) {
+      if (nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, x, y, 16) && 14 < bestD) {
+        best = { kind: "lift", id: l.id };
+      }
     }
     return best;
   }
@@ -449,10 +642,17 @@ export class Game {
       };
     }
     if (sel.kind === "lift") {
-      const q = this.skiers.filter((s) => s.state === "queue").length;
+      const l = this.lifts.find((x) => x.id === sel.id);
+      if (!l) return { title: "Lift", body: "" };
+      const spec = LIFT_SPECS[l.type];
+      const q = this.skiers.filter((s) => s.liftId === l.id && s.state === "queue").length;
+      const len = Math.hypot(l.top.x - l.bottom.x, l.top.y - l.bottom.y);
+      const rise = (elevation(l.top.x, l.top.y, this.currentMountain) - elevation(l.bottom.x, l.bottom.y, this.currentMountain)) * VERTICAL_M;
+      const perHour = Math.round(((spec.seats * spec.speed) / spec.spacing) * 3600 / 6);
+      const served = this.trailsFrom(l).length;
       return {
-        title: this.lift.name,
-        body: `Carries skiers to the unload. ${q} waiting in line. This slice has one lift.`,
+        title: l.name,
+        body: `${spec.label} · ${Math.round(len * UNIT_M)} m long · ${Math.round(rise)} m rise · about ${perHour.toLocaleString()} riders/hr. ${q} in line. Serves ${served} run${served === 1 ? "" : "s"} from the top.`,
       };
     }
     const s = this.skiers.find((x) => x.id === sel.id);
@@ -558,6 +758,8 @@ export class Game {
       y: 18 + Math.random() * 16,
       state: "arriving",
       trailId: null,
+      liftId: null,
+      rideT: 0,
       dist: 0,
       wait: 0,
       runsLeft: 2 + ((Math.random() * 3) | 0),
@@ -705,7 +907,7 @@ export class Game {
     return {
       patrol: Math.max(1, Math.ceil(this.skiers.length / 10) + this.owned.length - 1),
       food: Math.max(foodBuildings > 0 ? 1 : 0, foodBuildings),
-      lift: this.owned.length,
+      lift: Math.max(this.owned.length, Math.ceil((this.lifts.length + Object.entries(this.snapshots).reduce((n, [k, sn]) => n + (Number(k) === this.currentMountain ? 0 : sn?.lifts.length ?? 0), 0)) / 2)),
       delivery: Math.max(foodBuildings + lodgings > 0 ? 1 : 0, Math.ceil((foodBuildings + lodgings) / 2)),
       maintenance: Math.max(1, Math.ceil(trails / 5) + this.owned.length),
     };
@@ -782,7 +984,7 @@ export class Game {
     const snap = this.snapshots[id];
     if (!snap) return;
     this.trails = snap.trails;
-    this.lift = snap.lift;
+    this.lifts = snap.lifts;
     this.buildings = snap.buildings;
     this.trees = snap.trees;
     this.ticketPrice = snap.ticketPrice;
@@ -790,6 +992,7 @@ export class Game {
     this.draft = [];
     this.tool = "select";
     this.selected = null;
+    this.liftStart = null;
     for (let i = 0; i < 8; i++) this.spawnSkier(true);
     this.toast(`Now managing ${MOUNTAINS[id].name}.`);
   }
@@ -797,7 +1000,7 @@ export class Game {
   private saveCurrent(): void {
     this.snapshots[this.currentMountain] = {
       trails: this.trails,
-      lift: this.lift,
+      lifts: this.lifts,
       buildings: this.buildings,
       trees: this.trees,
       ticketPrice: this.ticketPrice,
@@ -810,14 +1013,10 @@ export class Game {
     this.draft = [];
     this.tool = "select";
     this.selected = null;
+    this.liftStart = null;
     this.ticketPrice = START_TICKET;
     if (id === 1) {
-      this.lift = {
-        name: "Cedar Ridge T-Bar",
-        bottom: { x: 330, y: 112 },
-        top: { x: 300, y: 660 },
-        carriers: Array.from({ length: 9 }, (_, i) => ({ t: i / 9, skierId: null })),
-      };
+      this.lifts = [this.makeLift("double", "Cedar Double", { x: 330, y: 112 }, { x: 300, y: 660 })];
       this.trails = [
         this.makeTrail("Cabin Run", [
           { x: 318, y: 648 },
@@ -839,12 +1038,7 @@ export class Game {
         ]),
       ];
     } else {
-      this.lift = {
-        name: "Saddle T-Bar",
-        bottom: { x: 320, y: 108 },
-        top: { x: 318, y: 640 },
-        carriers: Array.from({ length: 10 }, (_, i) => ({ t: i / 10, skierId: null })),
-      };
+      this.lifts = [this.makeLift("quad", "Saddle Quad", { x: 320, y: 108 }, { x: 318, y: 640 })];
       this.trails = [
         this.makeTrail("West Peak", [
           { x: 200, y: 700 },
@@ -889,34 +1083,100 @@ export class Game {
   }
 
   private stepLift(dt: number): void {
-    const speed = 0.072;
-    for (const c of this.lift.carriers) {
-      const before = c.t;
-      c.t += dt * speed;
-      if (before < 0.06 && c.t >= 0.06 && c.skierId == null) {
-        const next = this.skiers.find((s) => s.state === "queue");
-        if (next) {
-          c.skierId = next.id;
-          next.state = "riding";
-          next.wait = 0;
+    for (const lift of this.lifts) {
+      const spec = LIFT_SPECS[lift.type];
+      const len = Math.max(20, Math.hypot(lift.top.x - lift.bottom.x, lift.top.y - lift.bottom.y));
+      const dtT = (dt * spec.speed) / len;
+      for (const c of lift.carriers) {
+        const before = c.t;
+        c.t += dtT;
+        if (before < 0.04 && c.t >= 0.04 && c.riders.length === 0) {
+          const line = this.skiers
+            .filter((s) => s.state === "queue" && s.liftId === lift.id)
+            .sort((p, q) => p.id - q.id);
+          for (const s of line.slice(0, spec.seats)) {
+            c.riders.push(s.id);
+            s.state = "riding";
+            s.wait = 0;
+            // Warm bubble chairs and cabins keep people cheerful.
+            if (lift.type === "six" || lift.type === "gondola") s.mood = Math.min(100, s.mood + 1.5);
+          }
         }
-      }
-      if (c.t >= 0.97 && c.skierId != null) {
-        const s = this.skiers.find((k) => k.id === c.skierId);
-        if (s) {
-          s.x = this.lift.top.x + (Math.random() * 10 - 5);
-          s.y = this.lift.top.y;
-          s.state = "toTrail";
-          s.trailId = this.chooseTrail(s)?.id ?? null;
-          s.dist = 0;
+        if (c.t >= 0.97 && c.riders.length) {
+          for (const id of c.riders) {
+            const s = this.skiers.find((k) => k.id === id);
+            if (!s) continue;
+            s.x = lift.top.x + (Math.random() * 10 - 5);
+            s.y = lift.top.y + (Math.random() * 6 - 3);
+            s.state = "toTrail";
+            s.trailId =
+              lift.type === "carpet" && this.trailsFrom(lift).length === 0
+                ? -lift.id
+                : this.chooseTrail(s, lift)?.id ?? null;
+            s.dist = 0;
+          }
+          c.riders = [];
         }
-        c.skierId = null;
+        if (c.t >= 1) c.t -= 1;
       }
-      if (c.t >= 1) c.t -= 1;
     }
   }
 
-  private chooseTrail(s: Skier): Trail | null {
+  /**
+   * Pick the lift that gets this skier to terrain they like soonest:
+   * close by, short line, and runs at the top that fit their skill.
+   */
+  private chooseLift(s: Skier): Lift | null {
+    let best: Lift | null = null;
+    let bestScore = Infinity;
+    for (const l of this.lifts) {
+      const spec = LIFT_SPECS[l.type];
+      const served = this.trailsFrom(l);
+      const bunny = l.type === "carpet" && served.length === 0;
+      if (bunny && s.skill > 0) continue;
+      const fit = bunny ? 1 : served.reduce((m, t) => Math.max(m, trailScore(s.skill, t.difficulty)), 0);
+      const line = this.skiers.filter((k) => k.liftId === l.id && (k.state === "queue" || k.state === "toLift")).length;
+      const perSec = (spec.seats * spec.speed) / spec.spacing;
+      const score =
+        Math.hypot(s.x - l.bottom.x, s.y - l.bottom.y) * 0.45 +
+        (line / perSec) * 6 +
+        (1 - fit) * 220 +
+        (served.length || bunny ? 0 : 500) +
+        (l.type === "carpet" && s.skill === 0 ? -70 : 0) +
+        Math.random() * 25;
+      if (score < bestScore) {
+        bestScore = score;
+        best = l;
+      }
+    }
+    return best;
+  }
+
+  /** The skier's run: a real trail, or (negative id) the bunny slope beside a carpet. */
+  private trailFor(s: Skier): Trail | undefined {
+    if (s.trailId == null) return undefined;
+    if (s.trailId >= 0) return this.trails.find((t) => t.id === s.trailId);
+    const lift = this.lifts.find((l) => l.id === -s.trailId!);
+    if (!lift) return undefined;
+    const dx = lift.top.x - lift.bottom.x;
+    const dy = lift.top.y - lift.bottom.y;
+    const l = Math.hypot(dx, dy) || 1;
+    const ox = (-dy / l) * 12;
+    const oy = (dx / l) * 12;
+    const points = [
+      { x: lift.top.x + ox, y: lift.top.y + oy },
+      { x: lift.bottom.x + ox * 1.4 + (dx / l) * 6, y: lift.bottom.y + oy * 1.4 + (dy / l) * 6 },
+    ];
+    const drop = elevation(points[0].x, points[0].y, this.currentMountain) - elevation(points[1].x, points[1].y, this.currentMountain);
+    return { id: s.trailId, name: "Bunny slope", points, difficulty: 0, length: l, drop: Math.max(0, drop) };
+  }
+
+  private goToLift(s: Skier): void {
+    s.state = "toLift";
+    s.liftId = null;
+  }
+
+  private chooseTrail(s: Skier, lift?: Lift): Trail | null {
     const ranked = [...this.trails].sort((a, b) => {
       const sa = trailScore(s.skill, a.difficulty);
       const sb = trailScore(s.skill, b.difficulty);
@@ -924,7 +1184,8 @@ export class Game {
     });
     const options = ranked.filter((t) => trailScore(s.skill, t.difficulty) > 0.15);
     if (!options.length) return ranked[0] ?? null;
-    const hikeOk = options.filter((t) => Math.hypot(t.points[0].x - this.lift.top.x, t.points[0].y - this.lift.top.y) < 140);
+    const from = lift ? this.trailsFrom(lift) : [];
+    const hikeOk = options.filter((t) => from.includes(t));
     const pool = hikeOk.length ? hikeOk : options;
     return pool[(Math.random() * Math.min(3, pool.length)) | 0];
   }
@@ -963,16 +1224,27 @@ export class Game {
         this.float(s.x, s.y, `+$${this.ticketPrice}`);
         this.sfx.push("cash");
       }
-      s.state = "toLift";
+      this.goToLift(s);
       return;
     }
     if (s.state === "toLift") {
+      if (s.liftId == null || !this.lifts.some((l) => l.id === s.liftId)) {
+        s.liftId = this.chooseLift(s)?.id ?? null;
+        if (s.liftId == null) {
+          s.state = "leaving";
+          return;
+        }
+      }
       const q = this.queueSlot(s);
       this.walkToward(s, q.x, q.y, 46 * dt);
       if (Math.hypot(s.x - q.x, s.y - q.y) < 8) s.state = "queue";
       return;
     }
     if (s.state === "queue") {
+      if (!this.lifts.some((l) => l.id === s.liftId)) {
+        this.goToLift(s);
+        return;
+      }
       const q = this.queueSlot(s);
       this.walkToward(s, q.x, q.y, 30 * dt);
       s.wait += dt;
@@ -983,14 +1255,25 @@ export class Game {
       return;
     }
     if (s.state === "riding") {
-      const c = this.lift.carriers.find((k) => k.skierId === s.id);
-      const t = c?.t ?? 0.5;
-      s.x = lerp(this.lift.bottom.x, this.lift.top.x, t);
-      s.y = lerp(this.lift.bottom.y, this.lift.top.y, t);
+      const lift = this.lifts.find((l) => l.id === s.liftId);
+      const c = lift?.carriers.find((k) => k.riders.includes(s.id));
+      if (!lift || !c) {
+        s.state = "toTrail";
+        return;
+      }
+      const t = Math.min(c.t, 0.97);
+      s.rideT = t;
+      // Spread riders across the chair.
+      const seat = c.riders.indexOf(s.id) - (c.riders.length - 1) / 2;
+      const dx = lift.top.x - lift.bottom.x;
+      const dy = lift.top.y - lift.bottom.y;
+      const l = Math.hypot(dx, dy) || 1;
+      s.x = lerp(lift.bottom.x, lift.top.x, t) - (dy / l) * seat * 1.4;
+      s.y = lerp(lift.bottom.y, lift.top.y, t) + (dx / l) * seat * 1.4;
       return;
     }
     if (s.state === "toTrail") {
-      const trail = this.trails.find((t) => t.id === s.trailId) ?? this.chooseTrail(s);
+      const trail = this.trailFor(s) ?? this.chooseTrail(s);
       if (!trail) {
         s.state = "leaving";
         return;
@@ -1009,9 +1292,9 @@ export class Game {
       return;
     }
     if (s.state === "skiing") {
-      const trail = this.trails.find((t) => t.id === s.trailId);
+      const trail = this.trailFor(s);
       if (!trail) {
-        s.state = "toLift";
+        this.goToLift(s);
         return;
       }
       const grade = trail.drop / Math.max(40, trail.length);
@@ -1047,14 +1330,14 @@ export class Game {
           s.mood -= 8;
         }
         if (s.runsLeft <= 0 || s.mood < 28) s.state = "leaving";
-        else s.state = "toLift";
+        else this.goToLift(s);
       }
       return;
     }
     if (s.state === "visit") {
       const b = this.buildings.find((x) => x.type === s.visitType);
       if (!b) {
-        s.state = "toLift";
+        this.goToLift(s);
         return;
       }
       this.walkToward(s, b.x, b.y, 44 * dt);
@@ -1066,7 +1349,8 @@ export class Game {
           s.mood += 8;
           s.wait = 0;
           s.visitType = null;
-          s.state = s.runsLeft <= 0 ? "leaving" : "toLift";
+          if (s.runsLeft <= 0) s.state = "leaving";
+          else this.goToLift(s);
         }
       }
       return;
@@ -1087,10 +1371,19 @@ export class Game {
   }
 
   private queueSlot(s: Skier): Vec2 {
-    const queued = this.skiers.filter((k) => k.state === "queue" || (k.state === "toLift" && k.paid));
+    const lift = this.lifts.find((l) => l.id === s.liftId) ?? this.lifts[0];
+    const queued = this.skiers.filter((k) => k.liftId === lift.id && (k.state === "queue" || (k.state === "toLift" && k.paid)));
     queued.sort((a, b) => a.id - b.id);
     const i = Math.max(0, queued.findIndex((k) => k.id === s.id));
-    return { x: this.lift.bottom.x - 8 - (i % 6) * 9, y: this.lift.bottom.y - 8 - Math.floor(i / 6) * 12 };
+    // Line up behind the bottom station, facing up the lift.
+    let dx = lift.top.x - lift.bottom.x;
+    let dy = lift.top.y - lift.bottom.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    const back = 10 + Math.floor(i / 4) * 9;
+    const side = ((i % 4) - 1.5) * 7;
+    return { x: lift.bottom.x - dx * back - dy * side, y: lift.bottom.y - dy * back + dx * side };
   }
 
   private maybeBubble(): void {
@@ -1128,4 +1421,17 @@ function trailScore(skill: Difficulty, diff: Difficulty): number {
   if (d === 1) return 0.55;
   if (skill < diff) return 0.08;
   return 0.22;
+}
+
+function segmentsCross(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
+  const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const d1 = o(c, d, a);
+  const d2 = o(c, d, b);
+  const d3 = o(a, b, c);
+  const d4 = o(a, b, d);
+  return d1 * d2 < 0 && d3 * d4 < 0;
+}
+
+function liftNoun(type: LiftType): string {
+  return type === "tbar" ? "T-bar" : LIFT_SPECS[type].label.toLowerCase();
 }

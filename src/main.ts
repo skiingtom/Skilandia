@@ -1,4 +1,5 @@
 import { AudioBus } from "./audio";
+import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { World3D } from "./scene";
 import { Game } from "./sim";
 import {
@@ -7,10 +8,13 @@ import {
   COSTS,
   DIFF,
   INCOME_PER_MIN,
+  LIFT_SPECS,
+  MAX_LIFTS,
   MOUNTAINS,
   STAFF_LABEL,
   STAFF_ROLES,
   Tool,
+  UNIT_M,
 } from "./types";
 import "./style.css";
 
@@ -71,6 +75,31 @@ const cutCost = document.querySelector("#cut-cost")!;
 const finishBtn = document.querySelector<HTMLButtonElement>("#btn-finish-trail")!;
 const toastsEl = document.querySelector("#toasts")!;
 const placeHint = document.querySelector("#place-hint")!;
+const dockEl = document.querySelector<HTMLElement>("#dock")!;
+const dockMenus = document.querySelector<HTMLElement>("#dock-menus")!;
+buildDock(dockEl, dockMenus);
+let openGroup: string | null = null;
+
+function closeMenus(): void {
+  openGroup = null;
+  dockMenus.querySelectorAll(".dock-panel").forEach((p) => p.classList.add("hidden"));
+  dockEl.querySelectorAll(".dock-btn[aria-expanded]").forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
+
+function openMenu(id: string, btn: HTMLElement): void {
+  closeMenus();
+  const panel = dockMenus.querySelector<HTMLElement>(`.dock-panel[data-group="${id}"]`);
+  if (!panel) return;
+  openGroup = id;
+  btn.setAttribute("aria-expanded", "true");
+  panel.classList.remove("hidden");
+  // Sit the submenu right above its icon, kept on screen.
+  const r = btn.getBoundingClientRect();
+  const w = panel.offsetWidth;
+  const left = Math.max(12, Math.min(innerWidth - w - 12, r.left + r.width / 2 - w / 2));
+  panel.style.left = `${left}px`;
+}
+const removeLiftBtn = document.querySelector<HTMLButtonElement>("#btn-remove-lift")!;
 const fxRoot = document.createElement("div");
 fxRoot.className = "world-fx";
 document.querySelector("#hud")!.appendChild(fxRoot);
@@ -116,11 +145,15 @@ function paintHud(force = false): void {
     shopRate.textContent = `About $${game.shopRatePerMin()}/min here. Take today $${Math.round(game.shopIncomeToday)}.${wages}`;
   }
   const expand = game.expansionUnlocked();
-  document.querySelectorAll<HTMLButtonElement>(".tool").forEach((btn) => {
+  document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool);
     if (tool === "select" || tool === "cut") {
       btn.disabled = false;
+      return;
+    }
+    if (tool.startsWith("lift:")) {
+      btn.disabled = game.lifts.length >= MAX_LIFTS;
       return;
     }
     const type = tool as BuildingType;
@@ -142,6 +175,12 @@ function paintHud(force = false): void {
     cutCost.textContent = "$0";
     finishBtn.disabled = true;
   }
+  const activeGroup = groupOf(game.tool);
+  dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn").forEach((btn) => {
+    btn.classList.toggle("on", btn.dataset.group === activeGroup);
+    btn.classList.toggle("open", btn.dataset.group === openGroup);
+  });
+  removeLiftBtn.classList.toggle("hidden", game.selected?.kind !== "lift" || game.lifts.length <= 1);
   canvas.classList.toggle("cut", game.tool === "cut");
   canvas.classList.toggle("place", game.tool !== "select" && game.tool !== "cut");
   const newest = game.toasts[game.toasts.length - 1];
@@ -230,7 +269,24 @@ function loop(now: number): void {
     hudAcc = 0;
     paintHud();
   }
-  if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
+  const liftType = game.liftTool();
+  if (pointer.over && liftType) {
+    world.hideGhost();
+    const hit = world.hitAt(pointer.x, pointer.y);
+    const spec = LIFT_SPECS[liftType];
+    game.liftHover = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
+    placeHint.classList.remove("hidden");
+    const pv = game.liftPreview();
+    if (!game.liftStart) {
+      placeHint.classList.add("ok");
+      placeHint.textContent = `${spec.label}: click the bottom station. ${spec.blurb}`;
+    } else if (pv) {
+      placeHint.classList.toggle("ok", !pv.error);
+      placeHint.textContent =
+        pv.error ??
+        `Click to set the top · ${Math.round(pv.length * UNIT_M)} m long · ${Math.round(pv.rise)} m rise · $${pv.cost.toLocaleString()}`;
+    }
+  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
     const hit = world.hitAt(pointer.x, pointer.y);
     if (hit && hit.mountain === game.currentMountain) {
       const type = game.tool as BuildingType;
@@ -305,12 +361,35 @@ canvas.addEventListener("dblclick", (e) => {
   paintHud();
 });
 
-document.querySelectorAll<HTMLButtonElement>(".tool").forEach((btn) => {
+document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
   btn.addEventListener("click", () => {
     game.setTool(btn.dataset.tool as Tool);
+    closeMenus();
     audio.click();
     paintHud();
   });
+});
+
+dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const group = DOCK_GROUPS.find((g) => g.id === btn.dataset.group)!;
+    audio.click();
+    if (group.tool) {
+      closeMenus();
+      game.setTool(group.tool);
+    } else if (openGroup === group.id) {
+      closeMenus();
+    } else {
+      openMenu(group.id, btn);
+    }
+    paintHud();
+  });
+});
+canvas.addEventListener("pointerdown", () => {
+  if (openGroup) {
+    closeMenus();
+    paintHud();
+  }
 });
 
 document.querySelectorAll<HTMLButtonElement>(".speed").forEach((btn) => {
@@ -350,6 +429,7 @@ ticketRange.addEventListener("input", () => {
 
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    closeMenus();
     game.cancel();
     paintHud();
   }
@@ -369,7 +449,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 function moneyLine(type: keyof typeof COSTS): string {
-  return `$${COSTS[type].toLocaleString()} · $${INCOME_PER_MIN[type]}/min`;
+  return `$${COSTS[type].toLocaleString()} · earns $${INCOME_PER_MIN[type]}/min`;
 }
 
 (Object.keys(COSTS) as Array<keyof typeof COSTS>).forEach((type) => {
@@ -386,6 +466,13 @@ function toggleSlopeView(): void {
   document.querySelector(".legend")!.classList.toggle("slope-on", on);
 }
 slopeBtn.addEventListener("click", toggleSlopeView);
+
+removeLiftBtn.addEventListener("click", () => {
+  if (game.selected?.kind !== "lift") return;
+  game.removeLift(game.selected.id);
+  audio.build();
+  paintHud();
+});
 
 window.addEventListener("resize", () => world.resize());
 world.resize();
