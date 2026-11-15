@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skilandia</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Nunito:wght@500;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="welcome-open">
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <div id="hud">
+        <header class="topbar">
+          <div class="brand">
+            <span class="mark" aria-hidden="true"></span>
+            <div>
+              <h1>Skilandia</h1>
+              <p id="dayline">Day 1 · 8:30 AM</p>
+            </div>
+          </div>
+          <dl class="stats">
+            <div>
+              <dt>Cash</dt>
+              <dd id="stat-money">$2,200</dd>
+            </div>
+            <div>
+              <dt>Skiers</dt>
+              <dd id="stat-skiers">0</dd>
+            </div>
+            <div>
+              <dt>Mood</dt>
+              <dd id="stat-mood">—</dd>
+            </div>
+            <div>
+              <dt>Tickets today</dt>
+              <dd id="stat-tickets">0</dd>
+            </div>
+            <div>
+              <dt>Lifetime take</dt>
+              <dd id="stat-earned">$0</dd>
+            </div>
+          </dl>
+          <div class="clock-controls">
+            <button type="button" id="btn-pause" class="ghost" title="Pause">Pause</button>
+            <button type="button" class="ghost speed on" data-speed="1">1×</button>
+            <button type="button" class="ghost speed" data-speed="2">2×</button>
+            <button type="button" class="ghost speed" data-speed="3">3×</button>
+            <button type="button" id="btn-mute" class="ghost" title="Mute">Sound</button>
+          </div>
+        </header>
+
+        <aside class="panel" id="panel">
+          <section>
+            <h2>Mountains</h2>
+            <div id="mountains" class="mountains"></div>
+          </section>
+          <section>
+            <h2>Today’s list</h2>
+            <ul id="goals" class="goals"></ul>
+          </section>
+          <section>
+            <h2>The hill is saying</h2>
+            <ul id="complaints" class="notes"></ul>
+          </section>
+          <section>
+            <h2>Shop take</h2>
+            <p id="shop-rate" class="body">No shops yet. Build one to earn a second income.</p>
+          </section>
+          <section id="staff-section" class="locked">
+            <h2>Staff</h2>
+            <p class="lock-note" id="staff-lock">Payroll starts when you buy the next mountain. Then you need ski patrol, food, lifts, delivery, and maintenance.</p>
+            <div id="staff-list" class="staff-list"></div>
+          </section>
+          <section id="ticket-section" class="locked">
+            <h2>Ticket price</h2>
+            <p class="lock-note" id="ticket-lock">Build a lodge to set prices.</p>
+            <div class="ticket-controls">
+              <input id="ticket-range" type="range" min="18" max="88" value="42" disabled />
+              <div class="ticket-row">
+                <span id="ticket-value">$42</span>
+                <span id="ticket-fair"></span>
+              </div>
+            </div>
+          </section>
+          <section>
+            <h2 id="sel-title">Little Hawk Hill</h2>
+            <p id="sel-body" class="body">
+              One T-bar, three runs, and a parking lot. Sell tickets, then grow the
+              place.
+            </p>
+          </section>
+        </aside>
+
+        <div class="cam-hint">Right-drag look · Scroll zoom · WASD fly · Click another peak to buy it</div>
+
+        <div class="legend">
+          <div><i class="diff green"></i> Green</div>
+          <div><i class="diff blue"></i> Blue</div>
+          <div><i class="diff black"></i> Black</div>
+          <div><i class="diff dblack"></i> Double black</div>
+        </div>
+
+        <div id="cut-banner" class="cut-banner hidden">
+          <p>
+            Click downhill to draw a run. It should start high and finish near the
+            base. Cost grows with length.
+          </p>
+          <div class="cut-meta">
+            <span id="cut-diff">—</span>
+            <span id="cut-cost">$0</span>
+          </div>
+          <div class="cut-actions">
+            <button type="button" id="btn-finish-trail" disabled>Finish trail</button>
+            <button type="button" id="btn-cancel-cut" class="ghost">Cancel</button>
+          </div>
+        </div>
+
+        <div id="place-hint" class="place-hint hidden"></div>
+
+        <div id="toasts" class="toasts"></div>
+
+        <nav class="dock" aria-label="Build tools">
+          <button type="button" class="tool on" data-tool="select">
+            <span>Look around</span>
+          </button>
+          <button type="button" class="tool" data-tool="cut">
+            <span>Cut trail</span>
+            <small>length fee</small>
+          </button>
+          <button type="button" class="tool" data-tool="lodge">
+            <span>Lodge</span>
+            <small id="cost-lodge">$2,900</small>
+          </button>
+          <button type="button" class="tool" data-tool="restroom">
+            <span>Restroom</span>
+            <small id="cost-restroom">$480</small>
+          </button>
+          <button type="button" class="tool" data-tool="coffee">
+            <span>Coffee shop</span>
+            <small id="cost-coffee">$920</small>
+          </button>
+          <button type="button" class="tool" data-tool="sandwich">
+            <span>Sandwich shop</span>
+            <small id="cost-sandwich">$1,050</small>
+          </button>
+          <button type="button" class="tool" data-tool="shack">
+            <span>Sugar shack</span>
+            <small id="cost-shack">$620</small>
+          </button>
+          <button type="button" class="tool expansion" data-tool="hotel">
+            <span>Hotel</span>
+            <small id="cost-hotel">$12,000</small>
+          </button>
+          <button type="button" class="tool expansion" data-tool="restaurant">
+            <span>Restaurant</span>
+            <small id="cost-restaurant">$4,800</small>
+          </button>
+          <button type="button" class="tool expansion" data-tool="shop">
+            <span>Shop</span>
+            <small id="cost-shop">$3,200</small>
+          </button>
+          <button type="button" class="tool expansion" data-tool="condo">
+            <span>Condo</span>
+            <small id="cost-condo">$9,500</small>
+          </button>
+          <button type="button" class="tool expansion" data-tool="patrol">
+            <span>Patrol hut</span>
+            <small id="cost-patrol">$1,600</small>
+          </button>
+        </nav>
+      </div>
+
+      <div id="welcome">
+        <div class="welcome-card">
+          <p class="eyebrow">A little ski area</p>
+          <h1>Skilandia</h1>
+          <p>
+            Fly over Little Hawk Hill, then buy Cedar Ridge and finish at Twin
+            Peaks — a two-mountain resort. Tickets start the cash. Buildings earn
+            at different rates. Sugar shacks go beside the runs.
+          </p>
+          <ul>
+            <li>Right-drag to look, scroll to zoom, WASD to fly between hills.</li>
+            <li>After the starter hill you must hire ski patrol and a crew.</li>
+            <li>Hotels, restaurants, shops, and condos unlock on the next mountain.</li>
+          </ul>
+          <button type="button" id="btn-start">Open the mountain</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
