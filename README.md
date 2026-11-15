@@ -56,6 +56,20 @@ Run difficulty uses real-world pitches: green under 25%, blue under 40%, black u
 - Pick **Roads**, click on the highway (or any road, or the parking lot), click along the way, and end on a road or the lot to finish. Roads cost $6/m, clear the trees in their path, and can't climb steeper than 14%, so zig-zag up steep ground
 - Cars drive the route in and out, busier when the hill is busy
 
+### Parking
+
+Every skier arrives by car, so **parking is a fourth limit** on how many skiers come, next to lifts, runs and the resort tier. The lot you start with holds 400 skiers. Build more from the **Roads** menu:
+
+| Parking | Cars | Skiers | Price | Notes |
+|---|---|---|---|---|
+| Small lot | 120 | 300 | $4,500 | Gentle ground (≤12%) |
+| Large lot | 400 | 1,000 | $13,000 | Gentle ground (≤10%) |
+| Parking garage | 2,000 | 5,000 | $90,000 | Unlocks after your first peak; handles slopes up to 20% |
+
+- Parking goes right beside a road (not on it), lines up with the road, and only counts once that road connects to the highway
+- Skiers park where there's the most room and walk back to their car to leave
+- Lots earn parking fees as they fill up
+
 ### Runs
 
 - Five kinds: groomed slope, slalom course (gates), mogul run (one notch harder), terrain park (wide, orange-edged) and glades

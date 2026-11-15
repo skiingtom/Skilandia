@@ -8,7 +8,7 @@
 import { elevationM, isRock } from "../src/height";
 import { nearestOnRoad } from "../src/roads";
 import { Game, SUMMITS, nearestOnTrail } from "../src/sim";
-import { BASE, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
+import { BASE, BuildingType, PARKING, STARTER_LOT_SKIERS, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
 
 const g = new Game();
 g.startManaging();
@@ -38,6 +38,56 @@ ok(g.skiers.length <= before, "skiers arrived with no road");
   const r = g.click(exit.x, exit.y);
   ok(r === "ok" && g.roadConnected(), `access road failed: ${g.toasts.at(-1)?.text}`);
   console.log("access road:", g.toasts.at(-1)?.text, "route pts", g.carRoute()?.length);
+}
+
+// --- parking: lots go beside a connected road and add room for skiers
+{
+  ok(g.parkingCapacity() === STARTER_LOT_SKIERS, `starter parking should hold ${STARTER_LOT_SKIERS}, got ${g.parkingCapacity()}`);
+  /** Somewhere beside a road (either side) where this type can go. */
+  const spotBeside = (type: BuildingType, roadIndex: number): Vec2 | null => {
+    const r = g.roads[roadIndex];
+    const R = PARKING[type]!.radius;
+    for (let i = 1; i < r.points.length; i++) {
+      const a = r.points[i - 1];
+      const b = r.points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      for (const t of [0.5, 0.25, 0.75]) {
+        for (const side of [1, -1]) {
+          const p = { x: a.x + (b.x - a.x) * t - ((b.y - a.y) / len) * (R + 8) * side, y: a.y + (b.y - a.y) * t + ((b.x - a.x) / len) * (R + 8) * side };
+          if (!g.canPlace(type, p.x, p.y)) return p;
+        }
+      }
+    }
+    return null;
+  };
+  const access = g.roads.findIndex((r) => !r.highway);
+  let spot = spotBeside("parkingSmall", access) ?? spotBeside("parkingSmall", 0);
+  ok(!!spot, "no room for a small lot beside the roads");
+  if (spot) {
+    g.setTool("parkingSmall");
+    ok(g.click(spot.x, spot.y) === "ok", `small lot failed: ${g.toasts.at(-1)?.text}`);
+    ok(g.parkingCapacity() === STARTER_LOT_SKIERS + PARKING.parkingSmall!.skiers, `parking didn't grow: ${g.parkingCapacity()}`);
+    const lot = g.buildings.at(-1)!;
+    ok(lot.angle !== undefined, "lot should line up with the road");
+  }
+  // Away from any road: refused.
+  const far = { x: BASE.x + 2500, y: BASE.y - 2500 };
+  ok(g.canPlace("parkingSmall", far.x, far.y) !== null, "a lot with no road beside it should be refused");
+  // On top of the road: refused.
+  const onRoad = g.roads[access].points[1];
+  ok(g.canPlace("parkingLarge", onRoad.x, onRoad.y) !== null, "a lot on the road itself should be refused");
+  // The garage waits for the first peak.
+  ok(!g.expansionUnlocked() && g.canPlace("garage", BASE.x, BASE.y) !== null, "garage should be locked at first");
+  // Skiers park at the new lot too, and the limit holds.
+  for (let i = 0; i < 3000; i++) g.tick(0.05);
+  ok(g.skiers.length <= g.loadLimits().parking + 25, `more skiers (${g.skiers.length}) than parking (${g.loadLimits().parking})`);
+  if (spot) {
+    ok(g.skiers.some((s) => Math.hypot(s.lot.x - spot!.x, s.lot.y - spot!.y) < 1), "nobody parked in the new lot");
+    // Demolish it: capacity drops back, and its parkers still find their car.
+    g.setTool("demolish");
+    ok(g.click(spot.x, spot.y) === "ok", `couldn't demolish the lot: ${g.toasts.at(-1)?.text}`);
+    ok(g.parkingCapacity() === STARTER_LOT_SKIERS, "capacity didn't drop after demolishing the lot");
+  }
 }
 const lift = { a: tbar.bottom, b: tbar.top };
 const len = Math.hypot(lift.b.x - lift.a.x, lift.b.y - lift.a.y);
@@ -299,6 +349,29 @@ for (const p of SUMMITS) {
 }
 console.log(`conquered ${g.conquered.size}/${SUMMITS.length}, tier ${TIERS[g.tier()].name}, won: ${g.won}`);
 ok(g.won, "conquering every peak should win the game");
+
+// --- once unlocked, a parking garage goes up beside the highway or a road
+{
+  let placed = false;
+  for (const r of g.roads) {
+    for (let i = 1; i < r.points.length && !placed; i++) {
+      const a = r.points[i - 1];
+      const b = r.points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      for (const side of [1, -1]) {
+        const R = PARKING.garage!.radius + 8;
+        const p = { x: (a.x + b.x) / 2 - ((b.y - a.y) / len) * R * side, y: (a.y + b.y) / 2 + ((b.x - a.x) / len) * R * side };
+        if (g.canPlace("garage", p.x, p.y)) continue;
+        const before = g.parkingCapacity();
+        g.setTool("garage");
+        placed = g.click(p.x, p.y) === "ok" && g.parkingCapacity() === before + PARKING.garage!.skiers;
+        break;
+      }
+    }
+    if (placed) break;
+  }
+  ok(placed, "couldn't build a parking garage anywhere beside a road");
+}
 ok(g.capacity() === TIERS[TIERS.length - 1].capacity, "should reach the top tier");
 for (let i = 0; i < 2000; i++) g.tick(0.05);
 ok(Number.isFinite(g.money), "money NaN after conquering");

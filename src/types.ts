@@ -3,6 +3,9 @@ import { TERRAIN_CELL_M, TERRAIN_COLS, TERRAIN_ROWS } from "./terrain-data";
 export type Difficulty = 0 | 1 | 2 | 3;
 export type MountainId = 0 | 1 | 2;
 export type BuildingType =
+  | "parkingSmall"
+  | "parkingLarge"
+  | "garage"
   | "lodge"
   | "restroom"
   | "coffee"
@@ -96,10 +99,14 @@ export interface Building {
   y: number;
   earnAcc: number;
   earnTimer: number;
+  /** Facing (radians in map x/y): parking lines up with the road it opens onto. */
+  angle?: number;
 }
 
 export interface Skier {
   id: number;
+  /** Where this skier parked: they arrive from here and walk back to leave. */
+  lot: Vec2;
   name: string;
   skill: Difficulty;
   color: string;
@@ -211,6 +218,9 @@ export const ECON = 10;
 
 
 export const COSTS: Record<BuildingType, number> = {
+  parkingSmall: 450,
+  parkingLarge: 1300,
+  garage: 9000,
   lodge: 2900,
   restroom: 480,
   coffee: 920,
@@ -233,6 +243,9 @@ export const COSTS: Record<BuildingType, number> = {
 
 /** Dollars per minute at a busy hill, 1× speed. */
 export const INCOME_PER_MIN: Record<BuildingType, number> = {
+  parkingSmall: 18,
+  parkingLarge: 45,
+  garage: 140,
   restroom: 24,
   patrol: 8,
   clinic: 30,
@@ -257,6 +270,9 @@ export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
 export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol", "clinic"];
 
 export const BUILDING_MAX: Record<BuildingType, number> = {
+  parkingSmall: 20,
+  parkingLarge: 20,
+  garage: 40,
   lodge: 1,
   restroom: 3,
   coffee: 1,
@@ -277,6 +293,25 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   heli: 1,
 };
 
+/**
+ * Parking: how many skiers' cars each holds (about 2.5 skiers a car), its
+ * footprint (w x d metres, long side along the road), how far it reaches
+ * (radius) and the steepest ground it can be graded into.
+ */
+export const PARKING: Partial<Record<BuildingType, { cars: number; skiers: number; w: number; d: number; radius: number; maxGrade: number }>> = {
+  parkingSmall: { cars: 120, skiers: 300, w: 44, d: 30, radius: 27, maxGrade: 0.12 },
+  parkingLarge: { cars: 400, skiers: 1000, w: 84, d: 52, radius: 48, maxGrade: 0.1 },
+  garage: { cars: 2000, skiers: 5000, w: 62, d: 42, radius: 37, maxGrade: 0.2 },
+};
+export const PARKING_TYPES: BuildingType[] = ["parkingSmall", "parkingLarge", "garage"];
+/** The lot the resort starts with, by the ticket booth. */
+export const STARTER_LOT_SKIERS = 400;
+
+/** How far around a building trees are cleared and other things kept off. */
+export function buildingRadius(type: BuildingType): number {
+  return PARKING[type]?.radius ?? (type === "heli" ? 40 : 22);
+}
+
 /** Places skiers visit when hungry. */
 export const FOOD_BUILDINGS: BuildingType[] = ["coffee", "sandwich", "shack", "cafeteria", "bar", "restaurant"];
 
@@ -284,6 +319,7 @@ export const FOOD_BUILDINGS: BuildingType[] = ["coffee", "sandwich", "shack", "c
 export const LODGING_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "shop", "spa"];
 
 export const EXPANSION_BUILDINGS: BuildingType[] = [
+  "garage",
   "hotel",
   "restaurant",
   "shop",
@@ -325,6 +361,9 @@ export const DIFF = [
 ] as const;
 
 export const BUILDING_LABEL: Record<BuildingType, string> = {
+  parkingSmall: "Small parking lot",
+  parkingLarge: "Large parking lot",
+  garage: "Parking garage",
   lodge: "Lodge",
   restroom: "Restroom",
   coffee: "Coffee shop",

@@ -27,6 +27,7 @@ import {
   VERTICAL_M,
   WORLD_H,
   WORLD_W,
+  PARKING,
 } from "./types";
 
 /**
@@ -382,6 +383,8 @@ export class World3D {
       placeFeature(this.ghost, { x, y, angle, type: type.slice(8) as FeatureType } as Feature, this.mid);
     } else {
       this.ghost.position.copy(to3(x, y, 0, this.mid));
+      // Parking turns to line up with the road; the angle is in map x/y.
+      this.ghost.rotation.y = -angle;
     }
     this.ghost.visible = true;
     this.ghost.traverse((c) => {
@@ -1031,10 +1034,14 @@ export class World3D {
     for (const b of game.buildings) {
       const mesh = makeBuildingMesh(b.type, false);
       mesh.position.copy(to3(b.x, b.y, 0, this.mid));
+      mesh.rotation.y = -(b.angle ?? 0);
       mesh.userData = { kind: "building", id: b.id };
-      const tag = makeRateSprite(b.type === "heli" ? `$${HELI.fare}/seat` : `$${INCOME_PER_MIN[b.type]}/min`);
+      const lot = PARKING[b.type];
+      const tag = makeRateSprite(
+        b.type === "heli" ? `$${HELI.fare}/seat` : lot ? `P · ${lot.cars.toLocaleString()} cars` : `$${INCOME_PER_MIN[b.type]}/min`,
+      );
       tag.position.y =
-        b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" || b.type === "hostel" ? 20 : 14;
+        b.type === "garage" ? 26 : lot ? 10 : b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" || b.type === "hostel" ? 20 : 14;
       mesh.add(tag);
       if (game.selected?.kind === "building" && game.selected.id === b.id) {
         mesh.traverse((c) => {
@@ -1545,8 +1552,9 @@ function makeRateSprite(text: string): THREE.Sprite {
 
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
+  if (PARKING[type]) return makeParkingMesh(type, ghost);
   const g = new THREE.Group();
-  const palette: Record<BuildingType, { body: string; roof: string; w: number; d: number; h: number }> = {
+  const palette: Record<string, { body: string; roof: string; w: number; d: number; h: number }> = {
     lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
     restroom: { body: "#d9d2c5", roof: "#4a5560", w: 10, d: 8, h: 7 },
     coffee: { body: "#efe6d2", roof: "#6f4e37", w: 14, d: 11, h: 7 },
@@ -2413,4 +2421,148 @@ function makeBrushRing(): THREE.LineLoop {
   ring.frustumCulled = false;
   ring.visible = false;
   return ring;
+}
+
+/** Car body plus cabin, length along z. */
+function carGeometry(): THREE.BufferGeometry {
+  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
+  body.translate(0, 0.45, 0);
+  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
+  cabin.translate(0, 1.25, -0.2);
+  return mergeGeometries([body, cabin])!;
+}
+
+const PARKED_COLORS = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a", "#6b3f78"];
+
+/**
+ * Painted stalls in back-to-back rows with aisles between, and parked cars in
+ * most of them. `y` is the deck height. Returns the stripes and the cars.
+ */
+function parkingDeck(w: number, d: number, y: number, seed: number, fill: number, ghost: boolean): THREE.Object3D[] {
+  const stall = 2.8;
+  const per = Math.floor((w - 8) / stall);
+  const bands = Math.max(1, Math.floor((d - 8) / 12) + 1);
+  const z0 = -((bands - 1) * 12) / 2;
+  const stripes = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(0.16, 0.06, 5),
+    new THREE.MeshStandardMaterial({ color: "#e9edf0", roughness: 0.6 }),
+    bands * (per + 1),
+  );
+  const m = new THREE.Object3D();
+  let n = 0;
+  const spots: { x: number; z: number }[] = [];
+  for (let b = 0; b < bands; b++) {
+    const z = z0 + b * 12;
+    for (let i = 0; i <= per; i++) {
+      const x = -((per * stall) / 2) + i * stall;
+      m.position.set(x, y + 0.05, z);
+      m.updateMatrix();
+      stripes.setMatrixAt(n++, m.matrix);
+      if (i < per) spots.push({ x: x + stall / 2, z });
+    }
+  }
+  stripes.count = n;
+  const out: THREE.Object3D[] = [stripes];
+  if (ghost) return out;
+  const cars = new THREE.InstancedMesh(carGeometry(), new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.5 }), spots.length);
+  const c = new THREE.Color();
+  let k = 0;
+  spots.forEach((s, i) => {
+    if (noise2(i * 0.77 + seed, seed * 1.3) > fill) return;
+    m.position.set(s.x, y, s.z + (noise2(i, seed) - 0.5) * 0.6);
+    m.rotation.set(0, i % 2 ? Math.PI : 0, 0);
+    m.updateMatrix();
+    cars.setMatrixAt(k, m.matrix);
+    cars.setColorAt(k, c.set(PARKED_COLORS[(i * 7 + seed) % PARKED_COLORS.length]));
+    k++;
+  });
+  cars.count = k;
+  cars.castShadow = true;
+  out.push(cars);
+  return out;
+}
+
+/** Surface lots (graded asphalt pads) and the multi-deck garage. */
+function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
+  const spec = PARKING[type]!;
+  const g = new THREE.Group();
+  const concrete = new THREE.MeshStandardMaterial({ color: "#b7bcc2", roughness: 0.85 });
+  if (type !== "garage") {
+    // A pad graded into the slope: thick enough that its downhill edge never floats.
+    const depth = spec.maxGrade * spec.w + 1.5;
+    const pad = new THREE.Mesh(new THREE.BoxGeometry(spec.w, depth, spec.d), new THREE.MeshStandardMaterial({ color: "#4b525b", roughness: 0.92 }));
+    pad.position.y = 0.35 - depth / 2;
+    pad.receiveShadow = true;
+    g.add(pad);
+    // Snow pushed into berms along the back and sides.
+    const berm = new THREE.MeshStandardMaterial({ color: "#eef3f7", roughness: 0.95 });
+    for (const [bw, bd, x, z] of [
+      [spec.w, 2.5, 0, -spec.d / 2 - 0.6],
+      [2.5, spec.d, -spec.w / 2 - 0.6, 0],
+      [2.5, spec.d, spec.w / 2 + 0.6, 0],
+    ]) {
+      const b = new THREE.Mesh(new THREE.BoxGeometry(bw, 1.4, bd), berm);
+      b.position.set(x, 0.5, z);
+      g.add(b);
+    }
+    g.add(...parkingDeck(spec.w, spec.d, 0.36, type === "parkingLarge" ? 11 : 5, 0.62, ghost));
+    // Light poles.
+    const poles = type === "parkingLarge" ? [[-28, -6], [0, -6], [28, -6], [-28, 18], [0, 18], [28, 18]] : [[-14, 0], [14, 0]];
+    for (const [x, z] of poles) {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 9, 6), concrete);
+      pole.position.set(x, 4.8, z);
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.35, 0.7), new THREE.MeshStandardMaterial({ color: "#3a3f45", emissive: "#fff2c4", emissiveIntensity: 0.25 }));
+      lamp.position.set(x, 9.3, z);
+      pole.castShadow = !ghost;
+      g.add(pole, lamp);
+    }
+  } else {
+    const levels = 5;
+    const lh = 3.4;
+    // Plinth down into the slope, then open decks on columns with low walls.
+    const plinth = new THREE.Mesh(new THREE.BoxGeometry(spec.w, 9, spec.d), concrete);
+    plinth.position.y = -4.4;
+    g.add(plinth);
+    const wall = new THREE.MeshStandardMaterial({ color: "#d4d8dc", roughness: 0.8 });
+    for (let i = 0; i <= levels; i++) {
+      const y = i * lh;
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(spec.w, 0.5, spec.d), concrete);
+      slab.position.y = y;
+      slab.castShadow = !ghost;
+      slab.receiveShadow = true;
+      g.add(slab);
+      if (i === 0) continue;
+      for (const [bw, bd, x, z] of [
+        [spec.w, 0.4, 0, spec.d / 2],
+        [spec.w, 0.4, 0, -spec.d / 2],
+        [0.4, spec.d, spec.w / 2, 0],
+        [0.4, spec.d, -spec.w / 2, 0],
+      ]) {
+        const p = new THREE.Mesh(new THREE.BoxGeometry(bw, 1.1, bd), wall);
+        p.position.set(x, y + 0.8, z);
+        g.add(p);
+      }
+    }
+    for (let x = -spec.w / 2 + 1; x <= spec.w / 2 - 1; x += (spec.w - 2) / 5) {
+      for (const z of [-spec.d / 2 + 1, 0, spec.d / 2 - 1]) {
+        const col = new THREE.Mesh(new THREE.BoxGeometry(0.8, levels * lh, 0.8), concrete);
+        col.position.set(x, (levels * lh) / 2, z);
+        g.add(col);
+      }
+    }
+    // Cars on every deck (the roof is the emptiest).
+    for (let i = 0; i < levels; i++) g.add(...parkingDeck(spec.w - 6, spec.d - 6, i * lh + 0.25, 3 + i * 5, i === levels - 1 ? 0.3 : 0.7, ghost));
+    // Stair and lift tower, with a big P.
+    const tower = new THREE.Mesh(new THREE.BoxGeometry(7, levels * lh + 4, 7), new THREE.MeshStandardMaterial({ color: "#2f5f99", roughness: 0.6 }));
+    tower.position.set(spec.w / 2 - 2, (levels * lh + 4) / 2, spec.d / 2 + 2);
+    tower.castShadow = !ghost;
+    g.add(tower);
+    // Entry ramp up the long side.
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(22, 0.5, 7), concrete);
+    ramp.position.set(-spec.w / 2 + 14, lh / 2, spec.d / 2 + 4);
+    ramp.rotation.z = Math.atan2(lh, 22);
+    g.add(ramp);
+  }
+  g.userData = { kind: "building" };
+  return g;
 }

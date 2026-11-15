@@ -21,6 +21,7 @@ import {
   STAFF_ROLES,
   Tool,
   UNIT_M,
+  PARKING,
 } from "./types";
 import "@fontsource/nunito/500.css";
 import "@fontsource/nunito/700.css";
@@ -145,7 +146,7 @@ function paintHud(force = false): void {
   skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${load.comfortable.toLocaleString()}`;
   skiersEl.parentElement!.title =
     `The resort can comfortably handle ${load.comfortable.toLocaleString()} skiers right now ` +
-    `(lifts ${load.lifts.toLocaleString()}, runs ${load.runs.toLocaleString()}, mountain max ${load.cap.toLocaleString()}).`;
+    `(lifts ${load.lifts.toLocaleString()}, runs ${load.runs.toLocaleString()}, parking ${load.parking.toLocaleString()}, mountain max ${load.cap.toLocaleString()}).`;
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
   earnedEl.textContent = shortMoney(game.lifetimeEarned);
@@ -375,7 +376,7 @@ function loop(now: number): void {
       placeHint.textContent = err ?? `Click to build a ${FEATURE_SPEC[feature].label.toLowerCase()} · $${FEATURE_SPEC[feature].cost.toLocaleString()}`;
     } else if (hit && hit.mountain === game.currentMountain && moving) {
       const err = game.canMoveTo(hit.x, hit.y);
-      world.showGhost(moving.type, hit.x, hit.y, !err);
+      world.showGhost(moving.type, hit.x, hit.y, !err, PARKING[moving.type] ? game.parkingAngle(moving.type, hit.x, hit.y) : 0);
       placeHint.classList.remove("hidden");
       placeHint.classList.toggle("ok", !err);
       const fee = game.moveFee(moving);
@@ -383,7 +384,7 @@ function loop(now: number): void {
     } else if (hit && hit.mountain === game.currentMountain && !feature && !moving) {
       const type = game.tool as BuildingType;
       const err = game.canPlace(type, hit.x, hit.y);
-      world.showGhost(type, hit.x, hit.y, !err);
+      world.showGhost(type, hit.x, hit.y, !err, PARKING[type] ? game.parkingAngle(type, hit.x, hit.y) : 0);
       placeHint.classList.remove("hidden");
       placeHint.classList.toggle("ok", !err);
       placeHint.textContent = err ?? `Click to place the ${BUILDING_LABEL[type].toLowerCase()}.`;
@@ -554,6 +555,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 function moneyLine(type: keyof typeof COSTS): string {
+  const lot = PARKING[type];
+  if (lot) return `$${COSTS[type].toLocaleString()} · up to $${INCOME_PER_MIN[type]}/min in fees`;
   if (type === "heli") {
     return `$${COSTS.heli.toLocaleString()} · $${HELI.fare}/seat · upkeep $${OPERATING_COST_PER_MIN.heli}/min`;
   }

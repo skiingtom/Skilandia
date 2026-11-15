@@ -14,7 +14,9 @@ import {
   Tool,
   UNIT_M,
   liftCost,
+  PARKING,
 } from "./types";
+import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
 import { BRUSH_R, TREE_FELL_COST } from "./sim";
 
 const SALVAGE_SHARE = 0.4;
@@ -46,7 +48,7 @@ export interface DockGroup {
 
 export const DOCK_GROUPS: DockGroup[] = [
   { id: "look", label: "Look", tool: "select" },
-  { id: "road", label: "Roads", tool: "road" },
+  { id: "road", label: "Roads", items: ["road", "parkingSmall", "parkingLarge", "garage"] },
   { id: "trail", label: "Trails", items: TRAIL_KINDS.map((k) => `trail:${k}` as Tool) },
   { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
@@ -71,6 +73,23 @@ const LIFT_UNIT: Record<LiftType, string> = {
 };
 
 function itemHtml(tool: Tool): string {
+  if (tool === "road") {
+    return `<button type="button" class="tool item" data-tool="road">
+      <b>Road</b>
+      <small>$${ROAD_COST_PER_M}/m · ≤${Math.round(ROAD_MAX_GRADE * 100)}% grade</small>
+      <em>From the highway or another road to wherever cars need to go.</em>
+    </button>`;
+  }
+  const lot = PARKING[tool as BuildingType];
+  if (lot) {
+    const b = tool as BuildingType;
+    const exp = EXPANSION_BUILDINGS.includes(b) ? " expansion" : "";
+    return `<button type="button" class="tool item${exp}" data-tool="${b}">
+      <b>${BUILDING_LABEL[b]}</b>
+      <small id="cost-${b}"></small>
+      <em>${exp ? "Unlocks after your first peak. " : ""}${lot.cars.toLocaleString()} cars, room for ${lot.skiers.toLocaleString()} more skiers. Goes right beside a road.</em>
+    </button>`;
+  }
   if (tool === "demolish") {
     return `<button type="button" class="tool item" data-tool="demolish">
       <b>Demolish</b>
@@ -134,7 +153,7 @@ export function buildDock(dock: HTMLElement, menus: HTMLElement): void {
   ).join("");
   menus.innerHTML = DOCK_GROUPS.filter((g) => g.items)
     .map(
-      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" || g.id === "edit" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
+      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" || g.id === "edit" || g.id === "road" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
         ${g.items!.map(itemHtml).join("")}
       </div>`,
     )

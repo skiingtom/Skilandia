@@ -14,6 +14,9 @@ import {
   FOOD_BUILDINGS,
   HELI,
   LODGING_BUILDINGS,
+  PARKING,
+  STARTER_LOT_SKIERS,
+  buildingRadius,
   OPERATING_COST_PER_MIN,
   FeatureType,
   INCOME_PER_MIN,
@@ -154,7 +157,8 @@ export class Game {
   treesFelled = 0;
   /** Where the tree brush is hovering (for its outline). */
   brushHover: Vec2 | null = null;
-  private routeCache: { v: number; route: Vec2[] | null } = { v: -1, route: null };
+  private routeCache: { v: string; route: Vec2[] | null } = { v: "", route: null };
+  private connCache: { v: number; ids: Set<number> } = { v: -1, ids: new Set() };
   buildings: Building[] = [];
   skiers: Skier[] = [];
   features: Feature[] = [];
@@ -331,7 +335,7 @@ export class Game {
       for (let i = 1; i < t.points.length; i++) add(t.points[i - 1].x, t.points[i - 1].y, t.points[i].x, t.points[i].y, r, glade);
     }
     for (const l of this.lifts) add(l.bottom.x, l.bottom.y, l.top.x, l.top.y, 16);
-    for (const b of this.buildings) add(b.x, b.y, b.x, b.y, b.type === "heli" ? 40 : 22);
+    for (const b of this.buildings) add(b.x, b.y, b.x, b.y, buildingRadius(b.type));
     for (const f of this.features) add(f.x, f.y, f.x, f.y, f.type === "halfpipe" ? 40 : 12);
     for (const [a, b, w] of this.roadSegsIn(x0, y0, x1, y1)) add(a.x, a.y, b.x, b.y, w / 2 + 5);
     for (const c of this.clearings) add(c.x, c.y, c.x, c.y, c.r);
@@ -515,8 +519,16 @@ export class Game {
    * - the mountain's hard cap.
    * The smallest one is the limit. Recomputed a few times a second.
    */
-  loadLimits(): { lifts: number; runs: number; cap: number; comfortable: number; limitedBy: "lifts" | "runs" | "capacity" } {
-    const key = `${this.currentMountain}:${this.lifts.map((l) => l.id).join(",")}:${this.trails.map((t) => t.id).join(",")}`;
+  loadLimits(): {
+    lifts: number;
+    runs: number;
+    cap: number;
+    parking: number;
+    comfortable: number;
+    limitedBy: "lifts" | "runs" | "capacity" | "parking";
+  } {
+    const lots = this.buildings.filter((b) => PARKING[b.type]).map((b) => b.id).join(",");
+    const key = `${this.currentMountain}:${this.lifts.map((l) => l.id).join(",")}:${this.trails.map((t) => t.id).join(",")}:${this.roadVersion}:${lots}`;
     if (this.loadCache && this.loadCacheKey === key && this.clock - this.loadCacheT < 0.5) return this.loadCache;
     let lifts = 0;
     for (const l of this.lifts) {
@@ -532,9 +544,11 @@ export class Game {
     }
     const runs = this.trails.reduce((n, t) => n + t.length / 7, 0);
     const cap = this.capacity();
-    const comfortable = Math.round(Math.min(lifts, runs, cap));
-    const limitedBy = comfortable === cap ? "capacity" : lifts <= runs ? "lifts" : "runs";
-    this.loadCache = { lifts: Math.round(lifts), runs: Math.round(runs), cap, comfortable, limitedBy };
+    const parking = this.parkingCapacity();
+    const comfortable = Math.round(Math.min(lifts, runs, cap, parking));
+    const limitedBy =
+      comfortable === parking && parking < cap ? "parking" : comfortable === cap ? "capacity" : lifts <= runs ? "lifts" : "runs";
+    this.loadCache = { lifts: Math.round(lifts), runs: Math.round(runs), cap, parking, comfortable, limitedBy };
     this.loadCacheT = this.clock;
     this.loadCacheKey = key;
     return this.loadCache;
@@ -579,7 +593,7 @@ export class Game {
       done: n >= t.peaksNeeded,
     }));
     return [
-      { id: "road", text: "Build a road from the highway to the parking lot", done: this.roadConnected() },
+      { id: "road", text: "Build a road from the highway to the parking lot", done: this.parkingCapacity() > 0 },
       { id: "lodge", text: `Build a lodge ($${COSTS.lodge.toLocaleString()})`, done: this.has("lodge") },
       { id: "black", text: "Cut a black-diamond run", done: this.trails.some((t) => t.difficulty >= 2) },
       tierGoals[0],
@@ -597,7 +611,8 @@ export class Game {
     const { counts } = this.variety();
     const out: string[] = [];
     const onHill = this.skiers.filter((s) => s.state !== "leaving" && s.state !== "arriving").length;
-    if (!this.roadConnected()) out.push("No road reaches the parking lot. Build one from the highway so skiers can drive in.");
+    if (this.parkingCapacity() === 0) out.push("No road reaches the parking lot. Build one from the highway so skiers can drive in.");
+    else if (this.parkingLots().some((l) => !l.connected && l.id !== null)) out.push("A parking lot has no road to the highway, so nobody can park there.");
     if (!this.has("lodge")) out.push("A lodge would let you set ticket prices.");
     if (counts[2] === 0 && counts[3] === 0) out.push("Advanced skiers want a black diamond.");
     if (counts[3] === 0 && this.trails.length >= 4) out.push("A few experts keep asking for a double black.");
@@ -629,7 +644,8 @@ export class Game {
     }
     const load = this.loadLimits();
     if (this.skiers.length >= this.demand() * 0.9) {
-      if (load.limitedBy === "lifts") out.push("The lifts are maxed out. Add or upgrade lifts to draw more skiers.");
+      if (load.limitedBy === "parking") out.push("The parking is full. Build more parking beside a road to draw more skiers.");
+      else if (load.limitedBy === "lifts") out.push("The lifts are maxed out. Add or upgrade lifts to draw more skiers.");
       else if (load.limitedBy === "runs") out.push("The runs are crowded. Cut more trails to draw more skiers.");
       else if (this.tier() < TIERS.length - 1) out.push("The resort is full. Run a lift to another peak to grow it.");
       else out.push("The resort is at full size.");
@@ -649,7 +665,7 @@ export class Game {
 
   startManaging(): void {
     this.managing = true;
-    if (!this.roadConnected()) this.toast("Skiers need a way in: build a road from the highway to your parking lot.");
+    if (this.parkingCapacity() === 0) this.toast("Skiers need a way in: build a road from the highway to your parking lot.");
   }
 
   setTool(tool: Tool): void {
@@ -694,7 +710,7 @@ export class Game {
     const build = tool as BuildingType | "select" | "cut" | "move";
     if (build === "move") return;
     if (build !== "select" && build !== "cut" && EXPANSION_BUILDINGS.includes(build) && !this.expansionUnlocked()) {
-      this.toast("Hotels, spas, hostels, bars, shops, condos and patrol unlock after your first peak.", true);
+      this.toast("Hotels, spas, hostels, bars, shops, condos, patrol and parking garages unlock after your first peak.", true);
       return;
     }
     if (build !== "select" && build !== "cut" && this.count(build) >= BUILDING_MAX[build]) {
@@ -769,6 +785,7 @@ export class Game {
     this.money -= fee;
     b.x = x;
     b.y = y;
+    if (PARKING[b.type]) b.angle = this.parkingAngle(b.type, x, y);
     this.clearTrees();
     if (fee) this.float(x, y, `-${fee}`, "#d9785f");
     this.toast(`${BUILDING_LABEL[b.type]} moved${fee ? ` for $${fee.toLocaleString()}` : ""}.`);
@@ -1028,6 +1045,97 @@ export class Game {
     return this.inVillage(x, y) && gradeAt(x, y) < 0.25;
   }
 
+  /** Roads joined up to the highway (they share points with it, directly or through other roads). */
+  connectedRoads(): Set<number> {
+    if (this.connCache.v === this.roadVersion) return this.connCache.ids;
+    const k = (p: Vec2) => `${Math.round(p.x * 2)},${Math.round(p.y * 2)}`;
+    const byPoint = new Map<string, Road[]>();
+    for (const r of this.roads) for (const p of r.points) {
+      const key = k(p);
+      const list = byPoint.get(key);
+      if (list) list.push(r);
+      else byPoint.set(key, [r]);
+    }
+    const ids = new Set<number>();
+    const stack = this.roads.filter((r) => r.highway);
+    while (stack.length) {
+      const r = stack.pop()!;
+      if (ids.has(r.id)) continue;
+      ids.add(r.id);
+      for (const p of r.points) for (const o of byPoint.get(k(p)) ?? []) if (!ids.has(o.id)) stack.push(o);
+    }
+    this.connCache = { v: this.roadVersion, ids };
+    return ids;
+  }
+
+  /** Nearest point on a road that reaches the highway, within `reach` of a spot. */
+  private connectedRoadNear(x: number, y: number, reach: number): { road: Road; p: Vec2; seg: number; d: number } | null {
+    const ids = this.connectedRoads();
+    let best: { road: Road; p: Vec2; seg: number; d: number } | null = null;
+    for (const r of this.roads) {
+      if (!ids.has(r.id)) continue;
+      const n = nearestOnRoad(r.points, x, y);
+      if (n.d < reach && (!best || n.d < best.d)) best = { road: r, p: n.p, seg: n.seg, d: n.d };
+    }
+    return best;
+  }
+
+  /** Every parking lot (the starter lot plus any built), with whether cars can reach it. */
+  parkingLots(): { x: number; y: number; skiers: number; connected: boolean; id: number | null }[] {
+    const exit = this.exit();
+    const out = [{ x: exit.x, y: exit.y, skiers: STARTER_LOT_SKIERS, connected: this.starterLotConnected(), id: null as number | null }];
+    for (const b of this.buildings) {
+      const spec = PARKING[b.type];
+      if (!spec) continue;
+      out.push({ x: b.x, y: b.y, skiers: spec.skiers, connected: !!this.connectedRoadNear(b.x, b.y, spec.radius + PARKING_REACH), id: b.id });
+    }
+    return out;
+  }
+
+  private starterLotConnected(): boolean {
+    return routeTo(this.roads, this.exit()) !== null;
+  }
+
+  /** Skiers the reachable parking can take. */
+  parkingCapacity(): number {
+    return this.parkingLots().reduce((n, l) => n + (l.connected ? l.skiers : 0), 0);
+  }
+
+  /** Line a lot up with the nearest road (or face the village if there isn't one). */
+  parkingAngle(type: BuildingType, x: number, y: number): number {
+    const spec = PARKING[type];
+    let best: { a: Vec2; b: Vec2; d: number } | null = null;
+    for (const r of this.roads) {
+      const n = nearestOnRoad(r.points, x, y);
+      if (!best || n.d < best.d) best = { a: r.points[n.seg], b: r.points[n.seg + 1] ?? r.points[n.seg], d: n.d };
+    }
+    if (!best || !spec || best.d > spec.radius + PARKING_REACH * 2) return Math.atan2(BASE.y - y, BASE.x - x) + Math.PI / 2;
+    return Math.atan2(best.b.y - best.a.y, best.b.x - best.a.x);
+  }
+
+  /** Placement rules for parking: beside a road, off it, on gentle ground. */
+  private parkingError(type: BuildingType, x: number, y: number, others: Building[]): string | null {
+    const spec = PARKING[type]!;
+    if (x < spec.radius || x > WORLD_W - spec.radius || y < spec.radius || y > WORLD_H - spec.radius) return "That's off the property.";
+    // Sample the footprint: it has to be gradable, and not rock.
+    let worst = 0;
+    for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const px = x + dx * spec.w * 0.4;
+      const py = y + dy * spec.d * 0.4;
+      worst = Math.max(worst, gradeAt(px, py));
+      if (isRock(px, py)) return "That's bare rock.";
+    }
+    if (worst > spec.maxGrade) return `Too steep for ${type === "garage" ? "a garage" : "a lot"} (${Math.round(worst * 100)}%, max ${Math.round(spec.maxGrade * 100)}%).`;
+    if (others.some((b) => Math.hypot(b.x - x, b.y - y) < spec.radius + buildingRadius(b.type) + 6)) return "Too close to another building.";
+    const exit = this.exit();
+    if (Math.hypot(exit.x - x, exit.y - y) < spec.radius + 80) return "Too close to the main parking lot.";
+    if (this.trails.some((t) => distToTrail(t, x, y) < spec.radius + 12)) return "Don't put parking on a run.";
+    if (this.nearLift(x, y, spec.radius + 10)) return "Keep clear of the lift line.";
+    if (this.nearRoad(x, y, spec.radius - 6)) return "Keep the lot off the road itself.";
+    if (!this.nearRoad(x, y, spec.radius + PARKING_REACH)) return "Put parking right beside a road.";
+    return null;
+  }
+
   /** What a demolish click at this spot would take down (closest thing wins). */
   demolishTarget(x: number, y: number): DemolishTarget | null {
     let best: DemolishTarget | null = null;
@@ -1041,7 +1149,7 @@ export class Game {
     for (const b of this.buildings) {
       const d = Math.hypot(b.x - x, b.y - y);
       // Buildings win ties: they sit on top of everything else.
-      if (d < (b.type === "heli" ? 34 : 24)) offer({ kind: "building", id: b.id, label: BUILDING_LABEL[b.type], refund: Math.round(COSTS[b.type] * SALVAGE) }, d - 8);
+      if (d < buildingRadius(b.type) + 2) offer({ kind: "building", id: b.id, label: BUILDING_LABEL[b.type], refund: Math.round(COSTS[b.type] * SALVAGE) }, d - 8);
     }
     for (const f of this.features) {
       const d = Math.hypot(f.x - x, f.y - y);
@@ -1089,7 +1197,7 @@ export class Game {
     }
     if (t.kind === "building") {
       const b = this.buildings.find((q) => q.id === t.id)!;
-      this.stampClearing([b], b.type === "heli" ? 40 : 22);
+      this.stampClearing([b], buildingRadius(b.type));
       this.buildings = this.buildings.filter((q) => q !== b);
     } else if (t.kind === "feature") {
       const f = this.features.find((q) => q.id === t.id)!;
@@ -1169,14 +1277,34 @@ export class Game {
 
   /** The drive in from the highway to the parking lot, or null if there isn't one. */
   carRoute(): Vec2[] | null {
-    if (this.routeCache.v !== this.roadVersion) {
-      this.routeCache = { v: this.roadVersion, route: routeTo(this.roads, this.exit()) };
+    const lots = this.buildings.filter((b) => PARKING[b.type]).map((b) => b.id).join(",");
+    const v = `${this.roadVersion}:${lots}`;
+    if (this.routeCache.v !== v) {
+      let route: Vec2[] | null = null;
+      const lot = this.parkingLots()
+        .filter((l) => l.connected)
+        .sort((a, b) => b.skiers - a.skiers)[0];
+      if (lot && lot.id === null) route = routeTo(this.roads, this.exit());
+      else if (lot) {
+        // Drive to the road beside the lot, then pull in.
+        const spec = PARKING[this.buildings.find((b) => b.id === lot.id)!.type]!;
+        const near = this.connectedRoadNear(lot.x, lot.y, spec.radius + PARKING_REACH);
+        if (near) {
+          const a = near.road.points[near.seg];
+          const b = near.road.points[near.seg + 1] ?? a;
+          const v0 = Math.hypot(a.x - near.p.x, a.y - near.p.y) < Math.hypot(b.x - near.p.x, b.y - near.p.y) ? a : b;
+          const to = routeTo(this.roads, v0);
+          if (to) route = [...to, { x: lot.x, y: lot.y }];
+        }
+      }
+      this.routeCache = { v, route };
     }
     return this.routeCache.route;
   }
 
+  /** The starter lot is linked to the highway. */
   roadConnected(): boolean {
-    return this.carRoute() !== null;
+    return this.starterLotConnected();
   }
 
   nearRoad(x: number, y: number, pad: number): boolean {
@@ -1303,6 +1431,12 @@ export class Game {
       return "Conquer your first peak to unlock this.";
     }
     if (!moving && this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
+    if (PARKING[type]) {
+      const err = this.parkingError(type, x, y, others);
+      if (err) return err;
+      if (this.money < cost) return `Need $${(cost - this.money).toLocaleString()} more.`;
+      return null;
+    }
     const anywhere = PLACE_ANYWHERE.includes(type);
     const midMountain = PLACE_MOUNTAIN.includes(type);
     if (!anywhere && !midMountain && !this.villageOk(x, y)) {
@@ -1353,7 +1487,7 @@ export class Game {
     }
     for (const b of this.buildings) {
       const d = Math.hypot(b.x - x, b.y - y);
-      if (d < 22 && d < bestD) {
+      if (d < Math.max(22, buildingRadius(b.type)) && d < bestD) {
         bestD = d;
         best = { kind: "building", id: b.id };
       }
@@ -1396,6 +1530,9 @@ export class Game {
       const b = this.buildings.find((x) => x.id === sel.id);
       if (!b) return { title: "Building", body: "" };
       const extra: Record<BuildingType, string> = {
+        parkingSmall: "Room for 120 cars (300 skiers). Earns parking fees as it fills.",
+        parkingLarge: "Room for 400 cars (1,000 skiers). Earns parking fees as it fills.",
+        garage: "Five decks, 2,000 cars (5,000 skiers). Earns parking fees as it fills.",
         lodge: "Also unlocks ticket prices.",
         restroom: "Slowest earner, but people stay on the hill.",
         coffee: "Cafe sales. Faster than a shack, slower than a restaurant.",
@@ -1562,6 +1699,7 @@ export class Game {
     }
     this.money -= COSTS[type];
     const b: Building = { id: this.id(), type, x, y, earnAcc: 0, earnTimer: 0 };
+    if (PARKING[type]) b.angle = this.parkingAngle(type, x, y);
     this.buildings.push(b);
     this.clearTrees();
     this.float(x, y, `-${COSTS[type]}`, "#d9785f");
@@ -1573,13 +1711,38 @@ export class Game {
       this.toast(
         type === "heli"
           ? `Heli-ski base is open. Experts pay $${HELI.fare} a seat; it costs $${OPERATING_COST_PER_MIN.heli}/min to run.`
-          : `${BUILDING_LABEL[type]} is open. Earns $${INCOME_PER_MIN[type]}/min.`,
+          : PARKING[type]
+            ? `${BUILDING_LABEL[type]} is open: room for ${PARKING[type]!.skiers.toLocaleString()} more skiers (${PARKING[type]!.cars.toLocaleString()} cars).${
+                this.parkingLots().find((l) => l.id === b.id)?.connected ? "" : " Connect it to a road so cars can reach it."
+              }`
+            : `${BUILDING_LABEL[type]} is open. Earns $${INCOME_PER_MIN[type]}/min.`,
       );
     }
     return "ok";
   }
 
+  /** The reachable lot with the most room left (the starter lot if nothing is reachable). */
+  private pickLot(): Vec2 {
+    const parked = new Map<string, number>();
+    for (const s of this.skiers) {
+      const k = `${s.lot.x},${s.lot.y}`;
+      parked.set(k, (parked.get(k) ?? 0) + 1);
+    }
+    let best: Vec2 = this.exit();
+    let room = -Infinity;
+    for (const l of this.parkingLots()) {
+      if (!l.connected) continue;
+      const free = (l.skiers - (parked.get(`${l.x},${l.y}`) ?? 0)) / l.skiers;
+      if (free > room) {
+        room = free;
+        best = { x: l.x, y: l.y };
+      }
+    }
+    return best;
+  }
+
   spawnSkier(freeTicket: boolean): void {
+    const lot = this.pickLot();
     const skillRoll = Math.random();
     let skill: Difficulty = 0;
     const { counts } = this.variety();
@@ -1592,8 +1755,9 @@ export class Game {
       skill,
       color: pick(JACKETS),
       // Out of a car in the parking lot.
-      x: this.exit().x - 40 + Math.random() * 80,
-      y: this.exit().y - 20 + Math.random() * 40,
+      x: lot.x - 30 + Math.random() * 60,
+      y: lot.y - 15 + Math.random() * 30,
+      lot: { x: lot.x, y: lot.y },
       state: "arriving",
       trailId: null,
       liftId: null,
@@ -1645,8 +1809,8 @@ export class Game {
       // arrivals close the gap to demand over about a minute, then stop.
       const want = this.demand();
       const gap = want - this.skiers.length;
-      // Nobody can get here until a road reaches the parking lot.
-      if (gap > 0 && this.roadConnected()) this.spawnAcc += capped * Math.min(gap / 45 + 0.05, this.capacity() * 0.003);
+      // Nobody can get here until a road reaches somewhere to park.
+      if (gap > 0 && this.parkingCapacity() > 0) this.spawnAcc += capped * Math.min(gap / 45 + 0.05, this.capacity() * 0.003);
       const cap = this.capacity();
       while (this.spawnAcc > 1) {
         this.spawnAcc -= 1;
@@ -1672,7 +1836,7 @@ export class Game {
       this.stepSkier(s, capped);
       s.mood = clamp(s.mood, 0, 100);
     }
-    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && Math.hypot(s.x - this.exit().x, s.y - this.exit().y) < 12 && s.wait <= 0));
+    this.skiers = this.skiers.filter((s) => !(s.state === "leaving" && Math.hypot(s.x - s.lot.x, s.y - s.lot.y) < 12 && s.wait <= 0));
     this.peakSkiers = Math.max(this.peakSkiers, this.skiers.length);
     this.thoughtAcc += capped;
     if (this.thoughtAcc > 4.5) {
@@ -1723,6 +1887,10 @@ export class Game {
 
   /** A ski school only runs lessons with instructors on staff. */
   private buildingFactor(type: BuildingType): number {
+    if (PARKING[type]) {
+      const cap = this.parkingCapacity();
+      return cap ? clamp(this.skiers.length / cap, 0, 1) : 0;
+    }
     if (type !== "school") return 1;
     const need = Math.max(1, this.staffNeeds().instructor);
     return Math.min(1, this.staff.instructor / need);
@@ -2241,7 +2409,7 @@ export class Game {
     }
     if (s.state === "heli") return; // off the map, skiing the backcountry
     if (s.state === "leaving") {
-      const exit = this.exit();
+      const exit = s.lot;
       this.walkToward(s, exit.x, exit.y, 48 * WALK * dt);
       s.wait = 0;
     }
@@ -2412,6 +2580,9 @@ export function nearestOnTrail(t: Trail, x: number, y: number): { along: number;
   }
   return best;
 }
+
+/** How far beyond its edge a lot may sit from the road it opens onto. */
+const PARKING_REACH = 30;
 
 /** Share of the price you get back when you demolish something. */
 const SALVAGE = 0.4;
