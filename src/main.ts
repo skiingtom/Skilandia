@@ -30,6 +30,7 @@ import {
   Tool,
   UNIT_M,
   PARKING,
+  unlockTier,
 } from "./types";
 import "@fontsource/nunito/500.css";
 import "@fontsource/nunito/700.css";
@@ -274,7 +275,7 @@ function paintHud(force = false): void {
     const wages = (game.staffRequired() || game.staff.instructor ? ` Wages today $${Math.round(game.wagesToday)}.` : "") + upkeep;
     shopRate.textContent = `About $${game.shopRatePerMin()}/min here. Take today $${Math.round(game.shopIncomeToday)}.${wages}`;
   }
-  const expand = game.expansionUnlocked();
+  const tier = game.tier();
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
@@ -288,7 +289,7 @@ function paintHud(force = false): void {
     }
     const type = tool as BuildingType;
     const atMax = game.count(type) >= BUILDING_MAX[type];
-    btn.disabled = atMax || (btn.classList.contains("expansion") && !expand) || (type === "cabin" && !game.has("cabinOffice"));
+    btn.disabled = atMax || tier < unlockTier(type) || (type === "cabin" && !game.has("cabinOffice"));
   });
   document.querySelectorAll<HTMLButtonElement>(".speed").forEach((btn) => {
     btn.classList.toggle("on", Number(btn.dataset.speed) === game.speed && !game.paused);

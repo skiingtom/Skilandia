@@ -25,7 +25,33 @@ export type BuildingType =
   | "school"
   | "cabinOffice"
   | "cabin"
-  | "heli";
+  | "heli"
+  // Quick bites
+  | "pizza"
+  | "burger"
+  | "bakery"
+  | "noodle"
+  | "foodTruck"
+  | "waffle"
+  // Restaurants
+  | "fondue"
+  | "steakhouse"
+  | "sushi"
+  | "brewpub"
+  | "summit"
+  // Shops
+  | "skiShop"
+  | "gifts"
+  | "grocery"
+  | "outfitter"
+  | "chocolate"
+  | "boutique"
+  // Hotels
+  | "motel"
+  | "bnb"
+  | "inn"
+  | "boutiqueHotel"
+  | "grandHotel";
 export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
 export type TrailKind = "slope" | "slalom" | "moguls" | "park" | "glades";
 export type FeatureType = "jump" | "rail" | "box" | "halfpipe";
@@ -245,6 +271,28 @@ export const COSTS: Record<BuildingType, number> = {
   cabinOffice: 3400,
   cabin: 1500,
   heli: 45000,
+  pizza: 1300,
+  burger: 1150,
+  bakery: 980,
+  noodle: 1400,
+  foodTruck: 700,
+  waffle: 760,
+  fondue: 5600,
+  steakhouse: 7200,
+  sushi: 6400,
+  brewpub: 4600,
+  summit: 14000,
+  skiShop: 2600,
+  gifts: 1400,
+  grocery: 2200,
+  outfitter: 4400,
+  chocolate: 2900,
+  boutique: 5200,
+  motel: 3600,
+  bnb: 2800,
+  inn: 7400,
+  boutiqueHotel: 16000,
+  grandHotel: 38000,
 };
 
 /** Dollars per minute at a busy hill, 1× speed. */
@@ -272,10 +320,34 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   cabinOffice: 60,
   cabin: 75,
   heli: 0,
+  pizza: 150,
+  burger: 135,
+  bakery: 105,
+  noodle: 155,
+  foodTruck: 70,
+  waffle: 58,
+  fondue: 215,
+  steakhouse: 260,
+  sushi: 240,
+  brewpub: 190,
+  summit: 380,
+  skiShop: 125,
+  gifts: 70,
+  grocery: 105,
+  outfitter: 170,
+  chocolate: 135,
+  boutique: 190,
+  motel: 110,
+  bnb: 95,
+  inn: 175,
+  boutiqueHotel: 290,
+  grandHotel: 600,
 };
 
-export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
-export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol", "clinic", "cabin"];
+export const PLACE_ANYWHERE: BuildingType[] = ["shack", "foodTruck"];
+export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "foodTruck", "waffle", "summit", "patrol", "clinic", "cabin"];
+/** Small enough to sit right beside a run. */
+export const TRAILSIDE: BuildingType[] = ["shack", "foodTruck", "waffle"];
 
 export const BUILDING_MAX: Record<BuildingType, number> = {
   parkingSmall: 20,
@@ -301,6 +373,28 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   cabinOffice: 1,
   cabin: 30,
   heli: 1,
+  pizza: 2,
+  burger: 2,
+  bakery: 1,
+  noodle: 1,
+  foodTruck: 6,
+  waffle: 6,
+  fondue: 1,
+  steakhouse: 1,
+  sushi: 1,
+  brewpub: 1,
+  summit: 3,
+  skiShop: 2,
+  gifts: 2,
+  grocery: 1,
+  outfitter: 1,
+  chocolate: 1,
+  boutique: 2,
+  motel: 2,
+  bnb: 3,
+  inn: 2,
+  boutiqueHotel: 2,
+  grandHotel: 1,
 };
 
 /**
@@ -319,20 +413,86 @@ export const STARTER_LOT_SKIERS = 400;
 
 /** How far around a building trees are cleared and other things kept off. */
 export function buildingRadius(type: BuildingType): number {
-  return PARKING[type]?.radius ?? (type === "heli" ? 40 : type === "cabin" ? 24 : 22);
+  return (
+    PARKING[type]?.radius ??
+    (type === "heli" ? 40 : type === "grandHotel" ? 32 : type === "cabin" ? 24 : type === "foodTruck" || type === "waffle" ? 14 : 22)
+  );
 }
 
 /** Places skiers visit when hungry. */
-export const FOOD_BUILDINGS: BuildingType[] = ["coffee", "sandwich", "shack", "cafeteria", "bar", "restaurant"];
+export const FOOD_BUILDINGS: BuildingType[] = [
+  "coffee",
+  "sandwich",
+  "shack",
+  "cafeteria",
+  "bar",
+  "restaurant",
+  "pizza",
+  "burger",
+  "bakery",
+  "noodle",
+  "foodTruck",
+  "waffle",
+  "fondue",
+  "steakhouse",
+  "sushi",
+  "brewpub",
+  "summit",
+];
+
+/** Places skiers browse on their way back to the car. */
+export const SHOP_BUILDINGS: BuildingType[] = ["shop", "skiShop", "gifts", "grocery", "outfitter", "chocolate", "boutique"];
+
+/** Places guests sleep. */
+export const HOTEL_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "motel", "bnb", "inn", "boutiqueHotel", "grandHotel"];
 
 /** Overnight / lodging stock that drives delivery staffing. */
-export const LODGING_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "shop", "spa", "cabin"];
+export const LODGING_BUILDINGS: BuildingType[] = [...HOTEL_BUILDINGS, ...SHOP_BUILDINGS, "spa", "cabin"];
+
+/**
+ * How much each place adds to the resort's appeal (which sets the fair
+ * ticket price and how many skiers come). Repeats of one type add nothing.
+ */
+export const APPEAL: Partial<Record<BuildingType, number>> = {
+  pizza: 0.09,
+  burger: 0.08,
+  bakery: 0.07,
+  noodle: 0.08,
+  waffle: 0.06,
+  fondue: 0.12,
+  steakhouse: 0.11,
+  sushi: 0.1,
+  brewpub: 0.1,
+  summit: 0.16,
+  skiShop: 0.09,
+  gifts: 0.05,
+  grocery: 0.07,
+  outfitter: 0.07,
+  chocolate: 0.06,
+  boutique: 0.07,
+  motel: 0.08,
+  bnb: 0.08,
+  inn: 0.11,
+  boutiqueHotel: 0.13,
+  grandHotel: 0.2,
+};
 
 /** A cabin is ski-in / ski-out when a run passes this close (m). */
 export const CABIN_REACH = 60;
 
 export const EXPANSION_BUILDINGS: BuildingType[] = [
   "garage",
+  "steakhouse",
+  "sushi",
+  "fondue",
+  "brewpub",
+  "summit",
+  "outfitter",
+  "chocolate",
+  "boutique",
+  "inn",
+  "boutiqueHotel",
+  "grandHotel",
   "hotel",
   "restaurant",
   "shop",
@@ -342,6 +502,18 @@ export const EXPANSION_BUILDINGS: BuildingType[] = [
   "bar",
   "patrol",
 ];
+
+/** A few landmark buildings need a bigger resort than the first peak gives. */
+export const MIN_TIER: Partial<Record<BuildingType, number>> = {
+  boutiqueHotel: 2,
+  grandHotel: 3,
+  summit: 2,
+};
+
+/** The resort tier (index into TIERS) a building type unlocks at. */
+export function unlockTier(type: BuildingType): number {
+  return MIN_TIER[type] ?? (EXPANSION_BUILDINGS.includes(type) ? 1 : 0);
+}
 
 export const STAFF_ROLES: StaffRole[] = ["patrol", "instructor", "food", "lift", "delivery", "maintenance"];
 
@@ -397,6 +569,54 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   cabinOffice: "Cabin rental office",
   cabin: "Ski-in cabin",
   heli: "Heli-ski base",
+  pizza: "Pizzeria",
+  burger: "Burger joint",
+  bakery: "Bakery",
+  noodle: "Noodle bar",
+  foodTruck: "Food truck",
+  waffle: "Waffle hut",
+  fondue: "Fondue stübli",
+  steakhouse: "Steakhouse",
+  sushi: "Sushi bar",
+  brewpub: "Brewpub",
+  summit: "Summit restaurant",
+  skiShop: "Ski & board shop",
+  gifts: "Gift shop",
+  grocery: "Village market",
+  outfitter: "Outdoor outfitter",
+  chocolate: "Chocolatier",
+  boutique: "Fashion boutique",
+  motel: "Motel",
+  bnb: "Bed & breakfast",
+  inn: "Mountain inn",
+  boutiqueHotel: "Boutique hotel",
+  grandHotel: "Grand hotel",
+};
+
+/** One line on what each building is, for the build menu. */
+export const BUILDING_BLURB: Partial<Record<BuildingType, string>> = {
+  pizza: "Wood-fired slices. Fast and filling.",
+  burger: "Burgers and fries, cheap and quick.",
+  bakery: "Croissants and cinnamon buns for the morning crowd.",
+  noodle: "Hot ramen bowls warm up cold skiers.",
+  foodTruck: "Parks anywhere: village, roadside or right beside a run.",
+  waffle: "Tiny hut on the mountain. Goes beside a run.",
+  fondue: "Melted cheese by candlelight. Guests linger.",
+  steakhouse: "Big plates, big checks.",
+  sushi: "Upscale, and the ski-trip treat.",
+  brewpub: "House beer and après crowds.",
+  summit: "Panoramic dining up the mountain, away from the village.",
+  skiShop: "Tunes, wax and new gear.",
+  gifts: "Mugs, hats and postcards.",
+  grocery: "Groceries for guests in condos and cabins.",
+  outfitter: "Jackets, skins and backcountry kit.",
+  chocolate: "Hot chocolate and truffles.",
+  boutique: "Designer ski wear. High margins.",
+  motel: "Cheap rooms by the road.",
+  bnb: "Cosy rooms in a family house.",
+  inn: "Timber inn with a big fireplace.",
+  boutiqueHotel: "Small, stylish and pricey.",
+  grandHotel: "A landmark: hundreds of rooms and the best views.",
 };
 
 /** Height in world units of one unit of elevation, as drawn (true classifier scale × 1.3). */

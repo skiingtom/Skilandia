@@ -95,8 +95,12 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 
 - Select a building to move it. Moving costs 25% of its price unless you switch the fee off under ⚙ Settings
 - **Base**: lodge, restroom, ski rental, ski school, first-aid clinic, ski patrol hut. Clinics and patrol huts can sit on the mountain
-- **Food**: sugar shack, coffee, cafeteria, sandwich shop, après bar, restaurant. Hungry skiers visit the nearest one
-- **Resort**: shop, hostel, condo, spa, hotel, heli-ski base. Hostels, spas, bars, hotels, shops, condos and patrol unlock after your first peak
+- **Food**: sugar shack, food truck, waffle hut, coffee, bakery, sandwich shop, burger joint, pizzeria, noodle bar, cafeteria. Hungry skiers visit the nearest one. Food trucks park anywhere (even beside a run); waffle huts go on the mountain beside a run
+- **Dining**: restaurant, après bar, brewpub, fondue stübli, sushi bar, steakhouse, summit restaurant (on the mountain; needs a regional resort, 3 peaks)
+- **Shops**: gift shop, ski & board shop, village market, shop, chocolatier, outdoor outfitter, fashion boutique. Skiers finishing their day often browse the nearest shop on the way to the car
+- **Hotels**: motel, bed & breakfast, hostel, mountain inn, condo, hotel, boutique hotel (needs a regional resort, 3 peaks), grand hotel (needs a destination resort, 5 peaks)
+- **Resort**: spa, cabin rental office, ski-in cabins, heli-ski base
+- Each different kind of food, shop and hotel adds to the resort's appeal, which raises the fair ticket price and draws more skiers. Gift shops, ski shops, markets, motels, B&Bs and the quick-bite places are open from the start; the fancier ones (and hostels, spas, bars, hotels, condos, patrol) unlock after your first peak
 - **Ski school** sells lessons to beginners (some graduate to blues). It needs instructors, who are paid from day one
 - **Heli-ski base** ($450,000) flies expert skiers off the map to the backcountry, eight at a time, for $650 a seat. It costs $1,500/min to run plus $600 fuel a flight; a busy one clears about $7,700/min
 - Sugar shacks can sit beside trails

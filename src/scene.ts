@@ -1102,8 +1102,7 @@ export class World3D {
       const tag = makeRateSprite(
         b.type === "heli" ? `$${HELI.fare}/seat` : lot ? `P · ${lot.cars.toLocaleString()} cars` : `$${INCOME_PER_MIN[b.type]}/min`,
       );
-      tag.position.y =
-        b.type === "garage" ? 26 : lot ? 10 : b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" || b.type === "hostel" ? 20 : 14;
+      tag.position.y = tagHeight(b.type);
       mesh.add(tag);
       if (game.selected?.kind === "building" && game.selected.id === b.id) {
         mesh.traverse((c) => {
@@ -1612,33 +1611,133 @@ function makeRateSprite(text: string): THREE.Sprite {
   return sprite;
 }
 
+type BuildingLook = { body: string; roof: string; w: number; d: number; h: number; awning?: string };
+
+const BUILDING_LOOK: Partial<Record<BuildingType, BuildingLook>> = {
+  lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
+  restroom: { body: "#d9d2c5", roof: "#4a5560", w: 10, d: 8, h: 7 },
+  coffee: { body: "#efe6d2", roof: "#6f4e37", w: 14, d: 11, h: 7, awning: "#6f4e37" },
+  sandwich: { body: "#e7edd8", roof: "#355e3b", w: 14, d: 11, h: 7, awning: "#4f8a55" },
+  shack: { body: "#c4a574", roof: "#6b3a2a", w: 8, d: 7, h: 5 },
+  cafeteria: { body: "#ebe3d4", roof: "#5a6b4a", w: 22, d: 16, h: 8 },
+  bar: { body: "#dcc8b0", roof: "#3d2a24", w: 18, d: 14, h: 9 },
+  hotel: { body: "#e8e0d4", roof: "#4a3a32", w: 34, d: 22, h: 22 },
+  restaurant: { body: "#ead7c3", roof: "#7a2e2a", w: 20, d: 16, h: 9, awning: "#7a2e2a" },
+  shop: { body: "#f0e6c8", roof: "#355e3b", w: 16, d: 12, h: 8, awning: "#355e3b" },
+  condo: { body: "#d7dde4", roof: "#2c3d4f", w: 24, d: 18, h: 16 },
+  hostel: { body: "#cfd8c8", roof: "#4a5c3a", w: 20, d: 14, h: 12 },
+  spa: { body: "#e4eef0", roof: "#5a7d86", w: 22, d: 16, h: 8 },
+  patrol: { body: "#dfe7ee", roof: "#c45c4a", w: 12, d: 10, h: 7 },
+  clinic: { body: "#f2f4f6", roof: "#c45c4a", w: 16, d: 12, h: 8 },
+  rental: { body: "#e6dcc8", roof: "#2f5f7a", w: 18, d: 13, h: 8 },
+  school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
+  cabinOffice: { body: "#efe4cc", roof: "#5a3a26", w: 16, d: 11, h: 8 },
+  // Quick bites
+  pizza: { body: "#f1dcc0", roof: "#9c3b2a", w: 14, d: 11, h: 7, awning: "#c8102e" },
+  burger: { body: "#f3e2b5", roof: "#3a3a3a", w: 15, d: 11, h: 7, awning: "#e8a33a" },
+  bakery: { body: "#f6ead8", roof: "#8a5a3a", w: 13, d: 10, h: 7, awning: "#d98aa0" },
+  noodle: { body: "#e9dccb", roof: "#2b2b2b", w: 14, d: 11, h: 7, awning: "#b3262e" },
+  waffle: { body: "#d8b98a", roof: "#7a4a2a", w: 8, d: 7, h: 5, awning: "#f2c14e" },
+  // Restaurants
+  fondue: { body: "#efe2c6", roof: "#6b2e24", w: 18, d: 13, h: 9, awning: "#c8102e" },
+  steakhouse: { body: "#cbb294", roof: "#3a2418", w: 22, d: 15, h: 9, awning: "#3a2418" },
+  sushi: { body: "#ece7df", roof: "#1f2a33", w: 16, d: 12, h: 8, awning: "#2c3e50" },
+  brewpub: { body: "#c9a77c", roof: "#4a3220", w: 22, d: 15, h: 10, awning: "#2f5f3a" },
+  summit: { body: "#e2ebf0", roof: "#36495a", w: 30, d: 20, h: 11 },
+  // Shops
+  skiShop: { body: "#e8eef3", roof: "#1f5f9a", w: 16, d: 12, h: 8, awning: "#1f5f9a" },
+  gifts: { body: "#f3e6d0", roof: "#8c3b5a", w: 13, d: 10, h: 7, awning: "#e07a5f" },
+  grocery: { body: "#e5ead9", roof: "#3f6b3a", w: 22, d: 14, h: 7, awning: "#5a9a4a" },
+  outfitter: { body: "#d9cdb5", roof: "#4d5a2e", w: 20, d: 14, h: 9, awning: "#c46a2a" },
+  chocolate: { body: "#e9d6c4", roof: "#4b2a1d", w: 13, d: 10, h: 7, awning: "#6b3a26" },
+  boutique: { body: "#f4f0ea", roof: "#222222", w: 15, d: 11, h: 8, awning: "#111111" },
+  // Hotels
+  motel: { body: "#e6d3b3", roof: "#6a4a3a", w: 34, d: 12, h: 7 },
+  bnb: { body: "#efe3cf", roof: "#5b6f3e", w: 16, d: 13, h: 11 },
+  inn: { body: "#dcc6a8", roof: "#5a2e22", w: 28, d: 18, h: 15 },
+  boutiqueHotel: { body: "#ecebe6", roof: "#2e3540", w: 24, d: 18, h: 19, awning: "#2e3540" },
+  grandHotel: { body: "#efe7d6", roof: "#2d4a3e", w: 48, d: 28, h: 32 },
+};
+
+/** Where a building's price tag floats. */
+function tagHeight(type: BuildingType): number {
+  if (type === "garage") return 26;
+  if (PARKING[type]) return 10;
+  if (type === "foodTruck") return 9;
+  const h = BUILDING_LOOK[type]?.h ?? 8;
+  return Math.max(14, h + 8);
+}
+
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
   if (PARKING[type]) return makeParkingMesh(type, ghost);
   if (type === "cabin") return makeLogCabin(ghost);
-  const palette: Record<string, { body: string; roof: string; w: number; d: number; h: number }> = {
-    lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
-    restroom: { body: "#d9d2c5", roof: "#4a5560", w: 10, d: 8, h: 7 },
-    coffee: { body: "#efe6d2", roof: "#6f4e37", w: 14, d: 11, h: 7 },
-    sandwich: { body: "#e7edd8", roof: "#355e3b", w: 14, d: 11, h: 7 },
-    shack: { body: "#c4a574", roof: "#6b3a2a", w: 8, d: 7, h: 5 },
-    cafeteria: { body: "#ebe3d4", roof: "#5a6b4a", w: 22, d: 16, h: 8 },
-    bar: { body: "#dcc8b0", roof: "#3d2a24", w: 18, d: 14, h: 9 },
-    hotel: { body: "#e8e0d4", roof: "#4a3a32", w: 34, d: 22, h: 22 },
-    restaurant: { body: "#ead7c3", roof: "#7a2e2a", w: 20, d: 16, h: 9 },
-    shop: { body: "#f0e6c8", roof: "#355e3b", w: 16, d: 12, h: 8 },
-    condo: { body: "#d7dde4", roof: "#2c3d4f", w: 24, d: 18, h: 16 },
-    hostel: { body: "#cfd8c8", roof: "#4a5c3a", w: 20, d: 14, h: 12 },
-    spa: { body: "#e4eef0", roof: "#5a7d86", w: 22, d: 16, h: 8 },
-    patrol: { body: "#dfe7ee", roof: "#c45c4a", w: 12, d: 10, h: 7 },
-    clinic: { body: "#f2f4f6", roof: "#c45c4a", w: 16, d: 12, h: 8 },
-    rental: { body: "#e6dcc8", roof: "#2f5f7a", w: 18, d: 13, h: 8 },
-    school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
-    cabinOffice: { body: "#efe4cc", roof: "#5a3a26", w: 16, d: 11, h: 8 },
-    heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
+  if (type === "foodTruck") return makeFoodTruck(ghost);
+  const p = BUILDING_LOOK[type]!;
+  const g = makeChalet(p, { ghost, tall: p.h > 14, door: true });
+  if (p.awning) g.add(makeAwning(p, ghost));
+  return g;
+}
+
+/** A striped canvas awning over the front door, so shopfronts read from the air. */
+function makeAwning(p: BuildingLook, ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const w = Math.min(p.w * 0.7, 12);
+  const depth = p.w < 10 ? 1.6 : 2.6;
+  const stripes = Math.max(4, Math.round(w / 1.2));
+  const sw = w / stripes;
+  const colour = std(p.awning!, { metalness: 0 });
+  const cream = std("#f4efe2", { metalness: 0 });
+  for (let i = 0; i < stripes; i++) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.18, depth), i % 2 ? cream : colour);
+    m.position.set(-w / 2 + sw * (i + 0.5), 0, depth / 2);
+    m.castShadow = !ghost;
+    g.add(m);
+  }
+  // Valance hanging off the front edge.
+  const valance = new THREE.Mesh(new THREE.BoxGeometry(w, 0.6, 0.12), colour);
+  valance.position.set(0, -0.3, depth);
+  g.add(valance);
+  g.rotation.x = 0.32;
+  const plinth = Math.min(2, p.h * 0.18);
+  g.position.set(0, plinth + (p.h < 6 ? 3 : 4.1), p.d / 2 + 0.1);
+  return g;
+}
+
+/** A street-food van: boxy body, cab, wheels, a lit serving hatch and a little awning. */
+function makeFoodTruck(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const add = (m: THREE.Mesh, x: number, y: number, z: number) => {
+    m.position.set(x, y, z);
+    m.castShadow = !ghost;
+    m.receiveShadow = true;
+    g.add(m);
+    return m;
   };
-  const p = palette[type];
-  return makeChalet(p, { ghost, tall: p.h > 14, door: true });
+  const paint = std("#e8b33c", { metalness: 0.2 });
+  add(new THREE.Mesh(new THREE.BoxGeometry(6.4, 3.2, 2.8), paint), -0.8, 2.4, 0);
+  add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.2, 2.7), paint), 3.5, 1.9, 0);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.1, 2.3), std("#2a3a48", { metalness: 0.5 })), 4.62, 2.4, 0);
+  add(new THREE.Mesh(new THREE.BoxGeometry(6.6, 0.25, 3), std("#f4efe2")), -0.8, 4.1, 0);
+  // Serving hatch, lit from inside, with a propped-up flap.
+  add(new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.3, 0.1), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.9 })), -1, 2.7, 1.42);
+  const flap = add(new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.12, 1.4), std("#c8102e", { metalness: 0 })), -1, 3.55, 2.05);
+  flap.rotation.x = -0.35;
+  add(new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.15, 0.6), std("#9aa1a8", { metalness: 0.5 })), -1, 2.05, 1.7);
+  const wheel = new THREE.CylinderGeometry(0.55, 0.55, 0.4, 14);
+  wheel.rotateX(Math.PI / 2);
+  const tyre = std("#1d1f22", { metalness: 0 });
+  for (const x of [-2.8, 3.4]) for (const z of [-1.35, 1.35]) add(new THREE.Mesh(wheel, tyre), x, 0.55, z);
+  // A couple of picnic tables out front.
+  const wood = std("#8a6a48", { metalness: 0 });
+  for (const x of [-3, 1.5]) {
+    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.15, 1), wood), x, 1, 5);
+    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 0.4), wood), x, 0.55, 4.1);
+    add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 0.4), wood), x, 0.55, 5.9);
+    add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 1, 0.8), wood), x, 0.5, 5);
+  }
+  g.userData = { kind: "building" };
+  return g;
 }
 
 /** Ticket booth, parking and the village boundary around the base. */

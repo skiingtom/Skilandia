@@ -206,6 +206,29 @@ for (const [type, dx, dy] of expansionSpots) {
   const r = g.click(BASE.x + dx, BASE.y + dy);
   ok(r === "ok", `${type} after first peak failed: ${g.toasts.at(-1)?.text}`);
 }
+// New food, restaurants, shops and hotels: find room for each one in the village.
+{
+  const place = (type: BuildingType): boolean => {
+    for (let r = 120; r <= 480; r += 30) {
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 16) {
+        const x = BASE.x + Math.cos(a) * r;
+        const y = BASE.y + Math.sin(a) * r;
+        if (g.canPlace(type, x, y) === null) {
+          g.setTool(type as never);
+          return g.click(x, y) === "ok";
+        }
+      }
+    }
+    return false;
+  };
+  for (const type of ["pizza", "burger", "bakery", "noodle", "foodTruck", "fondue", "brewpub", "sushi", "skiShop", "gifts", "grocery", "boutique", "motel", "bnb", "inn"] as BuildingType[]) {
+    ok(place(type), `${type} in the village failed: ${g.toasts.at(-1)?.text}`);
+  }
+  ok(g.canPlace("grandHotel", BASE.x, BASE.y)?.includes("peaks") === true, "the grand hotel should wait for a regional resort");
+  ok(g.canPlace("summit", BASE.x + 150, BASE.y)?.includes("peaks") === true, "the summit restaurant should wait for more peaks");
+  ok(g.canPlace("waffle", BASE.x + 3000, BASE.y - 3000)?.includes("beside a run") === true, "a waffle hut needs a run nearby");
+  ok(g.amenityScore() > 1.65, `new places should raise appeal past the old cap (${g.amenityScore().toFixed(2)})`);
+}
 g.hire("instructor");
 g.hire("instructor");
 ok(!!g.helipad(), "heli base not built");

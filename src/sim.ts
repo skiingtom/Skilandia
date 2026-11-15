@@ -8,7 +8,6 @@ import {
   BuildingType,
   COSTS,
   DIFF,
-  EXPANSION_BUILDINGS,
   FEATURE_SPEC,
   Feature,
   FOOD_BUILDINGS,
@@ -56,6 +55,11 @@ import {
   WORLD_H,
   WORLD_W,
   liftCost,
+  APPEAL,
+  BUILDING_BLURB,
+  SHOP_BUILDINGS,
+  TRAILSIDE,
+  unlockTier,
 } from "./types";
 
 void MAP_SCALE;
@@ -627,7 +631,9 @@ export class Game {
     // Ski-in / ski-out cabins: a little more appeal for each one, up to ten.
     n += Math.min(10, this.skiInCabins()) * 0.025;
     if (this.has("heli")) n += 0.15;
-    return Math.min(1.65, n);
+    // Pizzerias, steakhouses, boutiques, inns...: each kind on offer widens the appeal.
+    for (const [type, v] of Object.entries(APPEAL) as [BuildingType, number][]) if (this.has(type)) n += v;
+    return Math.min(2.1, n);
   }
 
   fairPrice(): number {
@@ -886,8 +892,14 @@ export class Game {
     }
     const build = tool as BuildingType | "select" | "cut" | "move";
     if (build === "move") return;
-    if (build !== "select" && build !== "cut" && EXPANSION_BUILDINGS.includes(build) && !this.expansionUnlocked()) {
-      this.toast("Hotels, spas, hostels, bars, shops, condos, patrol and parking garages unlock after your first peak.", true);
+    if (build !== "select" && build !== "cut" && this.tier() < unlockTier(build)) {
+      const need = unlockTier(build);
+      this.toast(
+        need <= 1
+          ? `${BUILDING_LABEL[build]}s unlock after your first peak.`
+          : `${BUILDING_LABEL[build]}s unlock once you're a ${TIERS[need].name.toLowerCase()} (${TIERS[need].peaksNeeded} peaks).`,
+        true,
+      );
       return;
     }
     if (build !== "select" && build !== "cut" && this.count(build) >= BUILDING_MAX[build]) {
@@ -1681,8 +1693,9 @@ export class Game {
     const moving = opts.ignoreId != null;
     const others = this.buildings.filter((b) => b.id !== opts.ignoreId);
     const cost = opts.cost ?? COSTS[type];
-    if (!moving && EXPANSION_BUILDINGS.includes(type) && !this.expansionUnlocked()) {
-      return "Conquer your first peak to unlock this.";
+    if (!moving && this.tier() < unlockTier(type)) {
+      const need = unlockTier(type);
+      return need <= 1 ? "Conquer your first peak to unlock this." : `Unlocks at ${TIERS[need].name.toLowerCase()} (${TIERS[need].peaksNeeded} peaks).`;
     }
     if (!moving && this.count(type) >= BUILDING_MAX[type]) return `No more ${BUILDING_LABEL[type].toLowerCase()}s on this hill.`;
     if (PARKING[type]) {
@@ -1702,13 +1715,15 @@ export class Game {
       return `Cabins are ski-in / ski-out: put it within ${CABIN_REACH} m of a run.`;
     }
     if (x < 12 || x > WORLD_W - 12 || y < 24 || y > WORLD_H - 12) return "That's off the property.";
-    const minGap = type === "shack" ? 22 : type === "cabin" ? 24 : type === "heli" ? 60 : 38;
+    const small = TRAILSIDE.includes(type);
+    if (type === "waffle" && !this.trails.some((t) => distToTrail(t, x, y) < 60)) return "Put the waffle hut beside a run.";
+    const minGap = small ? 22 : type === "cabin" ? 24 : type === "heli" ? 60 : type === "grandHotel" ? 56 : 38;
     if (others.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
-    if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
-    if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
+    if (!small && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
+    if (small && this.trails.some((t) => distToTrail(t, x, y) < 8)) return `Keep the ${BUILDING_LABEL[type].toLowerCase()} beside the run, not in the fall line.`;
     if (this.nearLift(x, y, 26)) return "Keep clear of the lift line.";
     if (isRock(x, y)) return "That's bare rock.";
-    if (this.nearRoad(x, y, type === "shack" ? 10 : 18)) return "Keep clear of the road.";
+    if (this.nearRoad(x, y, small ? 10 : 18)) return "Keep clear of the road.";
     if (this.money < cost) return `Need $${(cost - this.money).toLocaleString()} more.`;
     return null;
   }
@@ -1789,7 +1804,7 @@ export class Game {
     if (sel.kind === "building") {
       const b = this.buildings.find((x) => x.id === sel.id);
       if (!b) return { title: "Building", body: "" };
-      const extra: Record<BuildingType, string> = {
+      const extra: Partial<Record<BuildingType, string>> = {
         parkingSmall: "Room for 120 cars (300 skiers). Earns parking fees as it fills.",
         parkingLarge: "Room for 400 cars (1,000 skiers). Earns parking fees as it fills.",
         garage: "Five decks, 2,000 cars (5,000 skiers). Earns parking fees as it fills.",
@@ -1825,7 +1840,7 @@ export class Game {
       }
       return {
         title: BUILDING_LABEL[b.type],
-        body: `Earns $${INCOME_PER_MIN[b.type]}/min when the hill is busy. ${extra[b.type]} Moving it costs ${this.moveFee(b) ? `$${this.moveFee(b).toLocaleString()}` : "nothing"}.`,
+        body: `Earns $${INCOME_PER_MIN[b.type]}/min when the hill is busy. ${extra[b.type] ?? BUILDING_BLURB[b.type] ?? ""} Moving it costs ${this.moveFee(b) ? `$${this.moveFee(b).toLocaleString()}` : "nothing"}.`,
       };
     }
     if (sel.kind === "lift") {
@@ -2344,9 +2359,21 @@ export class Game {
 
 
   private nearestFood(x: number, y: number): Building | undefined {
-    const foods = this.buildings.filter((b) => FOOD_BUILDINGS.includes(b.type));
-    foods.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
-    return foods[0];
+    return this.nearestOf(FOOD_BUILDINGS, x, y);
+  }
+
+  private nearestOf(types: BuildingType[], x: number, y: number): Building | undefined {
+    let best: Building | undefined;
+    let bestD = Infinity;
+    for (const b of this.buildings) {
+      if (!types.includes(b.type)) continue;
+      const d = (b.x - x) ** 2 + (b.y - y) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    return best;
   }
 
   private ageToasts(dt: number): void {
@@ -2640,13 +2667,23 @@ export class Game {
           }
           s.mood -= 8;
         }
+        // Done for the day: some browse the shops on the way back to the car.
+        if (s.runsLeft <= 0 && s.mood >= 28 && Math.random() < 0.4) {
+          const shop = this.nearestOf(SHOP_BUILDINGS, s.x, s.y);
+          if (shop) {
+            s.state = "visit";
+            s.visitType = shop.type;
+            s.wait = 0;
+            return;
+          }
+        }
         if (s.runsLeft <= 0 || s.mood < 28) s.state = "leaving";
         else this.goToLift(s);
       }
       return;
     }
     if (s.state === "visit") {
-      const b = this.buildings.find((x) => x.type === s.visitType);
+      const b = s.visitType ? this.nearestOf([s.visitType], s.x, s.y) : undefined;
       if (!b) {
         this.goToLift(s);
         return;
@@ -2669,7 +2706,7 @@ export class Game {
               s.bubbleT = 2.4;
             }
           } else if (s.visitType === "restroom") s.needBath = 0.05;
-          else s.needFood = 0.08;
+          else if (FOOD_BUILDINGS.includes(s.visitType!)) s.needFood = 0.08;
           s.mood += 8;
           s.wait = 0;
           s.visitType = null;

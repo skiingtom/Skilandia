@@ -1,7 +1,9 @@
 import {
+  BUILDING_BLURB,
   BUILDING_LABEL,
   BuildingType,
-  EXPANSION_BUILDINGS,
+  TIERS,
+  unlockTier,
   FEATURE_SPEC,
   FEATURE_TYPES,
   FeatureType,
@@ -36,6 +38,9 @@ const ICONS = {
   base: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>'),
   food: svg('<path d="M5 9h11v5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3c0 1.5 1 1.5 1 3M12 3c0 1.5 1 1.5 1 3"/>'),
   park: svg('<path d="M2 19h20"/><path d="M4 19l9-6h3v6"/><path d="M16 13l3-3"/><circle cx="19.5" cy="6.5" r="1.6"/>'),
+  dining: svg('<path d="M6 3v7a2 2 0 0 0 4 0V3"/><path d="M8 10v11"/><path d="M17 3c-2 1.5-2.5 4-2.5 7h3V3z"/><path d="M17.5 10v11"/>'),
+  shops: svg('<path d="M5 8h14l-1 13H6z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>'),
+  hotels: svg('<path d="M3 20V7"/><path d="M3 15h18v5"/><path d="M3 12h5a2 2 0 0 1 2 2v1"/><path d="M10 11h8a3 3 0 0 1 3 3v1"/><circle cx="6" cy="9.5" r="1.5"/>'),
   resort: svg('<path d="M4 21V5l8-2v18"/><path d="M12 9h8v12"/><path d="M7 8h2M7 12h2M7 16h2M15 13h2M15 17h2"/><path d="M2 21h20"/>'),
 };
 
@@ -54,8 +59,15 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
   { id: "base", label: "Base", items: ["lodge", "restroom", "rental", "school", "clinic", "patrol"] },
-  { id: "food", label: "Food", items: ["shack", "coffee", "cafeteria", "sandwich", "bar", "restaurant"] },
-  { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "cabinOffice", "cabin", "heli"] },
+  {
+    id: "food",
+    label: "Food",
+    items: ["shack", "foodTruck", "waffle", "coffee", "bakery", "sandwich", "burger", "pizza", "noodle", "cafeteria"],
+  },
+  { id: "dining", label: "Dining", items: ["restaurant", "bar", "brewpub", "fondue", "sushi", "steakhouse", "summit"] },
+  { id: "shops", label: "Shops", items: ["gifts", "skiShop", "grocery", "shop", "chocolate", "outfitter", "boutique"] },
+  { id: "hotels", label: "Hotels", items: ["motel", "bnb", "hostel", "inn", "condo", "hotel", "boutiqueHotel", "grandHotel"] },
+  { id: "resort", label: "Resort", items: ["spa", "cabinOffice", "cabin", "heli"] },
   { id: "edit", label: "Edit", items: ["shape", "clearTrees", "plantTrees", "demolish"] },
 ];
 
@@ -84,7 +96,7 @@ function itemHtml(tool: Tool): string {
   const lot = PARKING[tool as BuildingType];
   if (lot) {
     const b = tool as BuildingType;
-    const exp = EXPANSION_BUILDINGS.includes(b) ? " expansion" : "";
+    const exp = unlockTier(b) > 0 ? " expansion" : "";
     return `<button type="button" class="tool item${exp}" data-tool="${b}">
       <b>${BUILDING_LABEL[b]}</b>
       <small id="cost-${b}"></small>
@@ -159,11 +171,14 @@ function itemHtml(tool: Tool): string {
       <em>${b === "cabin" ? "Needs the rental office. Goes on the hillside, right beside a run." : "Village. Unlocks ski-in / ski-out cabins to rent."}</em>
     </button>`;
   }
-  const exp = EXPANSION_BUILDINGS.includes(b) ? " expansion" : "";
-  return `<button type="button" class="tool item${exp}" data-tool="${b}">
+  const tier = unlockTier(b);
+  const lock = tier <= 1 ? "Unlocks after your first peak" : `Unlocks at ${TIERS[tier].name.toLowerCase()} (${TIERS[tier].peaksNeeded} peaks)`;
+  const blurb = BUILDING_BLURB[b];
+  return `<button type="button" class="tool item${tier ? " expansion" : ""}" data-tool="${b}">
       <b>${BUILDING_LABEL[b]}</b>
       <small id="cost-${b}"></small>
-      ${exp ? '<em class="lock">Unlocks after your first peak</em>' : ""}
+      ${blurb ? `<em>${blurb}</em>` : ""}
+      ${tier ? `<em class="lock">${lock}</em>` : ""}
     </button>`;
 }
 
@@ -175,7 +190,7 @@ export function buildDock(dock: HTMLElement, menus: HTMLElement): void {
   ).join("");
   menus.innerHTML = DOCK_GROUPS.filter((g) => g.items)
     .map(
-      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" || g.id === "edit" || g.id === "road" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
+      (g) => `<div class="dock-panel hidden${(g.items!.length > 6 || ["lifts", "trail", "park", "edit", "road"].includes(g.id)) ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
         ${g.items!.map(itemHtml).join("")}
       </div>`,
     )
