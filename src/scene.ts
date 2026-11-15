@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
+import { HEIGHT_CELL_M, elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
 import { PostFx, SkyUniforms, TerrainUniforms, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial } from "./look";
 import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
@@ -67,12 +67,30 @@ export function to3(x: number, y: number, lift = 0, mid: MountainId = 0): THREE.
 }
 
 /**
- * Height of the drawn terrain mesh (flat triangles between 28 m vertices),
- * which on rough ground can sit a few metres off the smooth heightfield.
+ * Fine relief on top of the heightmap, baked into mesh vertices. Kept small
+ * so gameplay objects stay seated, but dense enough that a subdivided mesh
+ * reads as real ground instead of flat 28 m facets.
+ */
+function meshRelief(x: number, y: number): number {
+  const m =
+    (noise2(x / 22, y / 19) - 0.5) * 3.6 +
+    (noise2(x / 9 + 4, y / 8) - 0.5) * 1.5 +
+    (noise2(x / 4.5 + 11, y / 4.2) - 0.5) * 0.55;
+  return m / VERTICAL_M;
+}
+
+/** Elevation used by the drawn mesh (heightfield + fine relief). */
+function meshSample(x: number, y: number, mid: MountainId): number {
+  return elevation(x, y, mid) + meshRelief(x, y);
+}
+
+/**
+ * Height of the drawn terrain mesh (flat triangles between TERRAIN_GRID
+ * vertices), which on rough ground can sit a few metres off the smooth heightfield.
  */
 function meshElevation(x: number, y: number, mid: MountainId): number {
-  const wx = Math.round(WORLD_W / 28);
-  const wy = Math.round(WORLD_H / 28);
+  const wx = Math.round(WORLD_W / TERRAIN_GRID);
+  const wy = Math.round(WORLD_H / TERRAIN_GRID);
   const cx = WORLD_W / wx;
   const cy = WORLD_H / wy;
   const u = Math.max(0, Math.min(wx - 1e-6, x / cx));
@@ -81,7 +99,7 @@ function meshElevation(x: number, y: number, mid: MountainId): number {
   const j = Math.floor(v);
   const fx = u - i;
   const fy = v - j;
-  const h = (a: number, b: number) => elevation(a * cx, b * cy, mid);
+  const h = (a: number, b: number) => meshSample(a * cx, b * cy, mid);
   if (fx + fy <= 1) {
     const ha = h(i, j);
     return ha + (h(i + 1, j) - ha) * fx + (h(i, j + 1) - ha) * fy;
@@ -180,7 +198,7 @@ export class World3D {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
     this.renderer.setSize(innerWidth, innerHeight, false);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -542,9 +560,9 @@ export class World3D {
   }
 
   /**
-   * The whole map as tiles of 64 x 64 heightmap cells (~1.8 km), so the
+   * The whole map as tiles of TERRAIN_TILE × TERRAIN_TILE mesh cells, so the
    * renderer skips tiles that are off screen (and outside the shadow box).
-   * Normals come from the heightmap itself so tile edges don't show seams.
+   * Normals come from the heightfield itself so tile edges don't show seams.
    */
   private makeTerrain(id: MountainId): THREE.Group {
     const wx = Math.round(WORLD_W / TERRAIN_GRID);
@@ -552,7 +570,7 @@ export class World3D {
     const group = new THREE.Group();
     group.userData = { kind: "terrain", mountain: id };
     const mat = makeTerrainMaterial(this.terrainUniforms);
-    const tile = 64;
+    const tile = TERRAIN_TILE;
     for (let tj = 0; tj < wy; tj += tile) {
       for (let ti = 0; ti < wx; ti += tile) {
         const cw = Math.min(tile, wx - ti);
@@ -600,14 +618,16 @@ export class World3D {
 
   /**
    * Redraw ground that was regraded: only the vertices in (and just around)
-   * the changed cells, since normals and colours depend on their neighbours.
+   * the changed heightmap cells, since normals and colours depend on their neighbours.
+   * `box` is in heightmap cell indices; the mesh may be denser than the heightmap.
    */
   private refreshTerrain(box: { i0: number; i1: number; j0: number; j1: number }): void {
     if (!this.terrain) return;
-    const i0 = box.i0 - 2;
-    const i1 = box.i1 + 2;
-    const j0 = box.j0 - 2;
-    const j1 = box.j1 + 2;
+    const scale = HEIGHT_CELL_M / TERRAIN_GRID;
+    const i0 = Math.floor(box.i0 * scale) - 2;
+    const i1 = Math.ceil(box.i1 * scale) + 2;
+    const j0 = Math.floor(box.j0 * scale) - 2;
+    const j1 = Math.ceil(box.j1 * scale) + 2;
     for (const mesh of this.terrain.children) {
       const t = mesh.userData.tile as { ti: number; tj: number; cw: number; ch: number; wx: number; wy: number } | undefined;
       if (!t || !(mesh instanceof THREE.Mesh)) continue;
@@ -641,11 +661,12 @@ export class World3D {
         this.redrapeBox = null;
         this.stamp = "";
         // Roads are long (the highway is 25 km): only re-drape them when the edit reached one.
+        // Dirty boxes are heightmap cells (HEIGHT_CELL_M), not mesh vertices.
         const pad = 60;
-        const x0 = b.i0 * TERRAIN_GRID - pad;
-        const x1 = b.i1 * TERRAIN_GRID + pad;
-        const y0 = b.j0 * TERRAIN_GRID - pad;
-        const y1 = b.j1 * TERRAIN_GRID + pad;
+        const x0 = b.i0 * HEIGHT_CELL_M - pad;
+        const x1 = b.i1 * HEIGHT_CELL_M + pad;
+        const y0 = b.j0 * HEIGHT_CELL_M - pad;
+        const y1 = b.j1 * HEIGHT_CELL_M + pad;
         if (game.roads.some((r) => r.points.some((p) => p.x > x0 && p.x < x1 && p.y > y0 && p.y < y1)) || game.nearRoad((x0 + x1) / 2, (y0 + y1) / 2, Math.max(x1 - x0, y1 - y0) / 2)) {
           this.roadStamp = -1;
         }
@@ -1304,7 +1325,7 @@ function buildRibbon(
     const a = points[i - 1];
     const b = points[i];
     const len = Math.hypot(b.x - a.x, b.y - a.y);
-    const steps = Math.max(1, Math.ceil(len / 3));
+    const steps = Math.max(1, Math.ceil(len / 1.5));
     for (let k = i === 1 ? 0 : 1; k <= steps; k++) {
       const t = k / steps;
       samples.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, seg: i - 1, along: along + len * t });
@@ -1394,7 +1415,7 @@ function makeTrailRibbon(t: Trail, glow: boolean, mid: MountainId): THREE.Mesh {
 function makeMoguls(t: Trail, mid: MountainId, width: number, samples: { x: number; y: number; along: number }[]): THREE.InstancedMesh {
   const double = t.difficulty >= 2;
   const spacing = double ? 4.2 : 5.5;
-  const geo = new THREE.SphereGeometry(1, 9, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+  const geo = new THREE.SphereGeometry(1, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2);
   const mat = new THREE.MeshStandardMaterial({ color: "#f3f6fa", roughness: 0.85 });
   const max = Math.ceil(t.length / spacing) * 3 + 3;
   const inst = new THREE.InstancedMesh(geo, mat, max);
@@ -1487,7 +1508,7 @@ function makeTrailSign(name: string, diff: Difficulty): THREE.Sprite {
 
 /** Rock curtain hanging off the terrain edges so the hill doesn't look like a floating sheet. */
 function makeSkirt(id: MountainId): THREE.Mesh {
-  const steps = 96;
+  const steps = 220;
   const ring: Vec2[] = [];
   for (let i = 0; i <= steps; i++) ring.push({ x: (i / steps) * WORLD_W, y: 0 });
   for (let i = 1; i <= steps; i++) ring.push({ x: WORLD_W, y: (i / steps) * WORLD_H });
@@ -1519,13 +1540,13 @@ function makeBackdrop(id: MountainId): THREE.Group {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
   const snow = new THREE.Color("#eef3f8");
   const rockC = new THREE.Color("#7d8794");
-  for (let i = 0; i < 26; i++) {
-    const a = (i / 26) * Math.PI * 2 + noise2(i * 1.7 + id * 31, 4) * 0.2;
+  for (let i = 0; i < 34; i++) {
+    const a = (i / 34) * Math.PI * 2 + noise2(i * 1.7 + id * 31, 4) * 0.2;
     const r = 30000 + noise2(i * 0.9 + id * 17, 7) * 9000;
     const x = Math.cos(a) * r * 1.1;
     const z = Math.sin(a) * r;
     const height = 2200 + noise2(i * 2.3 + id * 13, 11) * 2600;
-    const geo = new THREE.ConeGeometry(height * 1.25, height, 7, 3);
+    const geo = new THREE.ConeGeometry(height * 1.25, height, 18, 7);
     const p = geo.getAttribute("position") as THREE.BufferAttribute;
     const colors: number[] = [];
     for (let v = 0; v < p.count; v++) {
@@ -1670,7 +1691,7 @@ const MAX_SKIERS_DRAWN = 20000;
 function makeCrowd(max: number): { group: THREE.Group; body: THREE.InstancedMesh; head: THREE.InstancedMesh; skis: THREE.InstancedMesh } {
   const group = new THREE.Group();
   const body = new THREE.InstancedMesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
-  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.55, 6, 5), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }), max);
+  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.55, 10, 8), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }), max);
   const skiGeo = mergeGeometries([
     new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(-0.4, 0.2, 0.2),
     new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(0.4, 0.2, 0.2),
@@ -1796,7 +1817,7 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
     const h = tops[i] - g.y;
     const station = i === 0 || i === ts.length - 1;
     if (station && lift.type !== "tbar") continue;
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 7), steel);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 12), steel);
     pole.position.copy(g).setY(g.y + h / 2);
     pole.castShadow = true;
     group.add(pole);
@@ -1985,8 +2006,8 @@ function makeCabin(color: string): THREE.Group {
 
 /** Coarse version of a mountain's terrain, used only for mouse picking. */
 function makeProxyGeometry(id: MountainId): THREE.BufferGeometry {
-  const wx = 280;
-  const wy = 166;
+  const wx = 500;
+  const wy = 297;
   const o = MOUNT_OFF[id];
   const pos: number[] = [];
   const idx: number[] = [];
@@ -2167,7 +2188,7 @@ function makeBoundaryPoles(mid: MountainId, width: number, samples: { x: number;
 /** Concrete pad with a painted H, a windsock and a small hangar. */
 function makeHelipad(ghost: boolean): THREE.Group {
   const g = new THREE.Group();
-  const pad = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 0.6, 28), std("#8e959c", { metalness: 0 }));
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 0.6, 48), std("#8e959c", { metalness: 0 }));
   pad.position.y = 0.3;
   pad.receiveShadow = true;
   g.add(pad);
@@ -2188,7 +2209,7 @@ function makeHelipad(ghost: boolean): THREE.Group {
   hangar.position.set(26, 4, 0);
   hangar.castShadow = !ghost;
   g.add(hangar);
-  const roof = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 14, 16, 1, false, 0, Math.PI), std("#3a434d", { side: THREE.DoubleSide }));
+  const roof = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 14, 28, 1, false, 0, Math.PI), std("#3a434d", { side: THREE.DoubleSide }));
   roof.rotation.z = Math.PI / 2;
   roof.position.set(26, 8, 0);
   g.add(roof);
@@ -2204,14 +2225,14 @@ function makeHelipad(ghost: boolean): THREE.Group {
 
 function makeHelicopter(): THREE.Group {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.SphereGeometry(2.6, 14, 10), std("#c8332b"));
+  const body = new THREE.Mesh(new THREE.SphereGeometry(2.6, 24, 16), std("#c8332b"));
   body.scale.set(1, 0.85, 1.5);
   body.position.y = 2.6;
   body.castShadow = true;
-  const glass = new THREE.Mesh(new THREE.SphereGeometry(1.9, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), std("#2b4d6b", { roughness: 0.1, metalness: 0.5 }));
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(1.9, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2), std("#2b4d6b", { roughness: 0.1, metalness: 0.5 }));
   glass.rotation.x = Math.PI / 2.4;
   glass.position.set(0, 3, 2.4);
-  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 7, 8), std("#c8332b"));
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 7, 14), std("#c8332b"));
   boom.rotation.x = Math.PI / 2;
   boom.position.set(0, 3.2, -6.5);
   const fin = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.2, 1.2), std("#e6e9ec"));
@@ -2424,9 +2445,19 @@ function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
 
 const BOULDERS_DRAWN = 16000;
 
-/** Faceted rocks: a low-poly dodecahedron, flat shaded, coloured per instance. */
+/** Faceted rocks: a subdivided icosahedron, flat shaded, coloured per instance. */
 function makeBoulders(max: number): THREE.InstancedMesh {
-  const geo = new THREE.DodecahedronGeometry(1, 0);
+  const geo = new THREE.IcosahedronGeometry(1, 2);
+  // Break the regular facets so each boulder reads as a chunk of mountain.
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const n = 0.82 + noise2(x * 3.1 + i * 0.17, z * 2.7) * 0.38;
+    pos.setXYZ(i, x * n, y * (0.7 + noise2(y * 4.2, x * 2.1) * 0.55), z * n);
+  }
+  geo.computeVertexNormals();
   const mesh = new THREE.InstancedMesh(
     geo,
     new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.95, flatShading: true }),
@@ -2580,8 +2611,13 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   return g;
 }
 
-/** Terrain mesh spacing: one vertex per heightmap cell. */
-const TERRAIN_GRID = 28;
+/**
+ * Terrain mesh spacing in metres. Finer than the 28 m heightmap so ridges
+ * and the fine relief read as real geometry (~4× the triangles).
+ */
+const TERRAIN_GRID = 14;
+/** Mesh cells per tile; sized so draw-call count stays close to the old 28 m grid. */
+const TERRAIN_TILE = 128;
 const T_GROOMED = new THREE.Color("#edf2f7");
 const T_PACKED = new THREE.Color("#dbe4ee");
 const T_WIND = new THREE.Color("#c3cfdc");
@@ -2613,13 +2649,13 @@ function shadeTerrainVertex(
   const c = T_TMP;
   const x = (i / wx) * WORLD_W;
   const y = (j / wy) * WORLD_H;
-  const e = elevation(x, y, id);
+  const e = meshSample(x, y, id);
   const g = gradeAt(x, y, id);
   pos[q * 3] = x - WORLD_W / 2 + o.x;
   pos[q * 3 + 1] = e * hScale;
   pos[q * 3 + 2] = y - WORLD_H / 2 + o.z;
-  const hx = (elevation(x + cell, y, id) - elevation(x - cell, y, id)) * hScale;
-  const hz = (elevation(x, y + cell, id) - elevation(x, y - cell, id)) * hScale;
+  const hx = (meshSample(x + cell, y, id) - meshSample(x - cell, y, id)) * hScale;
+  const hz = (meshSample(x, y + cell, id) - meshSample(x, y - cell, id)) * hScale;
   const nl = Math.hypot(hx, 2 * cell, hz);
   nor[q * 3] = -hx / nl;
   nor[q * 3 + 1] = (2 * cell) / nl;

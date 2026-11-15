@@ -58,8 +58,8 @@ function profile(pts: [number, number][], width: number, bevel: number, smooth =
     bevelEnabled: bevel > 0,
     bevelThickness: bevel,
     bevelSize: bevel * 0.8,
-    bevelSegments: smooth ? 3 : 1,
-    curveSegments: 2,
+    bevelSegments: smooth ? 6 : 2,
+    curveSegments: 4,
   });
   g.translate(0, 0, -inner / 2);
   // Shape x (length) -> world z; extrusion z (width) -> world x.
@@ -80,7 +80,7 @@ function taper(g: THREE.BufferGeometry, y0: number, y1: number, amount: number):
 }
 
 /** A smooth curve through control points, sampled to a polyline. */
-function curve(pts: [number, number][], n = 8): [number, number][] {
+function curve(pts: [number, number][], n = 14): [number, number][] {
   const c = new THREE.SplineCurve(pts.map(([x, y]) => new THREE.Vector2(x, y)));
   return c.getPoints(n * (pts.length - 1)).map((p) => [p.x, p.y] as [number, number]);
 }
@@ -89,11 +89,11 @@ function wheels(axles: number[], track: number, r: number, w: number): THREE.Buf
   const out: THREE.BufferGeometry[] = [];
   for (const z of axles) {
     for (const side of [-1, 1]) {
-      const tyre = new THREE.CylinderGeometry(r, r, w, 14);
+      const tyre = new THREE.CylinderGeometry(r, r, w, 24);
       tyre.rotateZ(Math.PI / 2);
       tyre.translate((side * track) / 2, r, z);
       out.push(colorize(tyre, TYRE));
-      const rim = new THREE.CylinderGeometry(r * 0.66, r * 0.66, w + 0.04, 7);
+      const rim = new THREE.CylinderGeometry(r * 0.66, r * 0.66, w + 0.04, 14);
       rim.rotateZ(Math.PI / 2);
       rim.translate((side * track) / 2, r, z);
       out.push(colorize(rim, RIM));

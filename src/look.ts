@@ -100,7 +100,7 @@ export function makeSkyDome(): { mesh: THREE.Mesh; uniforms: SkyUniforms } {
       }
     `,
   });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), mat);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 72, 36), mat);
   mesh.scale.setScalar(80000);
   mesh.frustumCulled = false;
   mesh.renderOrder = -10;
@@ -218,10 +218,11 @@ export function makeTerrainMaterial(uniforms: TerrainUniforms): THREE.MeshStanda
         float lkDist;
         float lkHeight(vec2 p) {
           // Big soft drifts, smaller lumps, and fine wind ripples across the slope.
-          float h = lkFbm(p * 0.012) * 2.2;
-          h += lkFbm(p * 0.07 + 3.1) * 0.9;
+          float h = lkFbm(p * 0.012) * 2.6;
+          h += lkFbm(p * 0.07 + 3.1) * 1.15;
+          h += lkFbm(p * 0.22 + 8.4) * 0.35;
           // Wind ripples only close up, where they can't alias into stripes.
-          h += sin(p.x * 0.55 + p.y * 0.21 + lkNoise(p * 0.05) * 6.0) * 0.08 * (1.0 - smoothstep(80.0, 250.0, lkDist));
+          h += sin(p.x * 0.55 + p.y * 0.21 + lkNoise(p * 0.05) * 6.0) * 0.12 * (1.0 - smoothstep(80.0, 250.0, lkDist));
           return h;
         }`,
       )
@@ -255,7 +256,7 @@ export function makeTerrainMaterial(uniforms: TerrainUniforms): THREE.MeshStanda
         `#include <normal_fragment_maps>
         {
           // Bump from the procedural height, faded out with distance so it never shimmers.
-          float amp = (1.0 - smoothstep(1500.0, 6000.0, lkDist)) * (0.6 + 0.4 * uDetail);
+          float amp = (1.0 - smoothstep(1200.0, 5500.0, lkDist)) * (0.85 + 0.45 * uDetail);
           if (amp > 0.001) {
             float hh = lkHeight(wp) * amp;
             vec3 dpx = dFdx(-vViewPosition);
@@ -306,13 +307,13 @@ function hash1(n: number): number {
  */
 export function makeSpruceGeometry(detailed = true): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  const tiers = detailed ? 6 : 4;
+  const tiers = detailed ? 9 : 5;
   for (let k = 0; k < tiers; k++) {
     const t = k / (tiers - 1);
     const r = THREE.MathUtils.lerp(4.6, 1.3, t);
     const h = THREE.MathUtils.lerp(6, 3.6, t);
     const y = THREE.MathUtils.lerp(-4.2, 6.6, t);
-    const cone = new THREE.ConeGeometry(r, h, detailed ? 9 : 6, detailed ? 2 : 1, true).toNonIndexed();
+    const cone = new THREE.ConeGeometry(r, h, detailed ? 16 : 8, detailed ? 3 : 2, true).toNonIndexed();
     cone.rotateY(k * 0.7);
     const pos = cone.getAttribute("position") as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
@@ -367,11 +368,11 @@ export function makeSpruceGeometry(detailed = true): THREE.BufferGeometry {
     parts.push(cone);
   }
   // A small snowy tip.
-  const tip = new THREE.ConeGeometry(0.5, 2.6, 6).toNonIndexed();
+  const tip = new THREE.ConeGeometry(0.5, 2.6, detailed ? 12 : 8).toNonIndexed();
   tip.translate(0, 9.6, 0);
   paint(tip, NEEDLE);
   parts.push(tip);
-  const trunk = new THREE.CylinderGeometry(0.4, 0.75, 6, detailed ? 6 : 4, 1, !detailed).toNonIndexed();
+  const trunk = new THREE.CylinderGeometry(0.4, 0.75, 6, detailed ? 12 : 6, 1, !detailed).toNonIndexed();
   trunk.translate(0, -6.5, 0);
   paint(trunk, BARK);
   parts.push(trunk);
@@ -622,9 +623,9 @@ export function makeLogCabin(ghost: boolean): THREE.Group {
   const foot = add(new THREE.Mesh(new THREE.BoxGeometry(W + 0.6, 0.9, D + 0.6), stone));
   foot.position.y = 0.15;
   // Log courses, crossing at the corners with the ends sticking out.
-  const logX = new THREE.CylinderGeometry(r, r, W + 1, 7);
+  const logX = new THREE.CylinderGeometry(r, r, W + 1, 14);
   logX.rotateZ(Math.PI / 2);
-  const logZ = new THREE.CylinderGeometry(r, r, D + 1, 7);
+  const logZ = new THREE.CylinderGeometry(r, r, D + 1, 14);
   logZ.rotateX(Math.PI / 2);
   const courses = Math.round(wallH / (r * 2));
   for (let c = 0; c < courses; c++) {
@@ -677,7 +678,7 @@ export function makeLogCabin(ghost: boolean): THREE.Group {
   const deck = add(new THREE.Mesh(new THREE.BoxGeometry(W + 0.6, 0.3, 2.6), mat("#8a6440")));
   deck.position.set(0, 0.6, D / 2 + 1.4);
   for (const sx of [-1, 1]) {
-    const post = add(new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, wallH, 6), logMat));
+    const post = add(new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, wallH, 10), logMat));
     post.position.set(sx * (W / 2 - 0.2), 0.6 + wallH / 2, D / 2 + 2.5);
   }
   // Stone chimney poking through the roof.
