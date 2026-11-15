@@ -163,6 +163,24 @@
           </div>
         </div>
 
+        <div id="shape-banner" class="cut-banner shape-banner hidden">
+          <p id="shape-text">Shape the ground: hold the left mouse button and drag. Building pads stay put.</p>
+          <div class="seg" role="group" aria-label="Brush">
+            <button type="button" class="ghost shape-mode on" data-mode="raise" title="Build the ground up">Raise</button>
+            <button type="button" class="ghost shape-mode" data-mode="lower" title="Dig the ground down">Lower</button>
+            <button type="button" class="ghost shape-mode" data-mode="flatten" title="Level to the height where the stroke starts">Flatten</button>
+            <button type="button" class="ghost shape-mode" data-mode="smooth" title="Round off bumps and edges">Smooth</button>
+          </div>
+          <div class="seg" role="group" aria-label="Brush size">
+            <button type="button" class="ghost shape-size" data-size="30" title="30 m brush">S</button>
+            <button type="button" class="ghost shape-size on" data-size="60" title="60 m brush">M</button>
+            <button type="button" class="ghost shape-size" data-size="110" title="110 m brush">L</button>
+          </div>
+          <div class="cut-actions">
+            <button type="button" id="btn-shape-done" class="ghost">Done</button>
+          </div>
+        </div>
+
         <div id="place-hint" class="place-hint hidden"></div>
 
         <div id="toasts" class="toasts"></div>

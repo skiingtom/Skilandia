@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt } from "./height";
+import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { Game } from "./sim";
-import { BRUSH_R, SUMMITS, classifyGrade, forestDensity } from "./sim";
+import { SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
   BuildingType,
   DIFF,
@@ -122,6 +122,9 @@ export class World3D {
   private boulders = makeBoulders(BOULDERS_DRAWN);
   private brushRing = makeBrushRing();
   private lastTreeLayout = 0;
+  private terrainSeen = 0;
+  private redrapeAt = 0;
+  private redrapeBox: { i0: number; i1: number; j0: number; j1: number } | null = null;
   private helicopter = makeHelicopter();
   private rotorSpin = 0;
   private mid: MountainId = 0;
@@ -429,6 +432,7 @@ export class World3D {
     // Steepness tint is always on while drawing a run or placing a surface lift.
     const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
+    this.syncTerrain(game);
     this.syncStatic(game);
     this.syncRoads(game);
     this.syncBrush(game);
@@ -517,65 +521,8 @@ export class World3D {
    * Normals come from the heightmap itself so tile edges don't show seams.
    */
   private makeTerrain(id: MountainId): THREE.Group {
-    const cell = 28;
-    const wx = Math.round(WORLD_W / cell);
-    const wy = Math.round(WORLD_H / cell);
-    const o = MOUNT_OFF[id];
-    const hScale = TERRAIN_H[id];
-    const n = (wx + 1) * (wy + 1);
-    const pos = new Float32Array(n * 3);
-    const nor = new Float32Array(n * 3);
-    const natural = new Float32Array(n * 3);
-    const overlay = new Float32Array(n * 3);
-    const c = new THREE.Color();
-    const groomed = new THREE.Color("#edf2f7");
-    const packed = new THREE.Color("#dbe4ee");
-    const wind = new THREE.Color("#c3cfdc");
-    const rock = new THREE.Color("#5f5b58");
-    const rockDark = new THREE.Color("#433f3d");
-    const forest = new THREE.Color("#3f5f4c");
-    let k = 0;
-    for (let j = 0; j <= wy; j++) {
-      for (let i = 0; i <= wx; i++, k++) {
-        const x = (i / wx) * WORLD_W;
-        const y = (j / wy) * WORLD_H;
-        const e = elevation(x, y, id);
-        const g = gradeAt(x, y, id);
-        pos[k * 3] = x - WORLD_W / 2 + o.x;
-        pos[k * 3 + 1] = e * hScale;
-        pos[k * 3 + 2] = y - WORLD_H / 2 + o.z;
-        const hx = (elevation(x + cell, y, id) - elevation(x - cell, y, id)) * hScale;
-        const hz = (elevation(x, y + cell, id) - elevation(x, y - cell, id)) * hScale;
-        const nl = Math.hypot(hx, 2 * cell, hz);
-        nor[k * 3] = -hx / nl;
-        nor[k * 3 + 1] = (2 * cell) / nl;
-        nor[k * 3 + 2] = -hz / nl;
-
-        // Natural look: the steeper it gets, the more wind-blown, then rocky.
-        const grain = noise2(x * 0.06, y * 0.06);
-        const streak = noise2(x * 0.02, y * 0.004);
-        if (g < 0.25) c.copy(groomed);
-        else if (g < 0.45) c.copy(groomed).lerp(packed, (g - 0.25) / 0.2);
-        else c.copy(packed).lerp(wind, Math.min(1, (g - 0.45) / 0.25));
-        const rockAmt = Math.max(smooth(0.62, 0.98, g + (streak - 0.5) * 0.35), smooth(0.3, 0.7, rockAt(x, y)) * 0.95);
-        if (rockAmt > 0) c.lerp(streak > 0.55 ? rockDark : rock, rockAmt * 0.92);
-        // Woods read as a dark tint from far away; real trees are drawn near the camera.
-        const woods = smooth(0.3, 0.6, forestDensity(x, y)) * (1 - rockAmt);
-        if (woods > 0) c.lerp(forest, woods * 0.55);
-        const shade = (grain - 0.5) * 0.05;
-        natural[k * 3] = c.r + shade;
-        natural[k * 3 + 1] = c.g + shade;
-        natural[k * 3 + 2] = c.b + shade;
-
-        // Overlay: same bands the trail classifier uses.
-        const band: Difficulty = classifyGrade(g * 100, 100);
-        c.copy(BAND_COLORS[band]).lerp(groomed, 0.18);
-        overlay[k * 3] = c.r;
-        overlay[k * 3 + 1] = c.g;
-        overlay[k * 3 + 2] = c.b;
-      }
-    }
-
+    const wx = Math.round(WORLD_W / TERRAIN_GRID);
+    const wy = Math.round(WORLD_H / TERRAIN_GRID);
     const group = new THREE.Group();
     group.userData = { kind: "terrain", mountain: id };
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 });
@@ -591,15 +538,7 @@ export class World3D {
         const tov = new Float32Array(m * 3);
         let q = 0;
         for (let j = 0; j <= ch; j++) {
-          for (let i = 0; i <= cw; i++, q++) {
-            const src = ((tj + j) * (wx + 1) + (ti + i)) * 3;
-            for (let d = 0; d < 3; d++) {
-              tp[q * 3 + d] = pos[src + d];
-              tn[q * 3 + d] = nor[src + d];
-              tnat[q * 3 + d] = natural[src + d];
-              tov[q * 3 + d] = overlay[src + d];
-            }
-          }
+          for (let i = 0; i <= cw; i++, q++) shadeTerrainVertex(ti + i, tj + j, wx, wy, id, tp, tn, tnat, tov, q);
         }
         const idx: number[] = [];
         for (let j = 0; j < ch; j++) {
@@ -620,7 +559,7 @@ export class World3D {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.receiveShadow = true;
         mesh.castShadow = true;
-        mesh.userData = { kind: "terrain", mountain: id };
+        mesh.userData = { kind: "terrain", mountain: id, tile: { ti, tj, cw, ch, wx, wy } };
         group.add(mesh);
       }
     }
@@ -631,6 +570,70 @@ export class World3D {
     this.pickProxy = proxy;
     this.scene.add(proxy);
     return group;
+  }
+
+  /**
+   * Redraw ground that was regraded: only the vertices in (and just around)
+   * the changed cells, since normals and colours depend on their neighbours.
+   */
+  private refreshTerrain(box: { i0: number; i1: number; j0: number; j1: number }): void {
+    if (!this.terrain) return;
+    const i0 = box.i0 - 2;
+    const i1 = box.i1 + 2;
+    const j0 = box.j0 - 2;
+    const j1 = box.j1 + 2;
+    for (const mesh of this.terrain.children) {
+      const t = mesh.userData.tile as { ti: number; tj: number; cw: number; ch: number; wx: number; wy: number } | undefined;
+      if (!t || !(mesh instanceof THREE.Mesh)) continue;
+      if (t.ti > i1 || t.ti + t.cw < i0 || t.tj > j1 || t.tj + t.ch < j0) continue;
+      const geo = mesh.geometry;
+      const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+      const nor = geo.getAttribute("normal") as THREE.BufferAttribute;
+      const nat = geo.userData.natural as THREE.BufferAttribute;
+      const ov = geo.userData.overlay as THREE.BufferAttribute;
+      for (let j = Math.max(t.tj, j0); j <= Math.min(t.tj + t.ch, j1); j++) {
+        for (let i = Math.max(t.ti, i0); i <= Math.min(t.ti + t.cw, i1); i++) {
+          const q = (j - t.tj) * (t.cw + 1) + (i - t.ti);
+          shadeTerrainVertex(i, j, t.wx, t.wy, this.mid, pos.array as Float32Array, nor.array as Float32Array, nat.array as Float32Array, ov.array as Float32Array, q);
+        }
+      }
+      pos.needsUpdate = true;
+      nor.needsUpdate = true;
+      nat.needsUpdate = true;
+      ov.needsUpdate = true;
+      geo.computeBoundingSphere();
+    }
+  }
+
+  /** Pick up ground edits: redraw the terrain now, and re-drape runs, roads and buildings a few times a second. */
+  private syncTerrain(game: Game): void {
+    const v = terrainVersion();
+    if (v === this.terrainSeen) {
+      if (this.redrapeAt && performance.now() > this.redrapeAt && this.redrapeBox) {
+        const b = this.redrapeBox;
+        this.redrapeAt = 0;
+        this.redrapeBox = null;
+        this.stamp = "";
+        // Roads are long (the highway is 25 km): only re-drape them when the edit reached one.
+        const pad = 60;
+        const x0 = b.i0 * TERRAIN_GRID - pad;
+        const x1 = b.i1 * TERRAIN_GRID + pad;
+        const y0 = b.j0 * TERRAIN_GRID - pad;
+        const y1 = b.j1 * TERRAIN_GRID + pad;
+        if (game.roads.some((r) => r.points.some((p) => p.x > x0 && p.x < x1 && p.y > y0 && p.y < y1)) || game.nearRoad((x0 + x1) / 2, (y0 + y1) / 2, Math.max(x1 - x0, y1 - y0) / 2)) {
+          this.roadStamp = -1;
+        }
+      }
+      return;
+    }
+    this.terrainSeen = v;
+    const box = takeTerrainDirty();
+    if (box) {
+      this.refreshTerrain(box);
+      const r = this.redrapeBox;
+      this.redrapeBox = r ? { i0: Math.min(r.i0, box.i0), i1: Math.max(r.i1, box.i1), j0: Math.min(r.j0, box.j0), j1: Math.max(r.j1, box.j1) } : box;
+    }
+    if (!this.redrapeAt) this.redrapeAt = performance.now() + 250;
   }
 
   private makeEmptyTrees(): THREE.InstancedMesh {
@@ -925,13 +928,14 @@ export class World3D {
 
   /** The tree brush outline, draped on the ground under the pointer. */
   private syncBrush(game: Game): void {
-    const h = game.tool === "clearTrees" ? game.brushHover : null;
+    const h = game.tool === "clearTrees" || game.tool === "shape" ? game.brushHover : null;
     this.brushRing.visible = !!h;
     if (!h) return;
     const pos = this.brushRing.geometry.getAttribute("position") as THREE.BufferAttribute;
     for (let i = 0; i < pos.count; i++) {
       const a = (i / pos.count) * Math.PI * 2;
-      const p = onGround(h.x + Math.cos(a) * BRUSH_R, h.y + Math.sin(a) * BRUSH_R, 1.5, this.mid);
+      const r = game.brushRadius();
+      const p = onGround(h.x + Math.cos(a) * r, h.y + Math.sin(a) * r, 1.5, this.mid);
       pos.setXYZ(i, p.x, p.y, p.z);
     }
     pos.needsUpdate = true;
@@ -2565,4 +2569,73 @@ function makeParkingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   }
   g.userData = { kind: "building" };
   return g;
+}
+
+/** Terrain mesh spacing: one vertex per heightmap cell. */
+const TERRAIN_GRID = 28;
+const T_GROOMED = new THREE.Color("#edf2f7");
+const T_PACKED = new THREE.Color("#dbe4ee");
+const T_WIND = new THREE.Color("#c3cfdc");
+const T_ROCK = new THREE.Color("#5f5b58");
+const T_ROCK_DARK = new THREE.Color("#433f3d");
+const T_FOREST = new THREE.Color("#3f5f4c");
+const T_TMP = new THREE.Color();
+
+/**
+ * One terrain vertex: position, normal (from the heightfield, so tiles don't
+ * seam), the natural colour (snow, wind crust, rock, woods tint) and the
+ * steepness overlay colour, written at index q of the given arrays.
+ */
+function shadeTerrainVertex(
+  i: number,
+  j: number,
+  wx: number,
+  wy: number,
+  id: MountainId,
+  pos: Float32Array,
+  nor: Float32Array,
+  natural: Float32Array,
+  overlay: Float32Array,
+  q: number,
+): void {
+  const cell = TERRAIN_GRID;
+  const o = MOUNT_OFF[id];
+  const hScale = TERRAIN_H[id];
+  const c = T_TMP;
+  const x = (i / wx) * WORLD_W;
+  const y = (j / wy) * WORLD_H;
+  const e = elevation(x, y, id);
+  const g = gradeAt(x, y, id);
+  pos[q * 3] = x - WORLD_W / 2 + o.x;
+  pos[q * 3 + 1] = e * hScale;
+  pos[q * 3 + 2] = y - WORLD_H / 2 + o.z;
+  const hx = (elevation(x + cell, y, id) - elevation(x - cell, y, id)) * hScale;
+  const hz = (elevation(x, y + cell, id) - elevation(x, y - cell, id)) * hScale;
+  const nl = Math.hypot(hx, 2 * cell, hz);
+  nor[q * 3] = -hx / nl;
+  nor[q * 3 + 1] = (2 * cell) / nl;
+  nor[q * 3 + 2] = -hz / nl;
+
+  // Natural look: the steeper it gets, the more wind-blown, then rocky.
+  const grain = noise2(x * 0.06, y * 0.06);
+  const streak = noise2(x * 0.02, y * 0.004);
+  if (g < 0.25) c.copy(T_GROOMED);
+  else if (g < 0.45) c.copy(T_GROOMED).lerp(T_PACKED, (g - 0.25) / 0.2);
+  else c.copy(T_PACKED).lerp(T_WIND, Math.min(1, (g - 0.45) / 0.25));
+  const rockAmt = Math.max(smooth(0.62, 0.98, g + (streak - 0.5) * 0.35), smooth(0.3, 0.7, rockAt(x, y)) * 0.95);
+  if (rockAmt > 0) c.lerp(streak > 0.55 ? T_ROCK_DARK : T_ROCK, rockAmt * 0.92);
+  // Woods read as a dark tint from far away; real trees are drawn near the camera.
+  const woods = smooth(0.3, 0.6, forestDensity(x, y)) * (1 - rockAmt);
+  if (woods > 0) c.lerp(T_FOREST, woods * 0.55);
+  const shade = (grain - 0.5) * 0.05;
+  natural[q * 3] = c.r + shade;
+  natural[q * 3 + 1] = c.g + shade;
+  natural[q * 3 + 2] = c.b + shade;
+
+  // Overlay: same bands the trail classifier uses.
+  const band: Difficulty = classifyGrade(g * 100, 100);
+  c.copy(BAND_COLORS[band]).lerp(T_GROOMED, 0.18);
+  overlay[q * 3] = c.r;
+  overlay[q * 3 + 1] = c.g;
+  overlay[q * 3 + 2] = c.b;
 }

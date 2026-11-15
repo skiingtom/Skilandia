@@ -276,3 +276,145 @@ export function rockAt(x: number, y: number): number {
 export function isRock(x: number, y: number): boolean {
   return rockAt(x, y) > 0.5;
 }
+
+/* ---------- Terrain editing: building pads and the shaping brush ---------- */
+
+/** The ground as generated, so edits can be limited to a sensible depth. */
+const originalHeights = heights.slice();
+/** How far (metres) the ground may be cut or filled from where it started. */
+export const MAX_EARTHWORK_M = 40;
+const MAX_DELTA = MAX_EARTHWORK_M / VERTICAL_M;
+
+/** Bumped on every edit; the renderer redraws what changed. */
+let editVersion = 0;
+let dirty: { i0: number; i1: number; j0: number; j1: number } | null = null;
+
+export function terrainVersion(): number {
+  return editVersion;
+}
+
+/** Heightmap cells (vertex indices) changed since the last call, or null. */
+export function takeTerrainDirty(): { i0: number; i1: number; j0: number; j1: number } | null {
+  const d = dirty;
+  dirty = null;
+  return d;
+}
+
+export const HEIGHT_CELL_M = TERRAIN_CELL_M;
+
+type Box = { x0: number; y0: number; x1: number; y1: number };
+
+/** Visit the heightmap cells within `reach` of a point (distance in metres). */
+function cellsNear(x: number, y: number, reach: number, fn: (k: number, d: number, i: number, j: number) => void): void {
+  const C = TERRAIN_CELL_M;
+  const i0 = Math.max(0, Math.floor((x - reach) / C));
+  const i1 = Math.min(TERRAIN_COLS - 1, Math.ceil((x + reach) / C));
+  const j0 = Math.max(0, Math.floor((y - reach) / C));
+  const j1 = Math.min(TERRAIN_ROWS - 1, Math.ceil((y + reach) / C));
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      const d = Math.hypot(i * C - x, j * C - y);
+      if (d <= reach) fn(j * TERRAIN_COLS + i, d, i, j);
+    }
+  }
+}
+
+/** Set a cell, kept within the earthwork limit. Returns metres actually moved. */
+function setCell(k: number, h: number, i: number, j: number): number {
+  const o = originalHeights[k];
+  const v = Math.max(o - MAX_DELTA, Math.min(o + MAX_DELTA, h));
+  const moved = Math.abs(v - heights[k]) * VERTICAL_M;
+  if (moved < 1e-4) return 0;
+  heights[k] = v;
+  if (!dirty) dirty = { i0: i, i1: i, j0: j, j1: j };
+  else {
+    dirty.i0 = Math.min(dirty.i0, i);
+    dirty.i1 = Math.max(dirty.i1, i);
+    dirty.j0 = Math.min(dirty.j0, j);
+    dirty.j1 = Math.max(dirty.j1, j);
+  }
+  return moved;
+}
+
+function finishEdit(volume: number, x: number, y: number, reach: number): { volume: number; box: Box } {
+  if (volume > 0) editVersion++;
+  return { volume, box: { x0: x - reach, y0: y - reach, x1: x + reach, y1: y + reach } };
+}
+
+/**
+ * Grade a building pad: everything under the footprint goes to the median
+ * height of the ground there, easing back into the slope just outside it.
+ * Returns the earth moved (m³) and the area touched.
+ */
+export function flattenPad(x: number, y: number, radius: number): { volume: number; level: number; box: Box } {
+  const C = TERRAIN_CELL_M;
+  const inner = radius + C * 0.5;
+  const outer = inner + C * 2;
+  const under: number[] = [];
+  cellsNear(x, y, inner, (k) => under.push(heights[k]));
+  // A footprint smaller than a cell still has the ground under its centre.
+  if (!under.length) under.push(elevation(x, y));
+  under.sort((a, b) => a - b);
+  const level = under[Math.floor(under.length / 2)];
+  let volume = 0;
+  cellsNear(x, y, outer, (k, d, i, j) => {
+    const t = smoothstepN(inner, outer, d);
+    volume += setCell(k, level + (heights[k] - level) * t, i, j) * C * C;
+  });
+  return { ...finishEdit(volume, x, y, outer), level: BASE_ELEV_M + level * VERTICAL_M };
+}
+
+export type SculptMode = "raise" | "lower" | "flatten" | "smooth";
+
+/**
+ * One dab of the shaping brush. `amount` is metres at the centre for raise
+ * and lower, or 0..1 strength for flatten and smooth; `target` (metres above
+ * sea level) is the height flatten works toward. Soft-edged falloff.
+ */
+export function sculpt(
+  x: number,
+  y: number,
+  radius: number,
+  mode: SculptMode,
+  amount: number,
+  target = 0,
+  /** Ground that must not move (under buildings), by map position. */
+  locked?: (x: number, y: number) => boolean,
+): { volume: number; box: Box } {
+  const C = TERRAIN_CELL_M;
+  const goal = (target - BASE_ELEV_M) / VERTICAL_M;
+  // Work out every new height from the current ground first, then write them.
+  const next: [number, number, number, number][] = [];
+  cellsNear(x, y, radius, (k, d, i, j) => {
+    const w = 1 - smoothstepN(radius * 0.35, radius, d);
+    if (w <= 0 || (locked && locked(i * C, j * C))) return;
+    let h = heights[k];
+    if (mode === "raise") h += (w * amount) / VERTICAL_M;
+    else if (mode === "lower") h -= (w * amount) / VERTICAL_M;
+    else if (mode === "flatten") h += (goal - h) * Math.min(1, w * amount);
+    else {
+      let sum = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          const ii = Math.min(TERRAIN_COLS - 1, Math.max(0, i + di));
+          const jj = Math.min(TERRAIN_ROWS - 1, Math.max(0, j + dj));
+          sum += heights[jj * TERRAIN_COLS + ii];
+        }
+      }
+      h += (sum / 9 - h) * Math.min(1, w * amount);
+    }
+    next.push([k, h, i, j]);
+  });
+  let volume = 0;
+  for (const [k, h, i, j] of next) volume += setCell(k, h, i, j) * C * C;
+  return finishEdit(volume, x, y, radius);
+}
+
+/** How far the ground here has been cut (negative) or filled (positive), in metres. */
+export function earthworkAt(x: number, y: number): number {
+  const C = TERRAIN_CELL_M;
+  const i = Math.min(TERRAIN_COLS - 1, Math.max(0, Math.round(x / C)));
+  const j = Math.min(TERRAIN_ROWS - 1, Math.max(0, Math.round(y / C)));
+  const k = j * TERRAIN_COLS + i;
+  return (heights[k] - originalHeights[k]) * VERTICAL_M;
+}

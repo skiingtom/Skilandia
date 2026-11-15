@@ -2,8 +2,16 @@ import { AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
 import { World3D } from "./scene";
-import { Game, SUMMITS, TREE_FELL_COST } from "./sim";
+import { EARTH_COST_PER_M3, Game, SUMMITS, TREE_FELL_COST } from "./sim";
+import { MAX_EARTHWORK_M, SculptMode, earthworkAt } from "./height";
 let brushHint = "";
+const SHAPE_LABEL: Record<SculptMode, string> = { raise: "Raise", lower: "Lower", flatten: "Flatten", smooth: "Smooth" };
+const SHAPE_HELP: Record<SculptMode, string> = {
+  raise: "Raise: build the ground up.",
+  lower: "Lower: dig the ground down.",
+  flatten: "Flatten: level everything to the height where the stroke starts.",
+  smooth: "Smooth: round off bumps, ridges and sharp edges.",
+};
 import {
   BUILDING_LABEL,
   BUILDING_MAX,
@@ -60,7 +68,7 @@ startBtn.addEventListener("click", (e) => {
 world = new World3D(canvas);
 
 let last = performance.now();
-let pointer = { x: 0, y: 0, downX: 0, downY: 0, over: false };
+let pointer = { x: 0, y: 0, downX: 0, downY: 0, over: false, held: false };
 
 const moneyEl = document.querySelector("#stat-money")!;
 const skiersEl = document.querySelector("#stat-skiers")!;
@@ -88,6 +96,8 @@ const ticketRange = document.querySelector<HTMLInputElement>("#ticket-range")!;
 const ticketValue = document.querySelector("#ticket-value")!;
 const ticketFair = document.querySelector("#ticket-fair")!;
 const shopRate = document.querySelector("#shop-rate")!;
+const shapeBanner = document.querySelector<HTMLElement>("#shape-banner")!;
+const shapeText = document.querySelector("#shape-text")!;
 const cutBanner = document.querySelector("#cut-banner")!;
 const cutDiff = document.querySelector("#cut-diff")!;
 const cutCost = document.querySelector("#cut-cost")!;
@@ -200,7 +210,7 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
-    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
+    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool === "shape" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -220,6 +230,10 @@ function paintHud(force = false): void {
   pauseBtn.title = game.paused ? "Resume (Space)" : "Pause (Space)";
   pauseBtn.setAttribute("aria-label", game.paused ? "Resume" : "Pause");
   const drafting = game.tool === "cut" || game.tool === "road";
+  shapeBanner.classList.toggle("hidden", game.tool !== "shape");
+  shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-mode").forEach((b) => b.classList.toggle("on", b.dataset.mode === game.shapeMode));
+  shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-size").forEach((b) => b.classList.toggle("on", Number(b.dataset.size) === game.shapeRadius));
+  shapeText.textContent = `${SHAPE_HELP[game.shapeMode]} Hold the left button and drag. $${EARTH_COST_PER_M3}/m³ of earth moved; building pads stay put.`;
   cutBanner.classList.toggle("hidden", !drafting);
   cutText.textContent =
     game.tool === "road"
@@ -378,6 +392,20 @@ function loop(now: number): void {
     placeHint.textContent = t
       ? `Click to demolish ${t.kind === "trail" ? `the run “${t.label}”` : t.label.toLowerCase() === "road" ? "this road" : t.label}${t.refund ? ` · salvage $${t.refund.toLocaleString()}` : ""}`
       : "Demolish: point at a building, lift, run, park feature or road.";
+  } else if (pointer.over && game.tool === "shape") {
+    world.hideGhost();
+    const hit = world.hitAt(pointer.x, pointer.y);
+    const here = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
+    game.brushHover = here;
+    if (here && pointer.held) game.shapeStep(here.x, here.y, dt);
+    placeHint.classList.remove("hidden");
+    placeHint.classList.add("ok");
+    if (here) {
+      const ew = earthworkAt(here.x, here.y);
+      const fill = Math.abs(ew) < 0.5 ? "untouched ground" : `${ew > 0 ? "filled" : "cut"} ${Math.abs(ew).toFixed(0)} m of ${MAX_EARTHWORK_M}`;
+      const stroke = game.shapeCost >= 1 ? ` · this stroke $${Math.round(game.shapeCost).toLocaleString()}` : "";
+      placeHint.textContent = `${SHAPE_LABEL[game.shapeMode]} · ${game.shapeRadius} m brush · ${fill}${stroke}`;
+    } else placeHint.textContent = "Shape: point at the ground.";
   } else if (pointer.over && game.tool === "clearTrees") {
     world.hideGhost();
     const hit = world.hitAt(pointer.x, pointer.y);
@@ -389,7 +417,7 @@ function loop(now: number): void {
     placeHint.classList.remove("hidden");
     placeHint.classList.add("ok");
     placeHint.textContent = `${brushHint} · ${game.treesFelled.toLocaleString()} felled so far`;
-  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road") {
+  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road" && game.tool !== "shape") {
     const hit = world.hitAt(pointer.x, pointer.y);
     const feature = game.featureTool();
     const moving = game.movingBuilding();
@@ -445,16 +473,25 @@ canvas.addEventListener("pointermove", (e) => {
 
 canvas.addEventListener("pointerleave", () => {
   pointer.over = false;
+  if (pointer.held && game.tool === "shape") game.endShape();
+  pointer.held = false;
   game.brushHover = null;
 });
 
 canvas.addEventListener("pointerdown", (e) => {
   pointer.downX = e.clientX;
   pointer.downY = e.clientY;
+  if (e.button === 0) pointer.held = true;
 });
 
 canvas.addEventListener("pointerup", (e) => {
+  if (e.button === 0) pointer.held = false;
   if (!game.managing) return;
+  if (game.tool === "shape") {
+    game.endShape();
+    paintHud();
+    return;
+  }
   if (game.tool === "clearTrees") {
     if (e.button === 0) {
       const hit = world.hitAt(e.clientX, e.clientY);
@@ -634,3 +671,21 @@ window.addEventListener("resize", () => world.resize());
 world.resize();
 paintHud(true);
 requestAnimationFrame(loop);
+document.querySelectorAll<HTMLButtonElement>(".shape-mode").forEach((b) =>
+  b.addEventListener("click", () => {
+    game.setShapeMode(b.dataset.mode as SculptMode);
+    audio.click();
+    paintHud();
+  }),
+);
+document.querySelectorAll<HTMLButtonElement>(".shape-size").forEach((b) =>
+  b.addEventListener("click", () => {
+    game.shapeRadius = Number(b.dataset.size);
+    audio.click();
+    paintHud();
+  }),
+);
+document.querySelector("#btn-shape-done")!.addEventListener("click", () => {
+  game.cancel();
+  paintHud();
+});

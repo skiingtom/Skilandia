@@ -1180,3 +1180,27 @@ body.welcome-open #hud > * {
     top: 196px;
   }
 }
+
+/* Drafting banners sit just above the build bar, clear of the clock card. */
+.cut-banner {
+  top: auto;
+  bottom: 92px;
+}
+
+.shape-banner .seg {
+  display: flex;
+  gap: 3px;
+}
+
+.shape-banner .seg button {
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+@media (max-width: 1100px) {
+  /* Clear of the map legend in the bottom-left corner. */
+  .cut-banner {
+    bottom: 196px;
+  }
+}

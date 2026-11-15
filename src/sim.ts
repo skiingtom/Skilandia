@@ -1,5 +1,5 @@
 import { HIGHWAY, ROAD_COST_PER_M, ROAD_MAX_GRADE, ROAD_MIN_LEG, ROAD_SNAP, ROAD_WIDTH, Road, legGrade, nearestOnRoad, roadLength, routeTo } from "./roads";
-import { TREELINE_M, isRock, rockAt } from "./height";
+import { SculptMode, TREELINE_M, flattenPad, isRock, rockAt, sculpt } from "./height";
 import { elevation, elevationM, gradeAt, lerp, nearSegment, noise2, pointOnPolyline, polylineLength } from "./height";
 import {
   BUILDING_LABEL,
@@ -157,6 +157,17 @@ export class Game {
   /** Circles of forest the player has felled with the tree brush. */
   clearings: { x: number; y: number; r: number }[] = [];
   treesFelled = 0;
+  /** Shaping brush: mode, radius (m), and the stroke in progress. */
+  shapeMode: SculptMode = "raise";
+  shapeRadius = 60;
+  shapeTarget: number | null = null;
+  shapeCost = 0;
+  shapeVolume = 0;
+  private shapeAt: Vec2 | null = null;
+  private shapeBroke = false;
+  private shapeCleared: Vec2 | null = null;
+  /** Bumped whenever the ground is regraded. */
+  terrainEdits = 0;
   /** Where the tree brush is hovering (for its outline). */
   brushHover: Vec2 | null = null;
   private routeCache: { v: string; route: Vec2[] | null } = { v: "", route: null };
@@ -723,7 +734,7 @@ export class Game {
   setTool(tool: Tool): void {
     this.liftStart = null;
     this.moveId = null;
-    if (tool === "demolish" || tool === "clearTrees") {
+    if (tool === "demolish" || tool === "clearTrees" || tool === "shape") {
       this.tool = tool;
       this.draft = [];
       this.selected = null;
@@ -838,6 +849,7 @@ export class Game {
     b.x = x;
     b.y = y;
     if (PARKING[b.type]) b.angle = this.parkingAngle(b.type, x, y);
+    this.gradePad(b);
     this.clearTrees();
     if (fee) this.float(x, y, `-${fee}`, "#d9785f");
     this.toast(`${BUILDING_LABEL[b.type]} moved${fee ? ` for $${fee.toLocaleString()}` : ""}.`);
@@ -1188,6 +1200,81 @@ export class Game {
     return null;
   }
 
+  // ---------- shaping the ground
+
+  /** Regrade the pad under a building to the median height of its footprint. */
+  private gradePad(b: Building): void {
+    const r = flattenPad(b.x, b.y, buildingRadius(b.type));
+    if (r.volume > 0) this.terrainEdited(r.box);
+  }
+
+  /** After the ground changes: re-rate runs that cross it, and re-seat the forest. */
+  private terrainEdited(box: { x0: number; y0: number; x1: number; y1: number }): void {
+    for (const t of this.trails) {
+      if (!t.points.some((p) => p.x > box.x0 - 40 && p.x < box.x1 + 40 && p.y > box.y0 - 40 && p.y < box.y1 + 40)) continue;
+      Object.assign(t, measureTrail(t.points, this.currentMountain, t.kind));
+    }
+    this.terrainEdits++;
+    this.clearTrees();
+  }
+
+  /** Ground under a building (or the starter lot) stays put while you shape around it. */
+  private padLocked = (x: number, y: number): boolean => {
+    const exit = this.exit();
+    if (Math.abs(x - exit.x) < 90 && Math.abs(y - exit.y) < 50) return true;
+    for (const b of this.buildings) if (Math.hypot(b.x - x, b.y - y) < buildingRadius(b.type) + 10) return true;
+    return false;
+  };
+
+  /** Brush radius for the current tool (tree brush or shaping). */
+  brushRadius(): number {
+    return this.tool === "shape" ? this.shapeRadius : BRUSH_R;
+  }
+
+  setShapeMode(mode: SculptMode): void {
+    this.shapeMode = mode;
+    this.shapeTarget = null;
+  }
+
+  /** One frame of the shaping brush held down at (x, y). */
+  shapeStep(x: number, y: number, dt: number): void {
+    if (!this.managing || this.tool !== "shape") return;
+    if (this.shapeTarget === null) this.shapeTarget = elevationM(x, y);
+    const amount = this.shapeMode === "raise" || this.shapeMode === "lower" ? SHAPE_RATE_M * dt : Math.min(1, 2.5 * dt);
+    // Preview the cost with a dry run's worth of budget: stop when the money runs out.
+    if (this.money <= 0) {
+      if (!this.shapeBroke) this.toast("Out of money for earthworks.", true);
+      this.shapeBroke = true;
+      return;
+    }
+    const r = sculpt(x, y, this.shapeRadius, this.shapeMode, amount, this.shapeTarget, this.padLocked);
+    if (r.volume <= 0) return;
+    const cost = r.volume * EARTH_COST_PER_M3;
+    this.money -= cost;
+    this.shapeCost += cost;
+    this.shapeVolume += r.volume;
+    this.shapeAt = { x, y };
+    // Earthworks bulldoze the forest they pass over.
+    if (!this.shapeCleared || Math.hypot(this.shapeCleared.x - x, this.shapeCleared.y - y) > this.shapeRadius * 0.4) {
+      this.clearings.push({ x, y, r: this.shapeRadius * 0.85 });
+      this.shapeCleared = { x, y };
+    }
+    this.terrainEdited(r.box);
+  }
+
+  /** Let go of the shaping brush: show what the stroke moved and cost. */
+  endShape(): void {
+    if (this.shapeAt && this.shapeCost >= 1) {
+      this.float(this.shapeAt.x, this.shapeAt.y, `-$${Math.round(this.shapeCost).toLocaleString()}`, "#d9785f");
+    }
+    this.shapeTarget = null;
+    this.shapeCost = 0;
+    this.shapeVolume = 0;
+    this.shapeAt = null;
+    this.shapeBroke = false;
+    this.shapeCleared = null;
+  }
+
   /** What a demolish click at this spot would take down (closest thing wins). */
   demolishTarget(x: number, y: number): DemolishTarget | null {
     let best: DemolishTarget | null = null;
@@ -1513,6 +1600,7 @@ export class Game {
     if (this.tool === "road") return this.clickRoad(x, y);
     if (this.tool === "demolish") return this.demolishAt(x, y);
     if (this.tool === "clearTrees") return this.paintClearing(x, y);
+    if (this.tool === "shape") return "none"; // shaping happens while the button is held
     if (this.tool === "move") return this.clickMove(x, y);
     const ft = this.featureTool();
     if (ft) return this.clickFeature(ft, x, y);
@@ -1753,6 +1841,7 @@ export class Game {
     const b: Building = { id: this.id(), type, x, y, earnAcc: 0, earnTimer: 0 };
     if (PARKING[type]) b.angle = this.parkingAngle(type, x, y);
     this.buildings.push(b);
+    this.gradePad(b);
     this.clearTrees();
     this.float(x, y, `-${COSTS[type]}`, "#d9785f");
     this.tool = "select";
@@ -2635,6 +2724,11 @@ export function nearestOnTrail(t: Trail, x: number, y: number): { along: number;
   }
   return best;
 }
+
+/** Shaping: metres a second the brush raises or lowers at its centre, and what earthworks cost. */
+export const SHAPE_RATE_M = 4;
+export const EARTH_COST_PER_M3 = 0.06;
+export const SHAPE_SIZES = [30, 60, 110];
 
 /** How far beyond its edge a lot may sit from the road it opens onto. */
 const PARKING_REACH = 30;

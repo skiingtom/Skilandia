@@ -17,7 +17,8 @@ import {
   PARKING,
 } from "./types";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
-import { BRUSH_R, TREE_FELL_COST } from "./sim";
+import { BRUSH_R, EARTH_COST_PER_M3, TREE_FELL_COST } from "./sim";
+import { MAX_EARTHWORK_M } from "./height";
 
 const SALVAGE_SHARE = 0.4;
 
@@ -55,7 +56,7 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "base", label: "Base", items: ["lodge", "restroom", "rental", "school", "clinic", "patrol"] },
   { id: "food", label: "Food", items: ["shack", "coffee", "cafeteria", "sandwich", "bar", "restaurant"] },
   { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "heli"] },
-  { id: "edit", label: "Edit", items: ["clearTrees", "demolish"] },
+  { id: "edit", label: "Edit", items: ["shape", "clearTrees", "demolish"] },
 ];
 
 export function groupOf(tool: Tool): string | null {
@@ -95,6 +96,13 @@ function itemHtml(tool: Tool): string {
       <b>Demolish</b>
       <small>${Math.round(SALVAGE_SHARE * 100)}% back · roads 25% · runs free</small>
       <em>Click a building, lift, run, park feature or road to take it down.</em>
+    </button>`;
+  }
+  if (tool === "shape") {
+    return `<button type="button" class="tool item" data-tool="shape">
+      <b>Shape terrain</b>
+      <small>$${EARTH_COST_PER_M3}/m³ · up to ±${MAX_EARTHWORK_M} m</small>
+      <em>Raise, lower, flatten or smooth the ground. Buildings level their own pads.</em>
     </button>`;
   }
   if (tool === "clearTrees") {

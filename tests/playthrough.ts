@@ -5,7 +5,7 @@
  *
  * Run with: npm test
  */
-import { elevationM, isRock } from "../src/height";
+import { MAX_EARTHWORK_M, earthworkAt, elevationM, gradeAt, isRock } from "../src/height";
 import { nearestOnRoad } from "../src/roads";
 import { Game, SUMMITS, nearestOnTrail } from "../src/sim";
 import { BASE, BuildingType, PARKING, STARTER_LOT_SKIERS, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
@@ -322,6 +322,63 @@ ok(g.totalTickets > 100, "hardly anyone came");
   for (let i = 0; i < 2000; i++) g.tick(0.05);
   ok(Number.isFinite(g.money), "money broke after demolishing");
   ok(g.skiers.every((s) => s.trailId === null || s.trailId < 0 || g.trails.some((t) => t.id === s.trailId)), "skier left on a demolished run");
+}
+
+// --- terrain: buildings level their pad, and the shaping brush moves earth
+{
+  // A restroom on the gentle ground of the village sits on a level pad at the median height.
+  let spot: Vec2 | null = null;
+  for (let a = 0; a < 72 && !spot; a++) {
+    for (const d of [150, 250, 350]) {
+      const p = { x: BASE.x + Math.cos(a / 11.4) * d, y: BASE.y + Math.sin(a / 11.4) * d };
+      if (!g.canPlace("restroom", p.x, p.y) && gradeAt(p.x, p.y) > 0.05) {
+        spot = p;
+        break;
+      }
+    }
+  }
+  ok(!!spot, "no sloping village spot for a restroom");
+  if (spot) {
+    g.setTool("restroom");
+    ok(g.click(spot.x, spot.y) === "ok", `restroom failed: ${g.toasts.at(-1)?.text}`);
+    const hs = [-8, 0, 8].flatMap((dx) => [-8, 0, 8].map((dy) => elevationM(spot!.x + dx, spot!.y + dy)));
+    ok(Math.max(...hs) - Math.min(...hs) < 0.6, `pad isn't level: ${(Math.max(...hs) - Math.min(...hs)).toFixed(2)} m`);
+  }
+
+  // Raise somewhere open: the ground comes up, money goes down, and it stops at the limit.
+  const open = { x: BASE.x + 2600, y: BASE.y + 1800 };
+  const h0 = elevationM(open.x, open.y);
+  const money = g.money;
+  g.setTool("shape");
+  g.setShapeMode("raise");
+  g.shapeRadius = 60;
+  for (let i = 0; i < 20; i++) g.shapeStep(open.x, open.y, 0.05);
+  const h1 = elevationM(open.x, open.y);
+  ok(h1 > h0 + 2, `raise barely moved the ground (${(h1 - h0).toFixed(2)} m)`);
+  ok(g.money < money, "shaping should cost money");
+  g.endShape();
+  for (let i = 0; i < 600; i++) g.shapeStep(open.x, open.y, 0.05);
+  g.endShape();
+  ok(Math.abs(earthworkAt(open.x, open.y) - MAX_EARTHWORK_M) < 0.5, `fill limit not held: ${earthworkAt(open.x, open.y).toFixed(1)} m`);
+  // Smooth and flatten pull it back toward the surroundings / a level.
+  g.setShapeMode("smooth");
+  for (let i = 0; i < 40; i++) g.shapeStep(open.x, open.y, 0.05);
+  g.endShape();
+  ok(elevationM(open.x, open.y) < h0 + MAX_EARTHWORK_M - 1, "smooth didn't round the mound off");
+  g.setShapeMode("lower");
+  for (let i = 0; i < 1200; i++) g.shapeStep(open.x, open.y, 0.05);
+  g.endShape();
+  ok(Math.abs(earthworkAt(open.x, open.y) + MAX_EARTHWORK_M) < 0.5, `cut limit not held: ${earthworkAt(open.x, open.y).toFixed(1)} m`);
+
+  // Shaping right over a building leaves its pad alone.
+  if (spot) {
+    const before = elevationM(spot.x, spot.y);
+    g.setShapeMode("raise");
+    for (let i = 0; i < 40; i++) g.shapeStep(spot.x, spot.y, 0.05);
+    g.endShape();
+    ok(Math.abs(elevationM(spot.x, spot.y) - before) < 0.01, "shaping moved the ground under a building");
+  }
+  g.cancel();
 }
 
 // --- conquer every remaining peak with a gondola from somewhere below it

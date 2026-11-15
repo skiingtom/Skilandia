@@ -33,6 +33,7 @@ export type Tool =
   | "road"
   | "demolish"
   | "clearTrees"
+  | "shape"
   | "move"
   | BuildingType
   | `lift:${LiftType}`

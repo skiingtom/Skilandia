@@ -80,6 +80,8 @@ Every skier arrives by car, so **parking is a fourth limit** on how many skiers 
 
 ### Edit
 
+- **Buildings level their own pad**: placing or moving one grades the ground under it to the median height of its footprint, easing back into the slope around it
+- **Shape terrain**: hold the left button and drag. **Raise** builds ground up, **Lower** digs it out, **Flatten** levels to the height where the stroke started, **Smooth** rounds off bumps. Brush sizes S / M / L (30, 60, 110 m). Earthworks cost $0.06 per m³ moved, can go at most 40 m above or below the original ground, bulldoze the trees they pass over, and never disturb the pad under an existing building. Runs crossing reshaped ground are re-rated
 - **Clear trees**: click or drag over the forest to fell it ($4 a tree, 60 m brush)
 - **Demolish**: click a building, lift, run, park feature or road to take it down. Buildings, lifts and features give 40% back, roads 25%, runs are free to remove (their park features go with them). The highway can't be removed, and you always keep at least one lift. The ground stays cleared where something stood
 
