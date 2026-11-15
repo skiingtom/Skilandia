@@ -1,15 +1,56 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { elevation, lerp, noise2, slopeAt } from "./height";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { elevation, gradeAt, lerp, noise2 } from "./height";
 import { Game } from "./sim";
-import { BuildingType, DIFF, INCOME_PER_MIN, MountainId, Trail, WORLD_H, WORLD_W } from "./types";
+import { SUMMITS, classifyGrade, forestDensity } from "./sim";
+import {
+  BuildingType,
+  DIFF,
+  Difficulty,
+  Feature,
+  FeatureType,
+  HELI,
+  BASE,
+  MAP_SCALE,
+  TRAIL_KIND_SPEC,
+  INCOME_PER_MIN,
+  LIFT_SPECS,
+  Lift,
+  LiftType,
+  MountainId,
+  TERRAIN_SCALE,
+  Trail,
+  UNIT_M,
+  Vec2,
+  VERTICAL_M,
+  WORLD_H,
+  WORLD_W,
+} from "./types";
 
-export const TERRAIN_H = [124, 158, 186];
+/**
+ * World units of height per unit of elevation. The trail classifier treats
+ * elevation 1 as VERTICAL_M metres over UNIT_M metres per world unit, so
+ * VERTICAL_M / UNIT_M is the "true" scale; a little extra exaggeration makes
+ * steep pitches read clearly from the orbit camera.
+ */
+const H = TERRAIN_SCALE;
+export const TERRAIN_H = [H, H, H];
 
+/** Slope-overlay colours by difficulty band (green, blue, black, double black). */
+const BAND_COLORS = ["#3fb878", "#3d84d8", "#3a3f47", "#b8324b"].map((c) => new THREE.Color(c));
+
+void MAP_SCALE;
+
+/**
+ * Each mountain is its own area, loaded on its own and centred in the scene,
+ * so there are no offsets between them. (Kept so world <-> map maths stays
+ * in one place if areas ever need positions again.)
+ */
 export const MOUNT_OFF = [
   { x: 0, z: 0 },
-  { x: 980, z: 70 },
-  { x: 2080, z: 30 },
+  { x: 0, z: 0 },
+  { x: 0, z: 0 },
 ];
 
 export function to3(x: number, y: number, lift = 0, mid: MountainId = 0): THREE.Vector3 {
@@ -37,16 +78,32 @@ export class World3D {
   private raycaster = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
   private keys = new Set<string>();
-  private terrains: THREE.Mesh[] = [];
+  /** Only the mountain being managed is loaded. */
+  private terrain: THREE.Group | null = null;
+  private pickProxy: THREE.Mesh | null = null;
+  private backdrop: THREE.Group | null = null;
+  private loadedId: MountainId | null = null;
+  private featureGroup = new THREE.Group();
+  private peakGroup = new THREE.Group();
   private trees: THREE.InstancedMesh;
+  private helicopter = makeHelicopter();
+  private rotorSpin = 0;
   private mid: MountainId = 0;
   private trailGroup = new THREE.Group();
   private buildingGroup = new THREE.Group();
   private liftGroup = new THREE.Group();
-  private carriers: THREE.Group[] = [];
-  private skiers: THREE.Group[] = [];
+  private liftVis = new Map<number, LiftVis>();
+  private liftPreview = new THREE.Group();
+  private liftPreviewKey = "";
+  /** Everyone on the hill, drawn as instanced meshes (body, head, skis). */
+  private crowd = makeCrowd(MAX_SKIERS_DRAWN);
+  private jacketColors = new Map<string, THREE.Color>();
   private ghost = new THREE.Group();
-  private draft: THREE.Line;
+  private draft: THREE.Mesh;
+  private draftKey = "";
+  private slopeView = false;
+  private slopeApplied = false;
+  private sun!: THREE.DirectionalLight;
   private snow: THREE.Points;
   private stamp = "";
   private introT = 0;
@@ -60,21 +117,23 @@ export class World3D {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
     this.renderer.setSize(innerWidth, innerHeight, false);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
-    this.camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 1, 9000);
-    this.camera.position.set(280, 240, -430);
-    this.scene.background = new THREE.Color("#8ebbd4");
-    this.scene.fog = new THREE.Fog("#8ebbd4", 900, 4200);
+    this.renderer.toneMappingExposure = 0.92;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 2, 90000);
+    this.camera.position.set(0, 3000, 6000);
+    this.scene.background = new THREE.Color("#9cc4dc");
+    this.scene.fog = new THREE.Fog("#a9cbe0", 9000, 60000);
 
     this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(0, 36, -20);
+    this.controls.target.set(0, 400, 0);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.06;
     this.controls.maxPolarAngle = Math.PI * 0.46;
     this.controls.minDistance = 70;
-    this.controls.maxDistance = 2400;
+    this.controls.maxDistance = 30000;
+    this.controls.minDistance = 40;
     this.controls.mouseButtons.LEFT = -1 as unknown as THREE.MOUSE;
     this.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
     this.controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
@@ -83,27 +142,25 @@ export class World3D {
 
     this.addLights();
     this.addGround();
-    for (const id of [0, 1, 2] as MountainId[]) {
-      const mesh = this.makeTerrain(id);
-      this.terrains.push(mesh);
-      this.scene.add(mesh);
-    }
+    this.loadMountain(0);
     this.trees = this.makeEmptyTrees();
     this.scene.add(this.trees);
-    this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup);
+    this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
-    this.draft = this.makeLine("#e2b857");
+    this.draft = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.92, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
+    );
+    this.draft.visible = false;
+    this.draft.frustumCulled = false;
     this.scene.add(this.draft);
     this.snow = this.makeSnow();
     this.scene.add(this.snow);
-    this.carriers = [];
-    for (let i = 0; i < 40; i++) {
-      const s = makeSkierMesh("#c45c4a");
-      s.visible = false;
-      this.scene.add(s);
-      this.skiers.push(s);
-    }
+    this.scene.add(this.liftPreview);
+    this.helicopter.visible = false;
+    this.scene.add(this.helicopter);
+    this.scene.add(this.crowd.group);
 
     window.addEventListener("keydown", (e) => {
       this.keys.add(e.key.toLowerCase());
@@ -112,6 +169,78 @@ export class World3D {
       this.keys.delete(e.key.toLowerCase());
     });
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.aimSun(0);
+  }
+
+  /** Toggle the slope-steepness overlay that tints terrain by difficulty band. */
+  setSlopeView(on: boolean): void {
+    this.slopeView = on;
+  }
+
+  private applySlopeColors(on: boolean): void {
+    if (on === this.slopeApplied) return;
+    this.slopeApplied = on;
+    if (!this.terrain) return;
+    for (const tile of this.terrain.children) {
+      if (!(tile instanceof THREE.Mesh) || !tile.geometry.userData.natural) continue;
+      const geo = tile.geometry;
+      geo.setAttribute("color", (on ? geo.userData.overlay : geo.userData.natural) as THREE.Float32BufferAttribute);
+    }
+  }
+
+  /**
+   * Unload the current mountain and load another: terrain, picking mesh and
+   * the distant range around it. Everything on the mountain (trees, runs,
+   * lifts, buildings) is rebuilt from the game state on the next update.
+   */
+  loadMountain(id: MountainId): void {
+    if (this.loadedId === id) return;
+    for (const old of [this.terrain, this.pickProxy, this.backdrop]) {
+      if (!old) continue;
+      this.scene.remove(old);
+      old.traverse((o) => {
+        if (o instanceof THREE.Mesh) {
+          o.geometry.dispose();
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => m.dispose());
+        }
+      });
+    }
+    this.terrain = this.makeTerrain(id);
+    this.scene.add(this.terrain);
+    this.backdrop = makeBackdrop(id);
+    this.scene.add(this.backdrop);
+    this.loadedId = id;
+    this.mid = id;
+    this.stamp = "";
+    this.draftKey = "";
+    this.liftPreviewKey = "";
+    const slope = this.slopeApplied;
+    this.slopeApplied = false;
+    this.applySlopeColors(slope);
+    this.aimSun(id);
+    if (!this.flying) this.focusMountain(id);
+  }
+
+  get slopeViewOn(): boolean {
+    return this.slopeView;
+  }
+
+  /** The sun (and its shadow box) follows what you're looking at. */
+  private aimSun(_id: MountainId): void {
+    const t = this.controls.target;
+    this.sun.target.position.copy(t);
+    this.sun.position.set(t.x + 1400, t.y + 1300, t.z + 700);
+    this.sun.target.updateMatrixWorld();
+  }
+
+  /** Fly the camera to look at a map position. */
+  focusPoint(x: number, y: number, dist = 1600): void {
+    const p = to3(x, y, 0, this.mid);
+    this.controls.target.copy(p);
+    this.camera.position.set(p.x + dist * 0.35, p.y + dist * 0.55, p.z + dist * 0.85);
+    this.controls.update();
+    this.aimSun(this.mid);
   }
 
   resize(): void {
@@ -124,8 +253,7 @@ export class World3D {
   startPlay(): void {
     this.flying = false;
     this.controls.enabled = true;
-    this.controls.target.set(0, 32, -40);
-    this.controls.update();
+    this.focusMountain(this.mid);
   }
 
   setPointer(clientX: number, clientY: number): void {
@@ -139,15 +267,34 @@ export class World3D {
     this.ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.ndc, this.camera);
     const objs: THREE.Object3D[] = [
-      ...this.terrains,
+      ...(this.pickProxy ? [this.pickProxy] : []),
       this.buildingGroup,
       this.trailGroup,
       this.liftGroup,
-      ...this.skiers,
     ];
     const hits = this.raycaster.intersectObjects(objs, true);
     if (!hits.length) return null;
     const obj = hits[0].object;
+    if (obj.userData.kind === "terrain") {
+      // Refine the coarse proxy hit against the real heightfield.
+      const mid = obj.userData.mountain as MountainId;
+      const ray = this.raycaster.ray;
+      let t0 = hits[0].distance - 60;
+      let t1 = hits[0].distance + 60;
+      const above = (t: number) => {
+        const q = ray.at(t, new THREE.Vector3());
+        const g = from3(q, mid);
+        return q.y - elevation(g.x, g.y, mid) * TERRAIN_H[mid];
+      };
+      if (above(t0) > 0 && above(t1) < 0) {
+        for (let i = 0; i < 18; i++) {
+          const m = (t0 + t1) / 2;
+          if (above(m) > 0) t0 = m;
+          else t1 = m;
+        }
+        hits[0].point.copy(ray.at((t0 + t1) / 2, new THREE.Vector3()));
+      }
+    }
     let node: THREE.Object3D | null = obj;
     let mountain: MountainId = this.mid;
     let kind = "hill";
@@ -166,24 +313,28 @@ export class World3D {
     return { x: g.x, y: g.y, kind, id, mountain };
   }
 
-  focusMountain(id: MountainId): void {
-    const o = MOUNT_OFF[id];
-    this.controls.target.set(o.x, 40, o.z);
-    this.camera.position.set(o.x + 280, 240, o.z - 430);
-    this.controls.update();
+  focusMountain(_id: MountainId): void {
+    // Start at the base village, looking south up toward the big peaks.
+    this.focusPoint(BASE.x, BASE.y - 600, 2600);
   }
 
-  showGhost(type: BuildingType, x: number, y: number, ok: boolean): void {
+  showGhost(type: BuildingType | `feature:${FeatureType}`, x: number, y: number, ok: boolean, angle = 0): void {
     if (this.ghost.userData.type !== type) {
       this.ghost.clear();
-      this.ghost.add(makeBuildingMesh(type, true));
+      if (type.startsWith("feature:")) this.ghost.add(makeFeatureMesh(type.slice(8) as FeatureType, true));
+      else this.ghost.add(makeBuildingMesh(type as BuildingType, true));
       this.ghost.userData.type = type;
     }
-    const p = to3(x, y, 0, this.mid);
-    this.ghost.position.copy(p);
+    this.ghost.rotation.set(0, 0, 0);
+    if (type.startsWith("feature:")) {
+      placeFeature(this.ghost, { x, y, angle, type: type.slice(8) as FeatureType } as Feature, this.mid);
+    } else {
+      this.ghost.position.copy(to3(x, y, 0, this.mid));
+    }
     this.ghost.visible = true;
     this.ghost.traverse((c) => {
       if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshStandardMaterial) {
+        c.material = c.material.clone();
         c.material.color.set(ok ? "#7dcea0" : "#d9785f");
         c.material.transparent = true;
         c.material.opacity = 0.55;
@@ -206,25 +357,30 @@ export class World3D {
   }
 
   update(game: Game, dt: number): void {
-    if (game.currentMountain !== this.mid) {
-      this.mid = game.currentMountain;
-      this.stamp = "";
-      if (!this.flying) this.focusMountain(this.mid);
-    }
+    if (game.currentMountain !== this.loadedId) this.loadMountain(game.currentMountain);
     if (this.flying) {
       this.introT += dt * 0.1;
       const a = -0.55 + this.introT;
-      const r = 460;
-      this.camera.position.set(Math.sin(a) * r, 210 + Math.sin(this.introT * 0.6) * 16, Math.cos(a) * r * 0.85 - 30);
-      this.camera.lookAt(0, 40, 20);
+      // Slow orbit over the whole valley on the title screen.
+      const c = to3(BASE.x, BASE.y - 2000, 0, this.mid);
+      const r = 9000;
+      this.camera.position.set(c.x + Math.sin(a) * r, 4200 + Math.sin(this.introT * 0.6) * 200, c.z + Math.cos(a) * r);
+      this.camera.lookAt(c.x, c.y + 400, c.z);
     } else {
       this.flyKeys(dt);
       this.controls.update();
+      this.aimSun(this.mid);
     }
+    // Steepness tint is always on while drawing a run or placing a surface lift.
+    const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
+    this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
+    this.syncTrees(game);
     this.syncLift(game);
+    this.syncHeli(game, dt);
     this.syncSkiers(game);
     this.syncDraft(game);
+    this.syncLiftPreview(game);
     this.tickSnow(dt, game.paused ? 0.15 : game.speed);
   }
 
@@ -233,7 +389,9 @@ export class World3D {
   }
 
   private flyKeys(dt: number): void {
-    const speed = (this.keys.has("shift") ? 280 : 150) * dt;
+    // Faster the higher you are, so crossing the valley doesn't take forever.
+    const height = Math.max(200, this.camera.position.distanceTo(this.controls.target));
+    const speed = (this.keys.has("shift") ? 2.5 : 1) * height * 0.6 * dt;
     const forward = new THREE.Vector3();
     this.camera.getWorldDirection(forward);
     forward.y = 0;
@@ -261,136 +419,182 @@ export class World3D {
   }
 
   private addLights(): void {
-    const hemi = new THREE.HemisphereLight("#e7f3ff", "#6d5b43", 0.85);
+    const hemi = new THREE.HemisphereLight("#cfe3ff", "#6f7f94", 0.55);
     this.scene.add(hemi);
-    const sun = new THREE.DirectionalLight("#fff4d8", 1.35);
-    sun.position.set(220, 340, -160);
+    // Low, raking sun so headwalls throw shadow and gentle slopes stay bright.
+    const sun = new THREE.DirectionalLight("#fff0d2", 2.3);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(4096, 4096);
     sun.shadow.camera.near = 40;
-    sun.shadow.camera.far = 2800;
-    sun.shadow.camera.left = -900;
-    sun.shadow.camera.right = 900;
-    sun.shadow.camera.top = 900;
-    sun.shadow.camera.bottom = -900;
-    this.scene.add(sun);
-    this.scene.add(new THREE.AmbientLight("#b9d4e6", 0.22));
+    sun.shadow.camera.far = 6000;
+    sun.shadow.camera.left = -1500;
+    sun.shadow.camera.right = 1500;
+    sun.shadow.camera.top = 1500;
+    sun.shadow.camera.bottom = -1500;
+    sun.shadow.bias = -0.0006;
+    sun.shadow.normalBias = 1.2;
+    this.sun = sun;
+    this.scene.add(sun, sun.target);
+    this.scene.add(new THREE.AmbientLight("#b9d4e6", 0.05));
   }
 
   private addGround(): void {
     const g = new THREE.Mesh(
-      new THREE.PlaneGeometry(6400, 4000),
-      new THREE.MeshLambertMaterial({ color: "#8aa3a0" }),
+      new THREE.PlaneGeometry(200000, 200000),
+      new THREE.MeshLambertMaterial({ color: "#dfe8ef" }),
     );
-    g.position.x = 1000;
+    g.position.x = 0;
     g.rotation.x = -Math.PI / 2;
     g.position.y = -2;
     g.receiveShadow = true;
     this.scene.add(g);
-    const far = this.makeFarTrees();
-    this.scene.add(far);
   }
 
-  private makeTerrain(id: MountainId): THREE.Mesh {
-    const wx = 128;
-    const wy = 160;
-    const geo = new THREE.BufferGeometry();
-    const pos: number[] = [];
-    const col: number[] = [];
-    const idx: number[] = [];
+  /**
+   * The whole map as tiles of 64 x 64 heightmap cells (~1.8 km), so the
+   * renderer skips tiles that are off screen (and outside the shadow box).
+   * Normals come from the heightmap itself so tile edges don't show seams.
+   */
+  private makeTerrain(id: MountainId): THREE.Group {
+    const cell = 28;
+    const wx = Math.round(WORLD_W / cell);
+    const wy = Math.round(WORLD_H / cell);
     const o = MOUNT_OFF[id];
     const hScale = TERRAIN_H[id];
+    const n = (wx + 1) * (wy + 1);
+    const pos = new Float32Array(n * 3);
+    const nor = new Float32Array(n * 3);
+    const natural = new Float32Array(n * 3);
+    const overlay = new Float32Array(n * 3);
+    const c = new THREE.Color();
+    const groomed = new THREE.Color("#edf2f7");
+    const packed = new THREE.Color("#dbe4ee");
+    const wind = new THREE.Color("#c3cfdc");
+    const rock = new THREE.Color("#5f5b58");
+    const rockDark = new THREE.Color("#433f3d");
+    const forest = new THREE.Color("#3f5f4c");
+    let k = 0;
     for (let j = 0; j <= wy; j++) {
-      for (let i = 0; i <= wx; i++) {
+      for (let i = 0; i <= wx; i++, k++) {
         const x = (i / wx) * WORLD_W;
         const y = (j / wy) * WORLD_H;
         const e = elevation(x, y, id);
-        const sl = slopeAt(x, y, id);
-        pos.push(x - WORLD_W / 2 + o.x, e * hScale, y - WORLD_H / 2 + o.z);
-        let r = 0.93, g = 0.95, b = 0.97;
-        if (y < 150) {
-          r = lerp(0.82, r, y / 150);
-          g = lerp(0.8, g, y / 150);
-          b = lerp(0.74, b, y / 150);
-        } else if (sl > 0.01 && e > 0.55) {
-          r = 0.55; g = 0.55; b = 0.58;
-        } else if (e < 0.22) {
-          r = 0.78; g = 0.84; b = 0.8;
+        const g = gradeAt(x, y, id);
+        pos[k * 3] = x - WORLD_W / 2 + o.x;
+        pos[k * 3 + 1] = e * hScale;
+        pos[k * 3 + 2] = y - WORLD_H / 2 + o.z;
+        const hx = (elevation(x + cell, y, id) - elevation(x - cell, y, id)) * hScale;
+        const hz = (elevation(x, y + cell, id) - elevation(x, y - cell, id)) * hScale;
+        const nl = Math.hypot(hx, 2 * cell, hz);
+        nor[k * 3] = -hx / nl;
+        nor[k * 3 + 1] = (2 * cell) / nl;
+        nor[k * 3 + 2] = -hz / nl;
+
+        // Natural look: the steeper it gets, the more wind-blown, then rocky.
+        const grain = noise2(x * 0.06, y * 0.06);
+        const streak = noise2(x * 0.02, y * 0.004);
+        if (g < 0.25) c.copy(groomed);
+        else if (g < 0.45) c.copy(groomed).lerp(packed, (g - 0.25) / 0.2);
+        else c.copy(packed).lerp(wind, Math.min(1, (g - 0.45) / 0.25));
+        const rockAmt = smooth(0.75, 1.1, g + (streak - 0.5) * 0.35);
+        if (rockAmt > 0) c.lerp(streak > 0.55 ? rockDark : rock, rockAmt * 0.92);
+        // Woods read as a dark tint from far away; real trees are drawn near the camera.
+        const woods = smooth(0.32, 0.62, forestDensity(x, y)) * (1 - rockAmt);
+        if (woods > 0) c.lerp(forest, woods * 0.55);
+        const shade = (grain - 0.5) * 0.05;
+        natural[k * 3] = c.r + shade;
+        natural[k * 3 + 1] = c.g + shade;
+        natural[k * 3 + 2] = c.b + shade;
+
+        // Overlay: same bands the trail classifier uses.
+        const band: Difficulty = classifyGrade(g * 100, 100);
+        c.copy(BAND_COLORS[band]).lerp(groomed, 0.18);
+        overlay[k * 3] = c.r;
+        overlay[k * 3 + 1] = c.g;
+        overlay[k * 3 + 2] = c.b;
+      }
+    }
+
+    const group = new THREE.Group();
+    group.userData = { kind: "terrain", mountain: id };
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 });
+    const tile = 64;
+    for (let tj = 0; tj < wy; tj += tile) {
+      for (let ti = 0; ti < wx; ti += tile) {
+        const cw = Math.min(tile, wx - ti);
+        const ch = Math.min(tile, wy - tj);
+        const m = (cw + 1) * (ch + 1);
+        const tp = new Float32Array(m * 3);
+        const tn = new Float32Array(m * 3);
+        const tnat = new Float32Array(m * 3);
+        const tov = new Float32Array(m * 3);
+        let q = 0;
+        for (let j = 0; j <= ch; j++) {
+          for (let i = 0; i <= cw; i++, q++) {
+            const src = ((tj + j) * (wx + 1) + (ti + i)) * 3;
+            for (let d = 0; d < 3; d++) {
+              tp[q * 3 + d] = pos[src + d];
+              tn[q * 3 + d] = nor[src + d];
+              tnat[q * 3 + d] = natural[src + d];
+              tov[q * 3 + d] = overlay[src + d];
+            }
+          }
         }
-        const n = noise2(x * 0.05, y * 0.05) * 0.06;
-        col.push(r - n, g - n, b - n);
+        const idx: number[] = [];
+        for (let j = 0; j < ch; j++) {
+          for (let i = 0; i < cw; i++) {
+            const a = j * (cw + 1) + i;
+            idx.push(a, a + cw + 1, a + 1, a + 1, a + cw + 1, a + cw + 2);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(tp, 3));
+        geo.setAttribute("normal", new THREE.BufferAttribute(tn, 3));
+        const naturalAttr = new THREE.Float32BufferAttribute(tnat, 3);
+        const overlayAttr = new THREE.Float32BufferAttribute(tov, 3);
+        geo.userData = { natural: naturalAttr, overlay: overlayAttr };
+        geo.setAttribute("color", naturalAttr);
+        geo.setIndex(idx);
+        geo.computeBoundingSphere();
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.receiveShadow = true;
+        mesh.castShadow = true;
+        mesh.userData = { kind: "terrain", mountain: id };
+        group.add(mesh);
       }
     }
-    for (let j = 0; j < wy; j++) {
-      for (let i = 0; i < wx; i++) {
-        const a = j * (wx + 1) + i;
-        idx.push(a, a + 1, a + wx + 1, a + 1, a + wx + 2, a + wx + 1);
-      }
-    }
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.92,
-      metalness: 0.02,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.receiveShadow = true;
-    mesh.userData = { kind: "terrain", mountain: id };
-    return mesh;
+    group.add(makeSkirt(id));
+    // Low-poly stand-in used only for mouse picking (refined against the heightfield).
+    const proxy = new THREE.Mesh(makeProxyGeometry(id), new THREE.MeshBasicMaterial({ visible: false }));
+    proxy.userData = { kind: "terrain", mountain: id };
+    this.pickProxy = proxy;
+    this.scene.add(proxy);
+    return group;
   }
 
   private makeEmptyTrees(): THREE.InstancedMesh {
-    const geo = new THREE.ConeGeometry(3.4, 14, 6);
-    const mat = new THREE.MeshLambertMaterial({ color: "#1f4a33" });
-    const mesh = new THREE.InstancedMesh(geo, mat, 500);
+    const lower = new THREE.ConeGeometry(3.8, 9, 7);
+    lower.translate(0, -2, 0);
+    const upper = new THREE.ConeGeometry(2.6, 8, 7);
+    upper.translate(0, 3.5, 0);
+    const trunk = new THREE.CylinderGeometry(0.45, 0.6, 3, 5);
+    trunk.translate(0, -7.5, 0);
+    const geo = mergeGeometries([lower, upper, trunk])!;
+    const mat = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const mesh = new THREE.InstancedMesh(geo, mat, TREES_DRAWN);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.castShadow = true;
     mesh.count = 0;
     return mesh;
   }
 
-  private makeFarTrees(): THREE.InstancedMesh {
-    const geo = new THREE.ConeGeometry(4.2, 18, 5);
-    const mat = new THREE.MeshLambertMaterial({ color: "#163828" });
-    const mesh = new THREE.InstancedMesh(geo, mat, 280);
-    const dummy = this.tmp;
-    let n = 0;
-    for (let i = 0; i < 280; i++) {
-      const a = noise2(i * 0.41, 3) * Math.PI * 2;
-      const r = 420 + noise2(i * 0.2, 9) * 520;
-      const x = Math.cos(a) * r;
-      const z = Math.sin(a) * r;
-      if (Math.abs(x) < WORLD_W * 0.55 && Math.abs(z) < WORLD_H * 0.55) continue;
-      dummy.position.set(x, 8, z);
-      dummy.scale.setScalar(0.8 + noise2(i, 1) * 1.4);
-      dummy.rotation.y = a;
-      dummy.updateMatrix();
-      mesh.setMatrixAt(n++, dummy.matrix);
-    }
-    mesh.count = n;
-    mesh.instanceMatrix.needsUpdate = true;
-    return mesh;
-  }
-
-  private makeLine(color: string): THREE.Line {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
-    line.visible = false;
-    line.frustumCulled = false;
-    return line;
-  }
-
   private makeSnow(): THREE.Points {
-    const count = 500;
+    const count = 1200;
     const pos = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
-      pos[i * 3] = (Math.random() - 0.5) * 900;
-      pos[i * 3 + 1] = Math.random() * 280;
-      pos[i * 3 + 2] = (Math.random() - 0.5) * 1000;
+      pos[i * 3] = (Math.random() - 0.5) * 1400;
+      pos[i * 3 + 1] = Math.random() * 900;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 1400;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
@@ -401,44 +605,97 @@ export class World3D {
     const pos = this.snow.geometry.getAttribute("position") as THREE.BufferAttribute;
     for (let i = 0; i < pos.count; i++) {
       let y = pos.getY(i) - (8 + speed * 10) * dt;
-      if (y < 0) y = 260;
+      if (y < 0) y = 880;
       pos.setY(i, y);
     }
     pos.needsUpdate = true;
+    this.snow.position.set(this.controls.target.x, this.controls.target.y - 300, this.controls.target.z);
+    // Only snow around you when you're close in; from far out it reads as a cloud.
+    this.snow.visible = this.camera.position.distanceTo(this.controls.target) < 1600;
   }
 
   private syncStatic(game: Game): void {
-    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.length}:${game.trees.length}:${game.selected?.kind}:${game.selected?.id}:${game.owned.join(",")}`;
+    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.map((b) => `${b.id}@${Math.round(b.x)},${Math.round(b.y)}`).join(",")}:${game.forestVersion}:${game.features.length}:${game.selected?.kind}:${game.selected?.id}:${game.conquered.size}:${game.lifts.map((l) => l.id).join(",")}`;
     if (key === this.stamp) return;
     this.stamp = key;
-    this.layoutTrees(game);
+    this.treeVersion = -1;
     this.layoutTrails(game);
     this.layoutBuildings(game);
     this.layoutLift(game);
-    this.terrains.forEach((mesh, i) => {
-      const owned = game.owned.includes(i as MountainId);
-      const mat = mesh.material as THREE.MeshStandardMaterial;
-      mat.emissive = new THREE.Color(owned ? "#000000" : "#1a2430");
-      mat.emissiveIntensity = owned ? 0 : 0.12;
-      mat.opacity = owned ? 1 : 0.72;
-      mat.transparent = !owned;
-    });
+    this.layoutFeatures(game);
+    this.layoutPeaks(game);
+  }
+
+  /** A flag on every summit: grey until a lift reaches it, gold once conquered. */
+  private layoutPeaks(game: Game): void {
+    this.peakGroup.clear();
+    for (const p of SUMMITS) {
+      const done = game.conquered.has(p.id);
+      const base = to3(p.x, p.y, 0, this.mid);
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 40, 6), std("#3a3f45"));
+      pole.position.copy(base).add(new THREE.Vector3(0, 20, 0));
+      const flag = new THREE.Mesh(new THREE.PlaneGeometry(22, 13), std(done ? "#e2b857" : "#c8ced6", { side: THREE.DoubleSide }));
+      flag.position.copy(base).add(new THREE.Vector3(11, 33, 0));
+      this.peakGroup.add(pole, flag);
+      const label = makePeakLabel(`${done ? "🚩 " : ""}${p.name} · ${p.elevation.toLocaleString()} m`, done);
+      label.position.copy(base).add(new THREE.Vector3(0, 70, 0));
+      this.peakGroup.add(label);
+    }
+  }
+
+  private layoutFeatures(game: Game): void {
+    this.featureGroup.clear();
+    for (const f of game.features) {
+      const m = makeFeatureMesh(f.type, false);
+      placeFeature(m, f, this.mid);
+      this.featureGroup.add(m);
+    }
+  }
+
+  /** Trees are only drawn near where you're looking; farther out the ground is tinted. */
+  private treeCentre = { x: -1e9, y: -1e9 };
+  private treeVersion = -1;
+
+  private syncTrees(game: Game): void {
+    const g = from3(this.controls.target, this.mid);
+    const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > 350;
+    if (!moved && this.treeVersion === game.forestVersion) return;
+    this.treeCentre = g;
+    this.treeVersion = game.forestVersion;
+    this.layoutTrees(game);
   }
 
   private layoutTrees(game: Game): void {
     const dummy = this.tmp;
-    const n = Math.min(game.trees.length, this.trees.count === 0 ? 500 : 500);
-    this.trees.count = n;
-    for (let i = 0; i < n; i++) {
-      const t = game.trees[i];
-      const p = to3(t.x, t.y, 7, this.mid);
-      dummy.position.copy(p);
-      dummy.scale.setScalar(0.7 + noise2(t.x, t.y) * 0.9);
+    const col = new THREE.Color();
+    let n = 0;
+    const c = this.treeCentre;
+    const r = TREE_RADIUS;
+    const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r);
+    for (const t of list) {
+      if (n >= TREES_DRAWN) break;
+      const d = Math.hypot(t.x - c.x, t.y - c.y);
+      if (d > r) continue;
+      // Thin the trees out toward the edge so the drawn forest blends into the tinted ground.
+      if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.6, r, d)) continue;
+      const sc = 0.7 + noise2(t.x, t.y) * 0.9;
+      dummy.position.copy(to3(t.x, t.y, 8 * sc, this.mid));
+      dummy.scale.setScalar(sc);
       dummy.rotation.set(0, t.x * 0.1, 0);
       dummy.updateMatrix();
-      this.trees.setMatrixAt(i, dummy.matrix);
+      this.trees.setMatrixAt(n, dummy.matrix);
+      const v = noise2(t.x * 0.7, t.y * 0.7);
+      col.setHSL(0.38 + v * 0.06, 0.38 + v * 0.15, 0.17 + v * 0.07);
+      this.trees.setColorAt(n, col);
+      n++;
     }
+    this.trees.count = n;
     this.trees.instanceMatrix.needsUpdate = true;
+    if (this.trees.instanceColor) this.trees.instanceColor.needsUpdate = true;
+    // Bounds are cached from the first layout; refresh them or trees on the
+    // other mountains get frustum-culled.
+    this.trees.computeBoundingSphere();
+    this.trees.computeBoundingBox();
   }
 
   private layoutTrails(game: Game): void {
@@ -451,12 +708,12 @@ export class World3D {
 
   private layoutBuildings(game: Game): void {
     this.buildingGroup.clear();
-    this.buildingGroup.add(makeVillageProps(this.mid));
+    this.buildingGroup.add(makeVillageProps(this.mid, game.booth(), game.exit(), game.villageRadius()));
     for (const b of game.buildings) {
       const mesh = makeBuildingMesh(b.type, false);
       mesh.position.copy(to3(b.x, b.y, 0, this.mid));
       mesh.userData = { kind: "building", id: b.id };
-      const tag = makeRateSprite(`$${INCOME_PER_MIN[b.type]}/min`);
+      const tag = makeRateSprite(b.type === "heli" ? `$${HELI.fare}/seat` : `$${INCOME_PER_MIN[b.type]}/min`);
       tag.position.y = b.type === "hotel" ? 28 : b.type === "condo" || b.type === "lodge" ? 20 : 14;
       mesh.add(tag);
       if (game.selected?.kind === "building" && game.selected.id === b.id) {
@@ -473,124 +730,447 @@ export class World3D {
 
   private layoutLift(game: Game): void {
     this.liftGroup.clear();
-    this.carriers = [];
-    const bot = to3(game.lift.bottom.x, game.lift.bottom.y, 0, this.mid);
-    const top = to3(game.lift.top.x, game.lift.top.y, 0, this.mid);
-    const cableH = 16;
-    for (const p of [bot, top]) {
-      const tower = makeTower();
-      tower.position.copy(p);
-      tower.userData = { kind: "lift", id: 0 };
-      this.liftGroup.add(tower);
-    }
-    const midCount = 3;
-    for (let i = 1; i <= midCount; i++) {
-      const t = i / (midCount + 1);
-      const p = bot.clone().lerp(top, t);
-      p.y = lerp(bot.y, top.y, t);
-      const tower = makeTower();
-      tower.scale.set(0.8, 0.8, 0.8);
-      tower.position.copy(p);
-      tower.userData = { kind: "lift", id: 0 };
-      this.liftGroup.add(tower);
-    }
-    const c0 = bot.clone();
-    c0.y += cableH;
-    const c1 = top.clone();
-    c1.y += cableH;
-    const cableGeo = new THREE.BufferGeometry().setFromPoints([c0, c1]);
-    const cable = new THREE.Line(cableGeo, new THREE.LineBasicMaterial({ color: "#22262c" }));
-    cable.userData = { kind: "lift", id: 0 };
-    this.liftGroup.add(cable);
-    for (let i = 0; i < game.lift.carriers.length; i++) {
-      const bar = makeTBar();
-      this.liftGroup.add(bar);
-      this.carriers.push(bar);
+    this.liftVis.clear();
+    for (const lift of game.lifts) {
+      const selected = game.selected?.kind === "lift" && game.selected.id === lift.id;
+      const vis = buildLift(lift, this.mid, selected);
+      this.liftGroup.add(vis.group);
+      this.liftVis.set(lift.id, vis);
     }
   }
 
   private syncLift(game: Game): void {
-    const bot = to3(game.lift.bottom.x, game.lift.bottom.y, 16, this.mid);
-    const top = to3(game.lift.top.x, game.lift.top.y, 16, this.mid);
-    for (let i = 0; i < this.carriers.length; i++) {
-      const t = game.lift.carriers[i]?.t ?? 0;
-      this.carriers[i].position.lerpVectors(bot, top, t);
+    for (const lift of game.lifts) {
+      const vis = this.liftVis.get(lift.id);
+      if (!vis) continue;
+      for (let i = 0; i < vis.up.length; i++) {
+        const t = lift.carriers[i]?.t ?? 0;
+        placeCarrier(vis, vis.up[i], t, 1);
+        if (vis.down[i]) placeCarrier(vis, vis.down[i], 1 - t, -1);
+      }
     }
   }
 
-  private syncSkiers(game: Game): void {
-    for (let i = 0; i < this.skiers.length; i++) {
-      const mesh = this.skiers[i];
-      const s = game.skiers[i];
-      if (!s) {
-        mesh.visible = false;
-        continue;
-      }
-      mesh.visible = true;
-      const p = to3(s.x, s.y, 1.4, this.mid);
-      mesh.position.copy(p);
-      mesh.userData = { kind: "skier", id: s.id };
-      const body = mesh.children[0] as THREE.Mesh;
-      if (body && body.material instanceof THREE.MeshLambertMaterial) {
-        body.material.color.set(s.color);
-      }
+  /** Helicopter sits on the pad; on a drop it climbs away over the ridge and comes back. */
+  private syncHeli(game: Game, dt: number): void {
+    const pad = game.helipad();
+    const h = this.helicopter;
+    if (!pad) {
+      h.visible = false;
+      return;
     }
+    const base = to3(pad.x, pad.y, 1.2, this.mid);
+    const away = base.clone().add(new THREE.Vector3(0, 2600, -9000));
+    let pos = base;
+    let spin = game.heli.wait > 0 ? 8 : 0;
+    h.visible = true;
+    if (game.heli.flying) {
+      const u = game.heli.t / HELI.tripTime;
+      spin = 30;
+      const ease = (x: number) => x * x * (3 - 2 * x);
+      if (u < 0.25) pos = base.clone().lerp(away, ease(u / 0.25));
+      else if (u > 0.75) pos = away.clone().lerp(base, ease((u - 0.75) / 0.25));
+      else {
+        pos = away;
+        h.visible = false; // off the map, in the backcountry
+      }
+      const dir = u < 0.5 ? away.clone().sub(base) : base.clone().sub(away);
+      h.rotation.y = Math.atan2(dir.x, dir.z);
+    }
+    h.position.copy(pos);
+    this.rotorSpin += spin * dt * (game.paused ? 0 : 1);
+    const rotor = h.getObjectByName("rotor");
+    if (rotor) rotor.rotation.y = this.rotorSpin;
+  }
+
+  private syncLiftPreview(game: Game): void {
+    const type = game.liftTool();
+    if (!type || !game.liftStart) {
+      this.liftPreview.visible = false;
+      this.liftPreviewKey = "";
+      return;
+    }
+    const pv = game.liftPreview();
+    const a = game.liftStart;
+    const b = pv?.b;
+    const key = `${type}:${a.x}:${a.y}:${b ? `${Math.round(b.x)}:${Math.round(b.y)}:${pv?.error ?? ""}` : ""}`;
+    if (key === this.liftPreviewKey) return;
+    this.liftPreviewKey = key;
+    this.liftPreview.clear();
+    const ok = !pv || !pv.error;
+    const color = new THREE.Color(ok ? "#7dcea0" : "#e0664f");
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthTest: false });
+    const marker = (p: Vec2) => {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(4, 4, 18, 12, 1, true), mat);
+      m.position.copy(to3(p.x, p.y, 9, this.mid));
+      m.renderOrder = 5;
+      this.liftPreview.add(m);
+    };
+    marker(a);
+    if (b) {
+      marker(b);
+      const spec = LIFT_SPECS[type];
+      const h = Math.max(2, spec.towerH);
+      const n = 24;
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        const x = a.x + (b.x - a.x) * t;
+        const y = a.y + (b.y - a.y) * t;
+        // Surface lifts hug the snow; aerial lifts run a straight cable.
+        if (spec.surface) pts.push(to3(x, y, h, this.mid));
+        else {
+          const p = to3(x, y, 0, this.mid);
+          p.y = lerp(to3(a.x, a.y, h, this.mid).y, to3(b.x, b.y, h, this.mid).y, t);
+          pts.push(p);
+        }
+      }
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 1.1, 6), mat);
+      tube.renderOrder = 5;
+      this.liftPreview.add(tube);
+    }
+    this.liftPreview.visible = true;
+  }
+
+  private syncSkiers(game: Game): void {
+    const { body, head, skis } = this.crowd;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const one = new THREE.Vector3(1, 1, 1);
+    const up = new THREE.Vector3(0, 1, 0);
+    const p = new THREE.Vector3();
+    let n = 0;
+    for (const s of game.skiers) {
+      if (n >= MAX_SKIERS_DRAWN) break;
+      if (s.state === "heli") continue; // off the map
+      const g = to3(s.x, s.y, 0, this.mid);
+      p.copy(g);
+      if (s.state === "riding" && s.liftId != null) {
+        const vis = this.liftVis.get(s.liftId);
+        if (vis && !vis.spec.surface) {
+          if (vis.type === "gondola") continue; // inside the cabin
+          const c = vis.at(s.rideT, 1);
+          p.x += vis.side.x * vis.gauge * 0.5;
+          p.z += vis.side.z * vis.gauge * 0.5;
+          p.y = c.y - vis.hang - 1.2;
+        }
+      }
+      if (s.air > 0 && s.state === "skiing") p.y += Math.sin(Math.min(1, s.air / 0.75) * Math.PI) * 5;
+      // Face roughly downhill while skiing, up the hill otherwise.
+      q.setFromAxisAngle(up, ((s.id * 2.399) % (Math.PI * 2)) * (s.state === "skiing" ? 0.15 : 1));
+      m.compose(p, q, one);
+      skis.setMatrixAt(n, m);
+      p.y += 2.2;
+      m.compose(p, q, one);
+      body.setMatrixAt(n, m);
+      p.y += 1.4;
+      m.compose(p, q, one);
+      head.setMatrixAt(n, m);
+      let c = this.jacketColors.get(s.color);
+      if (!c) this.jacketColors.set(s.color, (c = new THREE.Color(s.color)));
+      body.setColorAt(n, c);
+      n++;
+    }
+    for (const mesh of [body, head, skis]) {
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    if (body.instanceColor) body.instanceColor.needsUpdate = true;
   }
 
   private syncDraft(game: Game): void {
     if (game.draft.length < 1) {
       this.draft.visible = false;
+      this.draftKey = "";
       return;
     }
-    const pts = game.draft.map((p) => to3(p.x, p.y, 1.5, this.mid));
-    if (pts.length === 1) pts.push(pts[0].clone());
-    this.draft.geometry.dispose();
-    this.draft.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    const last = game.draft[game.draft.length - 1];
+    const key = `${this.mid}:${game.draft.length}:${last.x}:${last.y}`;
+    if (key !== this.draftKey) {
+      this.draftKey = key;
+      // Colour each leg by its own pitch so you can see where the run gets steep.
+      const pts = game.draft.length === 1 ? [last, { x: last.x, y: last.y - 0.5 }] : game.draft;
+      const geo = buildRibbon(pts, this.mid, 5, 1.1, (seg) => {
+        const a = pts[seg];
+        const b = pts[seg + 1];
+        const drop = (elevation(a.x, a.y, this.mid) - elevation(b.x, b.y, this.mid)) * VERTICAL_M;
+        const len = Math.hypot(b.x - a.x, b.y - a.y) * UNIT_M;
+        const c = BAND_COLORS[classifyGrade(drop, len)];
+        return [c, c];
+      });
+      this.draft.geometry.dispose();
+      this.draft.geometry = geo;
+    }
     this.draft.visible = true;
   }
 }
 
-function makeTrailRibbon(t: Trail, glow: boolean, mid: MountainId): THREE.Mesh {
-  const pts = t.points.map((p) => to3(p.x, p.y, 0.9, mid));
-  const width = 6.5;
+function smooth(a: number, b: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * A strip that hugs the terrain: the path is resampled every few units and
+ * both edges are sampled from the heightfield, so it never cuts through bumps.
+ * `colorFor(segment)` returns [edge, centre] colours for that leg.
+ */
+function buildRibbon(
+  points: Vec2[],
+  mid: MountainId,
+  width: number,
+  lift: number,
+  colorFor: (segment: number) => [THREE.Color, THREE.Color],
+  edgeFrac = 0.22,
+): THREE.BufferGeometry {
+  const samples: { x: number; y: number; seg: number; along: number }[] = [];
+  let along = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(1, Math.ceil(len / 3));
+    for (let k = i === 1 ? 0 : 1; k <= steps; k++) {
+      const t = k / steps;
+      samples.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, seg: i - 1, along: along + len * t });
+    }
+    along += len;
+  }
+  const cols = [-0.5, -0.5 + edgeFrac, 0.5 - edgeFrac, 0.5];
   const pos: number[] = [];
+  const col: number[] = [];
   const idx: number[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const prev = pts[Math.max(0, i - 1)];
-    const next = pts[Math.min(pts.length - 1, i + 1)];
-    const dir = new THREE.Vector3().subVectors(next, prev);
-    dir.y = 0;
-    if (dir.lengthSq() < 0.0001) dir.set(1, 0, 0);
-    dir.normalize();
-    const perp = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(width * 0.5);
-    const l = pts[i].clone().add(perp);
-    const r = pts[i].clone().sub(perp);
-    pos.push(l.x, l.y, l.z, r.x, r.y, r.z);
-    if (i < pts.length - 1) {
-      const a = i * 2;
-      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  for (let i = 0; i < samples.length; i++) {
+    const p = samples[i];
+    const prev = samples[Math.max(0, i - 1)];
+    const next = samples[Math.min(samples.length - 1, i + 1)];
+    let dx = next.x - prev.x;
+    let dy = next.y - prev.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    const [edge, centre] = colorFor(p.seg);
+    for (let c = 0; c < cols.length; c++) {
+      const off = cols[c] * width;
+      const v = to3(p.x - dy * off, p.y + dx * off, lift, mid);
+      pos.push(v.x, v.y, v.z);
+      const cc = c === 0 || c === 3 ? edge : centre;
+      col.push(cc.r, cc.g, cc.b);
+    }
+    if (i < samples.length - 1) {
+      const a = i * 4;
+      for (let c = 0; c < 3; c++) {
+        idx.push(a + c, a + c + 1, a + c + 4, a + c + 1, a + c + 5, a + c + 4);
+      }
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  const color = new THREE.Color(DIFF[t.difficulty].color);
+  geo.userData.samples = samples;
+  return geo;
+}
+
+function makeTrailRibbon(t: Trail, glow: boolean, mid: MountainId): THREE.Mesh {
+  const diffColor = new THREE.Color(DIFF[t.difficulty].color);
+  // Park runs get the orange edges parks are signed with.
+  const edge = t.kind === "park" ? new THREE.Color("#f0892a") : t.difficulty >= 2 ? new THREE.Color("#23262b") : diffColor;
+  const centre = new THREE.Color(t.kind === "moguls" ? "#e9eef3" : t.kind === "glades" ? "#dfe8ee" : "#fbfdff");
+  const width = TRAIL_KIND_SPEC[t.kind].width;
+  const geo = buildRibbon(t.points, mid, width, 0.7, () => [edge, centre], t.kind === "park" ? 0.1 : 0.2);
   const mat = new THREE.MeshStandardMaterial({
-    color: glow ? color : new THREE.Color("#f4f8fc"),
-    emissive: color,
-    emissiveIntensity: glow ? 0.35 : 0.12,
-    roughness: 0.7,
-    side: THREE.DoubleSide,
+    vertexColors: true,
+    emissive: diffColor,
+    emissiveIntensity: glow ? 0.45 : 0,
+    roughness: 0.75,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+    // Glades aren't groomed: just a faint corridor through the trees.
+    transparent: t.kind === "glades",
+    opacity: t.kind === "glades" ? (glow ? 0.6 : 0.3) : 1,
   });
   const mesh = new THREE.Mesh(geo, mat);
+  mesh.receiveShadow = true;
   mesh.userData = { kind: "trail", id: t.id };
-  const edge = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(pts),
-    new THREE.LineBasicMaterial({ color, linewidth: 2 }),
+  if (t.kind === "glades") mesh.add(makeBoundaryPoles(mid, width, geo.userData.samples));
+
+  if (t.kind === "moguls") mesh.add(makeMoguls(t, mid, width, geo.userData.samples));
+  if (t.kind === "slalom") mesh.add(makeGates(mid, width, geo.userData.samples));
+
+  // Trailhead sign with the difficulty symbol.
+  const head = t.points[0];
+  const post = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.35, 0.35, 10, 5),
+    new THREE.MeshStandardMaterial({ color: "#5a3c26" }),
   );
-  mesh.add(edge);
+  post.scale.y = 1.6;
+  post.position.copy(to3(head.x, head.y, 8, mid));
+  post.castShadow = true;
+  mesh.add(post);
+  const sign = makeTrailSign(t.name, t.difficulty);
+  sign.position.copy(to3(head.x, head.y, 21, mid));
+  mesh.add(sign);
   return mesh;
+}
+
+function makeMoguls(t: Trail, mid: MountainId, width: number, samples: { x: number; y: number; along: number }[]): THREE.InstancedMesh {
+  const double = t.difficulty >= 2;
+  const spacing = double ? 4.2 : 5.5;
+  const geo = new THREE.SphereGeometry(1, 9, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+  const mat = new THREE.MeshStandardMaterial({ color: "#f3f6fa", roughness: 0.85 });
+  const max = Math.ceil(t.length / spacing) * 3 + 3;
+  const inst = new THREE.InstancedMesh(geo, mat, max);
+  inst.castShadow = true;
+  inst.receiveShadow = true;
+  const dummy = new THREE.Object3D();
+  let n = 0;
+  let next = 6;
+  let row = 0;
+  for (let i = 1; i < samples.length && n < max - 3; i++) {
+    const p = samples[i];
+    if (p.along < next) continue;
+    next += spacing;
+    row++;
+    const prev = samples[i - 1];
+    let dx = p.x - prev.x;
+    let dy = p.y - prev.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    const lanes = double ? [-0.3, 0, 0.3] : [-0.22, 0.22];
+    for (const lane of lanes) {
+      const off = (lane + (row % 2 ? 0.08 : -0.08)) * width;
+      const jitter = (noise2(p.x * 0.9 + lane * 5, p.y * 0.9) - 0.5) * 1.2;
+      const x = p.x - dy * off + dx * jitter;
+      const y = p.y + dx * off + dy * jitter;
+      dummy.position.copy(to3(x, y, 0.4, mid));
+      const r = (double ? 2.2 : 1.8) * (0.85 + noise2(x, y) * 0.35);
+      dummy.scale.set(r * 1.25, r * 0.55, r);
+      dummy.rotation.set(0, Math.atan2(dx, dy), 0);
+      dummy.updateMatrix();
+      inst.setMatrixAt(n++, dummy.matrix);
+    }
+  }
+  inst.count = n;
+  inst.instanceMatrix.needsUpdate = true;
+  return inst;
+}
+
+function makeTrailSign(name: string, diff: Difficulty): THREE.Sprite {
+  const c = document.createElement("canvas");
+  c.width = 384;
+  c.height = 96;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "rgba(250, 252, 255, 0.96)";
+  ctx.beginPath();
+  ctx.roundRect(4, 4, 376, 88, 18);
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#1d2a36";
+  ctx.stroke();
+  const cy = 48;
+  ctx.fillStyle = DIFF[diff].color;
+  if (diff === 0) {
+    ctx.beginPath();
+    ctx.arc(52, cy, 24, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (diff === 1) {
+    ctx.fillRect(30, cy - 22, 44, 44);
+  } else {
+    const diamond = (cx: number) => {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 27);
+      ctx.lineTo(cx + 20, cy);
+      ctx.lineTo(cx, cy + 27);
+      ctx.lineTo(cx - 20, cy);
+      ctx.closePath();
+      ctx.fill();
+    };
+    if (diff === 2) diamond(52);
+    else {
+      diamond(36);
+      diamond(70);
+    }
+  }
+  ctx.fillStyle = "#1d2a36";
+  ctx.font = "800 34px Nunito, Segoe UI, sans-serif";
+  ctx.textBaseline = "middle";
+  const x0 = diff === 3 ? 104 : 92;
+  let label = name;
+  while (ctx.measureText(label).width > 370 - x0 && label.length > 3) label = label.slice(0, -2) + "…";
+  ctx.fillText(label, x0, cy + 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+  sprite.scale.set(44, 11, 1);
+  sprite.renderOrder = 2;
+  return sprite;
+}
+
+/** Rock curtain hanging off the terrain edges so the hill doesn't look like a floating sheet. */
+function makeSkirt(id: MountainId): THREE.Mesh {
+  const steps = 96;
+  const ring: Vec2[] = [];
+  for (let i = 0; i <= steps; i++) ring.push({ x: (i / steps) * WORLD_W, y: 0 });
+  for (let i = 1; i <= steps; i++) ring.push({ x: WORLD_W, y: (i / steps) * WORLD_H });
+  for (let i = 1; i <= steps; i++) ring.push({ x: WORLD_W - (i / steps) * WORLD_W, y: WORLD_H });
+  for (let i = 1; i <= steps; i++) ring.push({ x: 0, y: WORLD_H - (i / steps) * WORLD_H });
+  const pos: number[] = [];
+  const idx: number[] = [];
+  ring.forEach((p, i) => {
+    const top = to3(p.x, p.y, 0, id);
+    pos.push(top.x, top.y, top.z, top.x, -2, top.z);
+    if (i < ring.length - 1) {
+      const a = i * 2;
+      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: "#8c939b", roughness: 1, side: THREE.DoubleSide }));
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/** Distant snowy range so the horizon isn't empty. */
+/** Distant range around one mountain area; each mountain gets its own skyline. */
+function makeBackdrop(id: MountainId): THREE.Group {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
+  const snow = new THREE.Color("#eef3f8");
+  const rockC = new THREE.Color("#7d8794");
+  for (let i = 0; i < 26; i++) {
+    const a = (i / 26) * Math.PI * 2 + noise2(i * 1.7 + id * 31, 4) * 0.2;
+    const r = 30000 + noise2(i * 0.9 + id * 17, 7) * 9000;
+    const x = Math.cos(a) * r * 1.1;
+    const z = Math.sin(a) * r;
+    const height = 2200 + noise2(i * 2.3 + id * 13, 11) * 2600;
+    const geo = new THREE.ConeGeometry(height * 1.25, height, 7, 3);
+    const p = geo.getAttribute("position") as THREE.BufferAttribute;
+    const colors: number[] = [];
+    for (let v = 0; v < p.count; v++) {
+      const yy = p.getY(v);
+      if (yy < height / 2 - 1) {
+        p.setX(v, p.getX(v) * (0.85 + noise2(v * 0.7, i) * 0.35));
+        p.setZ(v, p.getZ(v) * (0.85 + noise2(i, v * 0.7) * 0.35));
+      }
+      const t = (yy + height / 2) / height;
+      const c = rockC.clone().lerp(snow, smooth(0.25, 0.55, t));
+      colors.push(c.r, c.g, c.b);
+    }
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, height / 2 - 6, z);
+    m.rotation.y = a;
+    g.add(m);
+  }
+  return g;
 }
 
 function makeSignSprite(text: string): THREE.Sprite {
@@ -637,6 +1217,7 @@ function makeRateSprite(text: string): THREE.Sprite {
 }
 
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
+  if (type === "heli") return makeHelipad(ghost);
   const g = new THREE.Group();
   const palette: Record<BuildingType, { body: string; roof: string; w: number; d: number; h: number }> = {
     lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
@@ -649,6 +1230,8 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     shop: { body: "#f0e6c8", roof: "#355e3b", w: 16, d: 12, h: 8 },
     condo: { body: "#d7dde4", roof: "#2c3d4f", w: 24, d: 18, h: 16 },
     patrol: { body: "#dfe7ee", roof: "#c45c4a", w: 12, d: 10, h: 7 },
+    school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
+    heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
   };
   const p = palette[type];
   const bodyMat = new THREE.MeshStandardMaterial({ color: p.body, roughness: 0.8 });
@@ -670,80 +1253,639 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   return g;
 }
 
-function makeVillageProps(mid: MountainId): THREE.Group {
+/** Ticket booth, parking and the village boundary around the base. */
+function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: number): THREE.Group {
   const g = new THREE.Group();
-  const booth = makeBuildingMesh("restroom", false);
-  booth.scale.set(0.7, 0.85, 0.7);
-  booth.position.copy(to3(352, 92, 0, mid));
-  booth.userData = { kind: "hill" };
-  g.add(booth);
-  const road = new THREE.Mesh(
-    new THREE.BoxGeometry(18, 0.4, 90),
-    new THREE.MeshLambertMaterial({ color: "#5c6570" }),
-  );
-  road.position.copy(to3(300, 50, 0.2, mid));
-  g.add(road);
+  const hut = makeBuildingMesh("restroom", false);
+  hut.scale.set(0.7, 0.85, 0.7);
+  hut.position.copy(to3(booth.x, booth.y, 0, mid));
+  hut.userData = { kind: "hill" };
+  g.add(hut);
   const colors = ["#8b3a32", "#2e4a72", "#d5d0c4", "#355e3b"];
-  const spots = [
-    [240, 28],
-    [268, 32],
-    [296, 26],
-    [390, 34],
-  ];
-  spots.forEach(([x, y], i) => {
-    const car = new THREE.Mesh(new THREE.BoxGeometry(6, 2.2, 3.2), new THREE.MeshLambertMaterial({ color: colors[i] }));
-    car.position.copy(to3(x, y, 1.2, mid));
+  const lot = new THREE.Mesh(new THREE.BoxGeometry(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
+  lot.position.copy(to3(exit.x, exit.y, 0.2, mid));
+  g.add(lot);
+  for (let i = 0; i < 60; i++) {
+    if (noise2(i * 1.3, 2) < 0.35) continue;
+    const car = new THREE.Mesh(new THREE.BoxGeometry(5, 2.2, 2.6), new THREE.MeshLambertMaterial({ color: colors[i % colors.length] }));
+    car.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 1.1, mid));
     g.add(car);
-  });
-  const pad = new THREE.Mesh(
-    new THREE.BoxGeometry(220, 0.35, 90),
-    new THREE.MeshLambertMaterial({ color: "#c9c2b0" }),
+  }
+  // Village boundary: a dashed line draped on the snow.
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= 180; i++) {
+    const a = (i / 180) * Math.PI * 2;
+    pts.push(to3(BASE.x + Math.cos(a) * radius, BASE.y + Math.sin(a) * radius, 1.5, mid));
+  }
+  const ring = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineDashedMaterial({ color: "#e2b857", dashSize: 18, gapSize: 12 }),
   );
-  pad.position.copy(to3(325, 108, 0.1, mid));
-  g.add(pad);
+  ring.computeLineDistances();
+  g.add(ring);
   const sign = makeSignSprite("BASE VILLAGE — build here");
-  sign.position.copy(to3(325, 150, 10, mid));
+  sign.scale.multiplyScalar(2.4);
+  sign.position.copy(to3(BASE.x, BASE.y, 30, mid));
   g.add(sign);
   return g;
 }
 
-function makeTower(): THREE.Group {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.5, 0.7, 16, 6),
-    new THREE.MeshStandardMaterial({ color: "#3c2a1e" }),
-  );
-  pole.position.y = 8;
-  pole.castShadow = true;
-  const arm = new THREE.Mesh(new THREE.BoxGeometry(8, 0.5, 0.5), new THREE.MeshStandardMaterial({ color: "#c45c4a" }));
-  arm.position.y = 15.5;
-  g.add(pole, arm);
-  g.userData = { kind: "lift", id: 0 };
-  return g;
+/** Enough for the biggest mountain (Twin Peaks holds 18,000). */
+const MAX_SKIERS_DRAWN = 20000;
+
+function makeCrowd(max: number): { group: THREE.Group; body: THREE.InstancedMesh; head: THREE.InstancedMesh; skis: THREE.InstancedMesh } {
+  const group = new THREE.Group();
+  const body = new THREE.InstancedMesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
+  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.55, 6, 5), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }), max);
+  const skiGeo = mergeGeometries([
+    new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(-0.4, 0.2, 0.2),
+    new THREE.BoxGeometry(0.3, 0.15, 3.4).translate(0.4, 0.2, 0.2),
+  ])!;
+  const skis = new THREE.InstancedMesh(skiGeo, new THREE.MeshLambertMaterial({ color: "#2a3038" }), max);
+  for (const m of [body, head, skis]) {
+    m.count = 0;
+    m.frustumCulled = false; // instances span the whole mountain
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    group.add(m);
+  }
+  body.setColorAt(0, new THREE.Color("#ffffff"));
+  return { group, body, head, skis };
+}
+
+interface LiftVis {
+  type: LiftType;
+  spec: (typeof LIFT_SPECS)[LiftType];
+  group: THREE.Group;
+  up: THREE.Object3D[];
+  down: THREE.Object3D[];
+  /** Unit vector across the line (toward the up-bound side). */
+  side: THREE.Vector3;
+  gauge: number;
+  /** Distance a carrier hangs below the cable. */
+  hang: number;
+  /** Cable position for side (+1 up / -1 return) at fraction t. */
+  at: (t: number, dir: number) => THREE.Vector3;
+  heading: number;
+}
+
+const LIFT_LOOK: Record<LiftType, { gauge: number; hang: number; color: string; steel: string }> = {
+  carpet: { gauge: 0, hang: 0, color: "#2b3036", steel: "#6b7480" },
+  tbar: { gauge: 0, hang: 6.5, color: "#b33b2b", steel: "#5a3c26" },
+  double: { gauge: 4.5, hang: 4.2, color: "#3f6b3a", steel: "#55606b" },
+  quad: { gauge: 5.5, hang: 4.4, color: "#2f5d8a", steel: "#4c5864" },
+  six: { gauge: 7, hang: 4.8, color: "#a8322d", steel: "#3f4a55" },
+  gondola: { gauge: 7.5, hang: 6.5, color: "#d8a031", steel: "#3a434d" },
+};
+
+function std(color: string, extra: THREE.MeshStandardMaterialParameters = {}): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.15, ...extra });
+}
+
+function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
+  const spec = LIFT_SPECS[lift.type];
+  const look = LIFT_LOOK[lift.type];
+  const group = new THREE.Group();
+  group.userData = { kind: "lift", id: lift.id };
+  const a = lift.bottom;
+  const b = lift.top;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const fwd = new THREE.Vector3(dx / len, 0, dy / len);
+  const side = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const heading = Math.atan2(fwd.x, fwd.z);
+  const ground = (t: number) => to3(a.x + dx * t, a.y + dy * t, 0, mid);
+
+  if (lift.type === "carpet") {
+    // Rubber belt on the snow with a covered gallery.
+    const geo = buildRibbon([a, b], mid, 4.2, 0.5, () => [new THREE.Color("#3a3f45"), new THREE.Color("#262a2f")], 0.12);
+    const belt = new THREE.Mesh(geo, std("#ffffff", { vertexColors: true, roughness: 0.9, metalness: 0 }));
+    belt.receiveShadow = true;
+    group.add(belt);
+    const frameMat = std("#5a8fc4");
+    const n = Math.max(2, Math.round(len / 9));
+    for (let i = 0; i <= n; i++) {
+      const p = ground(i / n);
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(3, 0.18, 4, 12, Math.PI), frameMat);
+      hoop.position.copy(p);
+      hoop.rotation.y = heading + Math.PI / 2;
+      group.add(hoop);
+    }
+    const g0 = ground(0);
+    const g1 = ground(1);
+    for (const p of [g0, g1]) {
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(6, 0.6, 6), std("#8a949e"));
+      pad.position.copy(p).setY(p.y + 0.3);
+      pad.rotation.y = heading;
+      group.add(pad);
+    }
+    if (selected) highlight(group);
+    return { type: lift.type, spec, group, up: [], down: [], side, gauge: 0, hang: 0, at: (t) => ground(t), heading };
+  }
+
+  // Towers: evenly spaced, tall enough that the cable clears every bump.
+  const towerGap = lift.type === "gondola" ? 90 : lift.type === "tbar" ? 55 : 70;
+  const nT = Math.max(1, Math.round(len / towerGap));
+  const ts: number[] = [];
+  for (let i = 0; i <= nT; i++) ts.push(i / nT);
+  const tops = ts.map((t) => ground(t).y + spec.towerH);
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 1; i < ts.length; i++) {
+      let need = 0;
+      for (let k = 1; k < 8; k++) {
+        const u = k / 8;
+        const t = lerp(ts[i - 1], ts[i], u);
+        const line = lerp(tops[i - 1], tops[i], u);
+        need = Math.max(need, ground(t).y + look.hang + 3 - line);
+      }
+      if (need > 0) {
+        tops[i - 1] += need;
+        tops[i] += need;
+      }
+    }
+  }
+  const cableY = (t: number) => {
+    const i = Math.min(ts.length - 2, Math.floor(t * nT));
+    const u = (t - ts[i]) / (ts[i + 1] - ts[i]);
+    return lerp(tops[i], tops[i + 1], Math.max(0, Math.min(1, u)));
+  };
+  const gauge = look.gauge;
+  const at = (t: number, dir: number) => {
+    const p = ground(t);
+    p.y = cableY(t);
+    return p.addScaledVector(side, (gauge / 2) * dir);
+  };
+
+  const steel = std(look.steel);
+  for (let i = 0; i < ts.length; i++) {
+    const g = ground(ts[i]);
+    const h = tops[i] - g.y;
+    const station = i === 0 || i === ts.length - 1;
+    if (station && lift.type !== "tbar") continue;
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 7), steel);
+    pole.position.copy(g).setY(g.y + h / 2);
+    pole.castShadow = true;
+    group.add(pole);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(Math.max(2.5, gauge + 1.6), 0.5, 0.6), std(lift.type === "tbar" ? "#c45c4a" : look.steel));
+    arm.position.copy(g).setY(tops[i] + 0.3);
+    arm.rotation.y = heading + Math.PI / 2;
+    group.add(arm);
+  }
+
+  // Cable loop (up line and return line).
+  const cableMat = new THREE.LineBasicMaterial({ color: "#1d2127" });
+  for (const dir of gauge ? [1, -1] : [0]) {
+    const pts = ts.map((t) => at(t, dir));
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), cableMat));
+  }
+
+  // Terminals.
+  for (const end of [0, 1]) {
+    const g = ground(end);
+    const y = tops[end === 0 ? 0 : tops.length - 1];
+    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look));
+  }
+
+  // Carriers.
+  const up: THREE.Object3D[] = [];
+  const down: THREE.Object3D[] = [];
+  const makeCarrier = () => {
+    if (lift.type === "tbar") return makeTBar();
+    if (lift.type === "gondola") return makeCabin(look.color);
+    return makeChair(spec.seats, look.color, lift.type === "six");
+  };
+  for (let i = 0; i < lift.carriers.length; i++) {
+    const c = makeCarrier();
+    group.add(c);
+    up.push(c);
+    if (gauge) {
+      const r = makeCarrier();
+      group.add(r);
+      down.push(r);
+    }
+  }
+  if (selected) highlight(group);
+  return { type: lift.type, spec, group, up, down, side, gauge, hang: look.hang, at, heading };
+}
+
+function placeCarrier(vis: LiftVis, obj: THREE.Object3D, t: number, dir: number): void {
+  const p = vis.at(Math.max(0, Math.min(1, t)), vis.gauge ? dir : 0);
+  obj.position.copy(p);
+  obj.rotation.y = vis.heading + (dir < 0 ? Math.PI : 0);
+}
+
+function highlight(g: THREE.Object3D): void {
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh && c.material instanceof THREE.MeshStandardMaterial) {
+      c.material = c.material.clone();
+      c.material.emissive = new THREE.Color("#e2b857");
+      c.material.emissiveIntensity = 0.3;
+    }
+  });
+}
+
+function makeTerminal(
+  type: LiftType,
+  g: THREE.Vector3,
+  cableY: number,
+  heading: number,
+  bottom: boolean,
+  look: (typeof LIFT_LOOK)[LiftType],
+): THREE.Group {
+  const t = new THREE.Group();
+  t.position.copy(g);
+  t.rotation.y = heading;
+  const h = cableY - g.y;
+  if (type === "tbar") {
+    if (bottom) {
+      const hut = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 5), std("#c9b08a", { metalness: 0 }));
+      hut.position.set(5, 2.5, -2);
+      hut.castShadow = true;
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(5, 2.4, 4), std("#6b3a2a", { metalness: 0 }));
+      roof.position.set(5, 6.2, -2);
+      roof.rotation.y = Math.PI / 4;
+      t.add(hut, roof);
+    }
+    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.4, 14), std("#3a3f45"));
+    wheel.position.y = h + 0.8;
+    t.add(wheel);
+    return t;
+  }
+  if (type === "gondola") {
+    // Enclosed station building the cabins run through.
+    const w = look.gauge + 8;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h + 4, 18), std("#cfc6b6", { metalness: 0 }));
+    body.position.set(0, (h + 4) / 2, bottom ? -6 : 6);
+    body.castShadow = true;
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 3.5, 14), std("#6fa3c8", { roughness: 0.1, metalness: 0.4 }));
+    glass.position.set(0, h - 4, bottom ? -6 : 6);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 3, 1.2, 21), std(look.color));
+    roof.position.set(0, h + 4.6, bottom ? -6 : 6);
+    roof.castShadow = true;
+    t.add(body, glass, roof);
+    return t;
+  }
+  // Chairlift terminal: legs, housing, and a bullwheel the width of the gauge.
+  const leg = std(look.steel);
+  for (const sx of [-1, 1]) {
+    const l = new THREE.Mesh(new THREE.BoxGeometry(0.9, h, 0.9), leg);
+    l.position.set(sx * 1.6, h / 2, bottom ? -3 : 3);
+    l.castShadow = true;
+    t.add(l);
+  }
+  const wheel = new THREE.Mesh(new THREE.CylinderGeometry(look.gauge / 2 + 0.3, look.gauge / 2 + 0.3, 0.5, 20), std("#2e3338"));
+  wheel.position.set(0, h, 0);
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 2, 2.6, 6), std(look.color));
+  housing.position.set(0, h + 1.6, bottom ? -2 : 2);
+  housing.castShadow = true;
+  t.add(wheel, housing);
+  // Loading ramp / unload hump.
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(look.gauge + 4, 0.8, 9), std("#e9eef3", { metalness: 0 }));
+  ramp.position.set(0, 0.4, bottom ? 2 : -2);
+  t.add(ramp);
+  if (bottom) {
+    const shack = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), std("#d6cdbd", { metalness: 0 }));
+    shack.position.set(look.gauge / 2 + 5, 2, 0);
+    shack.castShadow = true;
+    t.add(shack);
+  }
+  return t;
 }
 
 function makeTBar(): THREE.Group {
   const g = new THREE.Group();
-  const hang = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 4), new THREE.MeshBasicMaterial({ color: "#2a3038" }));
+  const dark = new THREE.MeshBasicMaterial({ color: "#2a3038" });
+  const hang = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 4), dark);
   hang.position.y = -3;
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.25, 0.25), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: "#b33b2b" }));
   bar.position.y = -6;
   g.add(hang, bar);
   return g;
 }
 
-function makeSkierMesh(color: string): THREE.Group {
+function makeChair(seats: number, color: string, bubble: boolean): THREE.Group {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 1.1), new THREE.MeshLambertMaterial({ color }));
-  body.position.y = 2.2;
-  body.castShadow = true;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.55, 8, 8), new THREE.MeshLambertMaterial({ color: "#f1d5b8" }));
-  head.position.y = 3.6;
-  const ski = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 3.4), new THREE.MeshLambertMaterial({ color: "#2a3038" }));
-  ski.position.set(-0.4, 0.2, 0.2);
-  const ski2 = ski.clone();
-  ski2.position.x = 0.4;
-  g.add(body, head, ski, ski2);
-  g.userData = { kind: "skier" };
+  const w = seats * 1.25 + 0.4;
+  const frame = std("#3a3f45");
+  const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.2, 4, 0.2), frame);
+  hanger.position.set(0, -2, 0);
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(w, 0.35, 1.4), std(color));
+  seat.position.set(0, -4.1, 0.1);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(w, 1.5, 0.25), std(color));
+  back.position.set(0, -3.3, -0.6);
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, 0.12), frame);
+  bar.position.set(0, -3, 1.1);
+  g.add(hanger, seat, back, bar);
+  if (bubble) {
+    // Tinted bubble hinged above the chair, closed down over the riders' front.
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 20, 10, 0, Math.PI, 0, Math.PI * 0.62),
+      std("#ff8f3d", { transparent: true, opacity: 0.5, roughness: 0.08, metalness: 0.2, side: THREE.DoubleSide }),
+    );
+    dome.scale.set(w / 2 + 0.35, 2.6, 2.1);
+    dome.position.set(0, -4.1, 0.1);
+    g.add(dome);
+  }
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh) c.castShadow = true;
+  });
   return g;
+}
+
+function makeCabin(color: string): THREE.Group {
+  const g = new THREE.Group();
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.4, 0.25), std("#3a3f45"));
+  grip.position.y = -1.2;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3.6, 3.4, 3.6), std(color));
+  body.position.y = -4.4;
+  const windows = new THREE.Mesh(new THREE.BoxGeometry(3.7, 1.3, 3.7), std("#284a66", { roughness: 0.1, metalness: 0.5 }));
+  windows.position.y = -3.8;
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.5, 3.2), std("#e6e9ec"));
+  roof.position.y = -2.5;
+  g.add(grip, body, windows, roof);
+  g.traverse((c) => {
+    if (c instanceof THREE.Mesh) c.castShadow = true;
+  });
+  return g;
+}
+
+/** Coarse version of a mountain's terrain, used only for mouse picking. */
+function makeProxyGeometry(id: MountainId): THREE.BufferGeometry {
+  const wx = 280;
+  const wy = 166;
+  const o = MOUNT_OFF[id];
+  const pos: number[] = [];
+  const idx: number[] = [];
+  for (let j = 0; j <= wy; j++) {
+    for (let i = 0; i <= wx; i++) {
+      const x = (i / wx) * WORLD_W;
+      const y = (j / wy) * WORLD_H;
+      pos.push(x - WORLD_W / 2 + o.x, elevation(x, y, id) * TERRAIN_H[id], y - WORLD_H / 2 + o.z);
+    }
+  }
+  for (let j = 0; j < wy; j++) {
+    for (let i = 0; i < wx; i++) {
+      const a = j * (wx + 1) + i;
+      idx.push(a, a + wx + 1, a + 1, a + 1, a + wx + 1, a + wx + 2);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/** Slalom gates: alternating red and blue pole pairs down the run. */
+function makeGates(mid: MountainId, width: number, samples: { x: number; y: number; along: number }[]): THREE.Group {
+  const g = new THREE.Group();
+  const poleGeo = new THREE.CylinderGeometry(0.12, 0.12, 4, 5);
+  const flagGeo = new THREE.PlaneGeometry(1.6, 1.1);
+  const mats = [std("#d63a2f"), std("#2d63c8")].map((m) => {
+    m.side = THREE.DoubleSide;
+    return m;
+  });
+  let next = 18;
+  let n = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const p = samples[i];
+    if (p.along < next) continue;
+    next += 28;
+    const prev = samples[i - 1];
+    let dx = p.x - prev.x;
+    let dy = p.y - prev.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    const side = n % 2 ? 1 : -1;
+    const mat = mats[n % 2];
+    n++;
+    for (const off of [0.08, 0.3]) {
+      const o = side * off * width;
+      const base = to3(p.x - dy * o, p.y + dx * o, 2, mid);
+      const pole = new THREE.Mesh(poleGeo, mat);
+      pole.position.copy(base);
+      pole.castShadow = true;
+      g.add(pole);
+      const flag = new THREE.Mesh(flagGeo, mat);
+      flag.position.copy(base).add(new THREE.Vector3(0, 1.2, 0));
+      flag.rotation.y = Math.atan2(dx, dy) + Math.PI / 2;
+      g.add(flag);
+    }
+  }
+  return g;
+}
+
+/** Jumps, rails, boxes and a halfpipe, modelled along +z (direction of travel). */
+function makeFeatureMesh(type: FeatureType, ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const snow = std("#f4f7fa", { metalness: 0, roughness: 0.9 });
+  const steel = std("#9aa4ae", { metalness: 0.7, roughness: 0.3 });
+  const accent = std("#f0892a", { metalness: 0.1 });
+  if (type === "jump") {
+    // Wedge kicker: low at the approach, lip at the far end.
+    const shape = new THREE.Shape();
+    shape.moveTo(-7, 0);
+    shape.lineTo(5, 3.6);
+    shape.lineTo(6, 3.6);
+    shape.lineTo(6.5, 0);
+    shape.lineTo(-7, 0);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: 7, bevelEnabled: false });
+    geo.translate(0, 0, -3.5);
+    geo.rotateY(-Math.PI / 2);
+    const m = new THREE.Mesh(geo, snow);
+    m.castShadow = !ghost;
+    m.receiveShadow = true;
+    g.add(m);
+    const lip = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.25, 0.4), accent);
+    lip.position.set(0, 3.7, 5.5);
+    g.add(lip);
+  } else if (type === "rail") {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 16, 8), steel);
+    bar.rotation.x = Math.PI / 2;
+    bar.position.y = 1.8;
+    g.add(bar);
+    for (const z of [-6.5, 6.5]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.8, 0.4), accent);
+      post.position.set(0, 0.9, z);
+      g.add(post);
+    }
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(3, 1.2, 5), snow);
+    ramp.position.set(0, 0.6, -10);
+    g.add(ramp);
+  } else if (type === "box") {
+    const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.8, 13), std("#3e78c4"));
+    top.position.y = 1.2;
+    top.castShadow = !ghost;
+    g.add(top);
+    const legs = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 11), steel);
+    legs.position.y = 0.4;
+    g.add(legs);
+  } else {
+    // Halfpipe: a long U-shaped trough with snow walls.
+    const len = 60;
+    const r = 7;
+    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 20, 1, true, -Math.PI / 2, Math.PI), std("#eaf0f5", { side: THREE.DoubleSide, metalness: 0 }));
+    pipe.rotation.x = Math.PI / 2;
+    pipe.position.y = r;
+    pipe.receiveShadow = true;
+    g.add(pipe);
+    for (const sx of [-1, 1]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(3, r, len), snow);
+      wall.position.set(sx * (r + 1.5), r / 2, 0);
+      wall.castShadow = !ghost;
+      g.add(wall);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, len), accent);
+      deck.position.set(sx * r, r + 0.15, 0);
+      g.add(deck);
+    }
+  }
+  g.userData = { kind: "feature" };
+  return g;
+}
+
+/** Sit a feature on the slope, facing its direction of travel and tilted to the fall line. */
+function placeFeature(obj: THREE.Object3D, f: Pick<Feature, "x" | "y" | "angle" | "type">, mid: MountainId): void {
+  const dx = Math.cos(f.angle);
+  const dy = Math.sin(f.angle);
+  const half = f.type === "halfpipe" ? 30 : 7;
+  const back = to3(f.x - dx * half, f.y - dy * half, 0, mid);
+  const front = to3(f.x + dx * half, f.y + dy * half, 0, mid);
+  obj.position.copy(to3(f.x, f.y, 0, mid));
+  obj.position.y = (back.y + front.y) / 2 + (f.type === "halfpipe" ? -2 : 0);
+  obj.rotation.order = "YXZ";
+  obj.rotation.y = Math.atan2(dx, dy);
+  obj.rotation.x = -Math.atan2(front.y - back.y, half * 2);
+}
+
+/** Bamboo boundary poles with orange tips along both edges of a glade. */
+function makeBoundaryPoles(mid: MountainId, width: number, samples: { x: number; y: number; along: number }[]): THREE.Group {
+  const g = new THREE.Group();
+  const pole = new THREE.CylinderGeometry(0.15, 0.15, 5, 5);
+  const tip = new THREE.CylinderGeometry(0.17, 0.17, 1, 5);
+  const poleMat = std("#d9c27a", { metalness: 0 });
+  const tipMat = std("#f0892a", { metalness: 0 });
+  let next = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const p = samples[i];
+    if (p.along < next) continue;
+    next += 22;
+    const prev = samples[i - 1];
+    let dx = p.x - prev.x;
+    let dy = p.y - prev.y;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l;
+    dy /= l;
+    for (const side of [-0.5, 0.5]) {
+      const o = side * width;
+      const base = to3(p.x - dy * o, p.y + dx * o, 2.5, mid);
+      const m = new THREE.Mesh(pole, poleMat);
+      m.position.copy(base);
+      g.add(m);
+      const t = new THREE.Mesh(tip, tipMat);
+      t.position.copy(base).add(new THREE.Vector3(0, 3, 0));
+      g.add(t);
+    }
+  }
+  return g;
+}
+
+/** Concrete pad with a painted H, a windsock and a small hangar. */
+function makeHelipad(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 0.6, 28), std("#8e959c", { metalness: 0 }));
+  pad.position.y = 0.3;
+  pad.receiveShadow = true;
+  g.add(pad);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(12, 0.5, 4, 32), std("#f2c94c"));
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.65;
+  g.add(ring);
+  const paint = std("#ffffff", { metalness: 0 });
+  for (const x of [-3, 3]) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 9), paint);
+    bar.position.set(x, 0.7, 0);
+    g.add(bar);
+  }
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(6, 0.2, 1.2), paint);
+  cross.position.set(0, 0.7, 0);
+  g.add(cross);
+  const hangar = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 12), std("#c9cdd2", { metalness: 0.3 }));
+  hangar.position.set(26, 4, 0);
+  hangar.castShadow = !ghost;
+  g.add(hangar);
+  const roof = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 14, 16, 1, false, 0, Math.PI), std("#3a434d", { side: THREE.DoubleSide }));
+  roof.rotation.z = Math.PI / 2;
+  roof.position.set(26, 8, 0);
+  g.add(roof);
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 7, 5), std("#55606b"));
+  mast.position.set(-18, 3.5, -10);
+  const sock = new THREE.Mesh(new THREE.ConeGeometry(0.7, 3, 8, 1, true), std("#f0892a", { side: THREE.DoubleSide }));
+  sock.rotation.z = Math.PI / 2;
+  sock.position.set(-16.5, 6.6, -10);
+  g.add(mast, sock);
+  g.userData = { kind: "building" };
+  return g;
+}
+
+function makeHelicopter(): THREE.Group {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(2.6, 14, 10), std("#c8332b"));
+  body.scale.set(1, 0.85, 1.5);
+  body.position.y = 2.6;
+  body.castShadow = true;
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(1.9, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), std("#2b4d6b", { roughness: 0.1, metalness: 0.5 }));
+  glass.rotation.x = Math.PI / 2.4;
+  glass.position.set(0, 3, 2.4);
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 7, 8), std("#c8332b"));
+  boom.rotation.x = Math.PI / 2;
+  boom.position.set(0, 3.2, -6.5);
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.2, 1.2), std("#e6e9ec"));
+  fin.position.set(0, 4, -9.8);
+  const skid = std("#3a3f45");
+  for (const x of [-1.6, 1.6]) {
+    const s = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 6), skid);
+    s.position.set(x, 0.2, 0);
+    g.add(s);
+  }
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.2, 6), skid);
+  mast.position.y = 5.2;
+  const rotor = new THREE.Group();
+  rotor.name = "rotor";
+  for (const a of [0, Math.PI / 2]) {
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(14, 0.12, 0.5), skid);
+    blade.rotation.y = a;
+    rotor.add(blade);
+  }
+  rotor.position.y = 5.8;
+  g.add(body, glass, boom, fin, mast, rotor);
+  return g;
+}
+
+/** How far around the view trees are drawn, and the most drawn at once. */
+const TREE_RADIUS = 1100;
+const TREES_DRAWN = 30000;
+
+/** Peak names stay readable from anywhere on the map (fixed on-screen size). */
+function makePeakLabel(text: string, done: boolean): THREE.Sprite {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 72;
+  const ctx = c.getContext("2d")!;
+  ctx.font = "800 30px Nunito, Segoe UI, sans-serif";
+  const w = Math.min(500, ctx.measureText(text).width + 36);
+  ctx.fillStyle = done ? "rgba(226, 184, 87, 0.95)" : "rgba(19, 32, 44, 0.82)";
+  ctx.beginPath();
+  ctx.roundRect((512 - w) / 2, 8, w, 56, 16);
+  ctx.fill();
+  ctx.fillStyle = done ? "#13202c" : "#f3efe4";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 256, 37);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, sizeAttenuation: false, depthTest: false }));
+  sprite.scale.set(0.2, 0.028, 1);
+  sprite.renderOrder = 4;
+  return sprite;
 }

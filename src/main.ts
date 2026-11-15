@@ -1,17 +1,30 @@
 import { AudioBus } from "./audio";
+import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { World3D } from "./scene";
-import { Game } from "./sim";
+import { Game, SUMMITS } from "./sim";
 import {
+  BUILDING_LABEL,
   BUILDING_MAX,
+  FEATURE_SPEC,
+  HELI,
+  OPERATING_COST_PER_MIN,
+  TRAIL_KIND_SPEC,
   BuildingType,
   COSTS,
   DIFF,
   INCOME_PER_MIN,
-  MOUNTAINS,
+  LIFT_SPECS,
+  TIERS,
   STAFF_LABEL,
   STAFF_ROLES,
   Tool,
+  UNIT_M,
 } from "./types";
+import "@fontsource/nunito/500.css";
+import "@fontsource/nunito/700.css";
+import "@fontsource/nunito/800.css";
+import "@fontsource/fraunces/600.css";
+import "@fontsource/fraunces/700.css";
 import "./style.css";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
@@ -71,6 +84,36 @@ const cutCost = document.querySelector("#cut-cost")!;
 const finishBtn = document.querySelector<HTMLButtonElement>("#btn-finish-trail")!;
 const toastsEl = document.querySelector("#toasts")!;
 const placeHint = document.querySelector("#place-hint")!;
+const cutText = document.querySelector("#cut-text")!;
+const moveBtn = document.querySelector<HTMLButtonElement>("#btn-move-building")!;
+const settingsBtn = document.querySelector<HTMLButtonElement>("#btn-settings")!;
+const settingsEl = document.querySelector<HTMLElement>("#settings")!;
+const moveFeeOpt = document.querySelector<HTMLInputElement>("#opt-move-fee")!;
+const dockEl = document.querySelector<HTMLElement>("#dock")!;
+const dockMenus = document.querySelector<HTMLElement>("#dock-menus")!;
+buildDock(dockEl, dockMenus);
+let openGroup: string | null = null;
+
+function closeMenus(): void {
+  openGroup = null;
+  dockMenus.querySelectorAll(".dock-panel").forEach((p) => p.classList.add("hidden"));
+  dockEl.querySelectorAll(".dock-btn[aria-expanded]").forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
+
+function openMenu(id: string, btn: HTMLElement): void {
+  closeMenus();
+  const panel = dockMenus.querySelector<HTMLElement>(`.dock-panel[data-group="${id}"]`);
+  if (!panel) return;
+  openGroup = id;
+  btn.setAttribute("aria-expanded", "true");
+  panel.classList.remove("hidden");
+  // Sit the submenu right above its icon, kept on screen.
+  const r = btn.getBoundingClientRect();
+  const w = panel.offsetWidth;
+  const left = Math.max(12, Math.min(innerWidth - w - 12, r.left + r.width / 2 - w / 2));
+  panel.style.left = `${left}px`;
+}
+const removeLiftBtn = document.querySelector<HTMLButtonElement>("#btn-remove-lift")!;
 const fxRoot = document.createElement("div");
 fxRoot.className = "world-fx";
 document.querySelector("#hud")!.appendChild(fxRoot);
@@ -86,12 +129,24 @@ function moodWord(n: number): string {
 let hudAcc = 0;
 let lastToastId = 0;
 
+/** Top-bar money: exact below a million, then $1.92M style so it fits. */
+function shortMoney(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const a = Math.abs(n);
+  if (a < 1e6) return `${sign}$${Math.round(a).toLocaleString()}`;
+  return `${sign}$${(a / 1e6).toFixed(a < 1e7 ? 2 : 1)}M`;
+}
+
 function paintHud(force = false): void {
-  moneyEl.textContent = `$${Math.round(game.money).toLocaleString()}`;
-  skiersEl.textContent = String(game.skiers.length);
+  moneyEl.textContent = shortMoney(game.money);
+  const load = game.loadLimits();
+  skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${load.comfortable.toLocaleString()}`;
+  skiersEl.parentElement!.title =
+    `The resort can comfortably handle ${load.comfortable.toLocaleString()} skiers right now ` +
+    `(lifts ${load.lifts.toLocaleString()}, runs ${load.runs.toLocaleString()}, mountain max ${load.cap.toLocaleString()}).`;
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
-  earnedEl.textContent = `$${Math.round(game.lifetimeEarned).toLocaleString()}`;
+  earnedEl.textContent = shortMoney(game.lifetimeEarned);
   dayEl.textContent = game.clockLabel();
   paintMountains();
   paintStaff();
@@ -112,15 +167,20 @@ function paintHud(force = false): void {
   if (!game.buildings.length) {
     shopRate.textContent = `Shacks $${INCOME_PER_MIN.shack}/min · coffee $${INCOME_PER_MIN.coffee} · hotel $${INCOME_PER_MIN.hotel}. Sugar shacks go beside trails.`;
   } else {
-    const wages = game.staffRequired() ? ` Wages today $${Math.round(game.wagesToday)}.` : "";
+    const upkeep = game.upkeepPerMin() ? ` Running costs today $${Math.round(game.upkeepToday)}.` : "";
+    const wages = (game.staffRequired() || game.staff.instructor ? ` Wages today $${Math.round(game.wagesToday)}.` : "") + upkeep;
     shopRate.textContent = `About $${game.shopRatePerMin()}/min here. Take today $${Math.round(game.shopIncomeToday)}.${wages}`;
   }
   const expand = game.expansionUnlocked();
-  document.querySelectorAll<HTMLButtonElement>(".tool").forEach((btn) => {
+  document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
-    btn.classList.toggle("on", game.tool === tool);
-    if (tool === "select" || tool === "cut") {
+    btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
+    if (tool === "select" || tool === "cut" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
+      return;
+    }
+    if (tool.startsWith("lift:")) {
+      btn.disabled = game.lifts.length >= game.maxLifts();
       return;
     }
     const type = tool as BuildingType;
@@ -132,16 +192,29 @@ function paintHud(force = false): void {
   });
   document.querySelector("#btn-pause")!.textContent = game.paused ? "Resume" : "Pause";
   cutBanner.classList.toggle("hidden", game.tool !== "cut");
+  cutText.textContent = `${TRAIL_KIND_SPEC[game.trailKind].label}: click downhill to draw it, then Finish. ${TRAIL_KIND_SPEC[game.trailKind].blurb} Trees in the way get cleared.`;
+  const picked = game.selected?.kind === "building" ? game.buildings.find((b) => b.id === game.selected!.id) : undefined;
+  moveBtn.classList.toggle("hidden", !picked);
+  if (picked) {
+    const fee = game.moveFee(picked);
+    moveBtn.textContent = `Move this ${BUILDING_LABEL[picked.type].toLowerCase()} (${fee ? `$${fee.toLocaleString()}` : "free"})`;
+  }
   const info = game.draftInfo();
   if (info) {
     cutDiff.textContent = info.length < 8 ? "Click downhill" : DIFF[info.difficulty].name;
     cutCost.textContent = `$${info.cost}`;
-    finishBtn.disabled = game.draft.length < 2 || info.length < 90;
+    finishBtn.disabled = game.draft.length < 2 || info.length < 120;
   } else {
     cutDiff.textContent = "Click to start";
     cutCost.textContent = "$0";
     finishBtn.disabled = true;
   }
+  const activeGroup = groupOf(game.tool);
+  dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn").forEach((btn) => {
+    btn.classList.toggle("on", btn.dataset.group === activeGroup);
+    btn.classList.toggle("open", btn.dataset.group === openGroup);
+  });
+  removeLiftBtn.classList.toggle("hidden", game.selected?.kind !== "lift" || game.lifts.length <= 1);
   canvas.classList.toggle("cut", game.tool === "cut");
   canvas.classList.toggle("place", game.tool !== "select" && game.tool !== "cut");
   const newest = game.toasts[game.toasts.length - 1];
@@ -155,34 +228,44 @@ function paintHud(force = false): void {
   }
 }
 
+/** Peaks panel: the resort tier, and every summit to conquer (click to fly there). */
 function paintMountains(): void {
-  mountainsEl.innerHTML = MOUNTAINS.map((m) => {
-    const st = game.mountainStatus(m.id);
-    let note = m.blurb;
-    if (st.owned) note = m.id === game.currentMountain ? "Managing this hill" : "Owned · click to fly over";
-    else if (!st.canUnlock) note = `Earn $${st.missing.toLocaleString()} more to list it`;
-    else note = `For sale · $${m.buyCost.toLocaleString()}`;
-    return `<button type="button" class="mtn${st.owned && m.id === game.currentMountain ? " on" : ""}" data-mountain="${m.id}">
-      ${m.name}<small>${note}</small></button>`;
-  }).join("");
+  const tier = game.tier();
+  const next = TIERS[tier + 1];
+  const head = `<div class="tier"><b>${TIERS[tier].name}</b><small>${game.conquered.size}/${SUMMITS.length} peaks · holds ${game.capacity().toLocaleString()} skiers${
+    next ? ` · ${next.peaksNeeded - game.conquered.size} more peak${next.peaksNeeded - game.conquered.size === 1 ? "" : "s"} to grow` : ""
+  }</small></div>`;
+  const peaks = [...SUMMITS]
+    .sort((a, b) => a.elevation - b.elevation)
+    .map((p) => {
+      const done = game.conquered.has(p.id);
+      return `<button type="button" class="mtn${done ? " on" : ""}" data-peak="${p.id}">
+      ${done ? "🚩 " : ""}${p.name}<small>${p.elevation.toLocaleString()} m · ${done ? "conquered" : "run a lift to the top"}</small></button>`;
+    })
+    .join("");
+  const html = head + peaks;
+  if (mountainsEl.innerHTML === html) return;
+  mountainsEl.innerHTML = html;
   mountainsEl.querySelectorAll<HTMLButtonElement>(".mtn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const id = Number(btn.dataset.mountain) as 0 | 1 | 2;
-      if (game.owned.includes(id)) game.switchMountain(id);
-      else game.buyMountain(id);
-      paintHud();
+      const p = SUMMITS.find((k) => k.id === btn.dataset.peak);
+      if (p) world.focusPoint(p.x, p.y, 3200);
     });
   });
 }
 
 function paintStaff(): void {
   const required = game.staffRequired();
-  staffSection.classList.toggle("locked", !required);
+  const school = game.empireCount("school") > 0;
+  staffSection.classList.toggle("locked", !required && !school);
   staffLock.textContent = required
-    ? "After Little Hawk you must staff the place. Short crews slow shop take and sour the mood."
-    : "Payroll starts when you buy the next mountain. Then you need ski patrol, food, lifts, delivery, and maintenance.";
+    ? "You're a real ski area now: staff the place. Short crews slow shop take and sour the mood."
+    : school
+      ? "The ski school needs instructors (paid from day one). Full payroll starts once you conquer your first peak."
+      : "Payroll starts once you conquer your first peak. A ski school needs instructors right away.";
   const need = game.staffNeeds();
-  staffList.innerHTML = STAFF_ROLES.map((role) => {
+  const roles = required ? STAFF_ROLES : school ? (["instructor"] as const) : [];
+  staffList.innerHTML = roles.map((role) => {
     return `<div class="staff-row" data-role="${role}">
       <span>${STAFF_LABEL[role]} · ${game.staff[role]}/${need[role]} need</span>
       <button type="button" data-act="fire">−</button>
@@ -230,15 +313,47 @@ function loop(now: number): void {
     hudAcc = 0;
     paintHud();
   }
-  if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
+  const liftType = game.liftTool();
+  if (pointer.over && liftType) {
+    world.hideGhost();
     const hit = world.hitAt(pointer.x, pointer.y);
-    if (hit && hit.mountain === game.currentMountain) {
+    const spec = LIFT_SPECS[liftType];
+    game.liftHover = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
+    placeHint.classList.remove("hidden");
+    const pv = game.liftPreview();
+    if (!game.liftStart) {
+      placeHint.classList.add("ok");
+      placeHint.textContent = `${spec.label}: click the bottom station. ${spec.blurb}`;
+    } else if (pv) {
+      placeHint.classList.toggle("ok", !pv.error);
+      placeHint.textContent =
+        pv.error ??
+        `Click to set the top · ${Math.round(pv.length * UNIT_M)} m long · ${Math.round(pv.rise)} m rise · $${pv.cost.toLocaleString()}`;
+    }
+  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
+    const hit = world.hitAt(pointer.x, pointer.y);
+    const feature = game.featureTool();
+    const moving = game.movingBuilding();
+    if (hit && hit.mountain === game.currentMountain && feature) {
+      const err = game.canPlaceFeature(feature, hit.x, hit.y);
+      world.showGhost(`feature:${feature}`, hit.x, hit.y, !err, game.featureAngle(hit.x, hit.y));
+      placeHint.classList.remove("hidden");
+      placeHint.classList.toggle("ok", !err);
+      placeHint.textContent = err ?? `Click to build a ${FEATURE_SPEC[feature].label.toLowerCase()} · $${FEATURE_SPEC[feature].cost.toLocaleString()}`;
+    } else if (hit && hit.mountain === game.currentMountain && moving) {
+      const err = game.canMoveTo(hit.x, hit.y);
+      world.showGhost(moving.type, hit.x, hit.y, !err);
+      placeHint.classList.remove("hidden");
+      placeHint.classList.toggle("ok", !err);
+      const fee = game.moveFee(moving);
+      placeHint.textContent = err ?? `Click to move the ${BUILDING_LABEL[moving.type].toLowerCase()} here · ${fee ? `$${fee.toLocaleString()}` : "free"} · Esc to cancel`;
+    } else if (hit && hit.mountain === game.currentMountain && !feature && !moving) {
       const type = game.tool as BuildingType;
       const err = game.canPlace(type, hit.x, hit.y);
       world.showGhost(type, hit.x, hit.y, !err);
       placeHint.classList.remove("hidden");
       placeHint.classList.toggle("ok", !err);
-      placeHint.textContent = err ?? `Click to place ${type} in the village (sugar shacks can go on the hill).`;
+      placeHint.textContent = err ?? `Click to place the ${BUILDING_LABEL[type].toLowerCase()}.`;
     } else {
       world.hideGhost();
       placeHint.classList.add("hidden");
@@ -277,12 +392,6 @@ canvas.addEventListener("pointerup", (e) => {
   if (Math.hypot(e.clientX - pointer.downX, e.clientY - pointer.downY) > 6) return;
   const hit = world.hitAt(e.clientX, e.clientY);
   if (!hit) return;
-  if (hit.mountain !== game.currentMountain) {
-    if (game.owned.includes(hit.mountain)) game.switchMountain(hit.mountain);
-    else game.buyMountain(hit.mountain);
-    paintHud();
-    return;
-  }
   const result = game.click(hit.x, hit.y);
   if (result === "shake") {
     audio.error();
@@ -305,12 +414,35 @@ canvas.addEventListener("dblclick", (e) => {
   paintHud();
 });
 
-document.querySelectorAll<HTMLButtonElement>(".tool").forEach((btn) => {
+document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
   btn.addEventListener("click", () => {
     game.setTool(btn.dataset.tool as Tool);
+    closeMenus();
     audio.click();
     paintHud();
   });
+});
+
+dockEl.querySelectorAll<HTMLButtonElement>(".dock-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const group = DOCK_GROUPS.find((g) => g.id === btn.dataset.group)!;
+    audio.click();
+    if (group.tool) {
+      closeMenus();
+      game.setTool(group.tool);
+    } else if (openGroup === group.id) {
+      closeMenus();
+    } else {
+      openMenu(group.id, btn);
+    }
+    paintHud();
+  });
+});
+canvas.addEventListener("pointerdown", () => {
+  if (openGroup) {
+    closeMenus();
+    paintHud();
+  }
 });
 
 document.querySelectorAll<HTMLButtonElement>(".speed").forEach((btn) => {
@@ -350,6 +482,9 @@ ticketRange.addEventListener("input", () => {
 
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    closeMenus();
+    settingsEl.classList.add("hidden");
+    settingsBtn.classList.remove("on");
     game.cancel();
     paintHud();
   }
@@ -365,15 +500,53 @@ window.addEventListener("keydown", (e) => {
     paintHud();
   }
   if (e.key === "1" || e.key === "2" || e.key === "3") game.setSpeed(Number(e.key));
+  if ((e.key === "g" || e.key === "G") && !(e.target instanceof HTMLInputElement)) toggleSlopeView();
 });
 
 function moneyLine(type: keyof typeof COSTS): string {
-  return `$${COSTS[type].toLocaleString()} · $${INCOME_PER_MIN[type]}/min`;
+  if (type === "heli") {
+    return `$${COSTS.heli.toLocaleString()} · $${HELI.fare}/seat · upkeep $${OPERATING_COST_PER_MIN.heli}/min`;
+  }
+  return `$${COSTS[type].toLocaleString()} · earns $${INCOME_PER_MIN[type]}/min`;
 }
 
 (Object.keys(COSTS) as Array<keyof typeof COSTS>).forEach((type) => {
   const el = document.querySelector(`#cost-${type}`);
   if (el) el.textContent = moneyLine(type);
+});
+
+const slopeBtn = document.querySelector<HTMLButtonElement>("#btn-slope")!;
+function toggleSlopeView(): void {
+  const on = !world.slopeViewOn;
+  world.setSlopeView(on);
+  slopeBtn.setAttribute("aria-pressed", String(on));
+  slopeBtn.firstChild!.textContent = on ? "Hide steepness " : "Show steepness ";
+  document.querySelector(".legend")!.classList.toggle("slope-on", on);
+}
+slopeBtn.addEventListener("click", toggleSlopeView);
+
+moveBtn.addEventListener("click", () => {
+  if (game.selected?.kind !== "building") return;
+  game.startMove(game.selected.id);
+  audio.click();
+  paintHud();
+});
+settingsBtn.addEventListener("click", () => {
+  const open = settingsEl.classList.toggle("hidden") === false;
+  settingsBtn.setAttribute("aria-expanded", String(open));
+  settingsBtn.classList.toggle("on", open);
+});
+moveFeeOpt.addEventListener("change", () => {
+  game.moveFeeOn = moveFeeOpt.checked;
+  game.toast(game.moveFeeOn ? "Moving buildings costs 25% of their price." : "Moving buildings is free.");
+  paintHud();
+});
+
+removeLiftBtn.addEventListener("click", () => {
+  if (game.selected?.kind !== "lift") return;
+  game.removeLift(game.selected.id);
+  audio.build();
+  paintHud();
 });
 
 window.addEventListener("resize", () => world.resize());

@@ -4,12 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Skilandia</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Nunito:wght@500;700;800&display=swap"
-      rel="stylesheet"
-    />
   </head>
   <body class="welcome-open">
     <div id="app">
@@ -52,12 +46,20 @@
             <button type="button" class="ghost speed" data-speed="2">2×</button>
             <button type="button" class="ghost speed" data-speed="3">3×</button>
             <button type="button" id="btn-mute" class="ghost" title="Mute">Sound</button>
+            <button type="button" id="btn-settings" class="ghost icon-btn" aria-expanded="false" title="Settings" aria-label="Settings">⚙</button>
+          </div>
+          <div id="settings" class="settings hidden" role="dialog" aria-label="Settings">
+            <h2>Settings</h2>
+            <label class="switch">
+              <input type="checkbox" id="opt-move-fee" checked />
+              <span>Charge a fee to move buildings <small>(25% of the price)</small></span>
+            </label>
           </div>
         </header>
 
         <aside class="panel" id="panel">
           <section>
-            <h2>Mountains</h2>
+            <h2>Conquer the mountain</h2>
             <div id="mountains" class="mountains"></div>
           </section>
           <section>
@@ -94,20 +96,29 @@
               One T-bar, three runs, and a parking lot. Sell tickets, then grow the
               place.
             </p>
+            <button type="button" id="btn-remove-lift" class="ghost hidden">Take down this lift (40% back)</button>
+            <button type="button" id="btn-move-building" class="ghost hidden">Move</button>
           </section>
         </aside>
 
-        <div class="cam-hint">Right-drag look · Scroll zoom · WASD fly · Click another peak to buy it</div>
+        <div class="cam-hint">Right-drag look · Scroll zoom · WASD fly · G steepness</div>
 
         <div class="legend">
           <div><i class="diff green"></i> Green</div>
           <div><i class="diff blue"></i> Blue</div>
           <div><i class="diff black"></i> Black</div>
           <div><i class="diff dblack"></i> Double black</div>
+          <button type="button" id="btn-slope" class="ghost slope-toggle" aria-pressed="false" title="Tint the mountain by steepness (G)">
+            Show steepness <kbd>G</kbd>
+          </button>
+          <div class="slope-key">
+            <span style="--c: #3fb878"></span><span style="--c: #3d84d8"></span><span style="--c: #3a3f47"></span><span style="--c: #b8324b"></span>
+            <small>gentle → extreme</small>
+          </div>
         </div>
 
         <div id="cut-banner" class="cut-banner hidden">
-          <p>
+          <p id="cut-text">
             Click downhill to draw a run. It should start high and finish near the
             base. Cost grows with length.
           </p>
@@ -125,70 +136,24 @@
 
         <div id="toasts" class="toasts"></div>
 
-        <nav class="dock" aria-label="Build tools">
-          <button type="button" class="tool on" data-tool="select">
-            <span>Look around</span>
-          </button>
-          <button type="button" class="tool" data-tool="cut">
-            <span>Cut trail</span>
-            <small>length fee</small>
-          </button>
-          <button type="button" class="tool" data-tool="lodge">
-            <span>Lodge</span>
-            <small id="cost-lodge">$2,900</small>
-          </button>
-          <button type="button" class="tool" data-tool="restroom">
-            <span>Restroom</span>
-            <small id="cost-restroom">$480</small>
-          </button>
-          <button type="button" class="tool" data-tool="coffee">
-            <span>Coffee shop</span>
-            <small id="cost-coffee">$920</small>
-          </button>
-          <button type="button" class="tool" data-tool="sandwich">
-            <span>Sandwich shop</span>
-            <small id="cost-sandwich">$1,050</small>
-          </button>
-          <button type="button" class="tool" data-tool="shack">
-            <span>Sugar shack</span>
-            <small id="cost-shack">$620</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="hotel">
-            <span>Hotel</span>
-            <small id="cost-hotel">$12,000</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="restaurant">
-            <span>Restaurant</span>
-            <small id="cost-restaurant">$4,800</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="shop">
-            <span>Shop</span>
-            <small id="cost-shop">$3,200</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="condo">
-            <span>Condo</span>
-            <small id="cost-condo">$9,500</small>
-          </button>
-          <button type="button" class="tool expansion" data-tool="patrol">
-            <span>Patrol hut</span>
-            <small id="cost-patrol">$1,600</small>
-          </button>
-        </nav>
+        <div id="dock-menus" class="dock-menus"></div>
+
+        <nav id="dock" class="dock" aria-label="Build tools"></nav>
       </div>
 
       <div id="welcome">
         <div class="welcome-card">
-          <p class="eyebrow">A little ski area</p>
+          <p class="eyebrow">Conquer the mountain</p>
           <h1>Skilandia</h1>
           <p>
-            Fly over Little Hawk Hill, then buy Cedar Ridge and finish at Twin
-            Peaks — a two-mountain resort. Tickets start the cash. Buildings earn
-            at different rates. Sugar shacks go beside the runs.
+            You own one small T-bar in a big mountain valley. Sell tickets, cut
+            runs, build lifts and grow the resort until your lifts reach every
+            high peak around you.
           </p>
           <ul>
-            <li>Right-drag to look, scroll to zoom, WASD to fly between hills.</li>
-            <li>After the starter hill you must hire ski patrol and a crew.</li>
-            <li>Hotels, restaurants, shops, and condos unlock on the next mountain.</li>
+            <li>Right-drag to look, scroll to zoom, WASD to fly. Click a peak in the panel to fly there.</li>
+            <li>A lift whose top reaches a summit conquers that peak and grows your resort.</li>
+            <li>Your first peak makes you a ski area: hire staff, and hotels, shops and condos unlock.</li>
           </ul>
           <button type="button" id="btn-start">Open the mountain</button>
         </div>

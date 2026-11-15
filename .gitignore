@@ -10,3 +10,4 @@ coverage/
 .idea/
 .vscode/
 agent-tools/
+release/

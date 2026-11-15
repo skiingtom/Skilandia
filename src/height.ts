@@ -1,4 +1,6 @@
-import { MountainId, WORLD_H, WORLD_W } from "./types";
+import { unzlibSync } from "fflate";
+import { TERRAIN_CELL_M, TERRAIN_COLS, TERRAIN_DATA, TERRAIN_ROWS } from "./terrain-data";
+import { BASE_ELEV_M, MountainId, UNIT_M, VERTICAL_M } from "./types";
 
 function hash2(x: number, y: number): number {
   let n = Math.imul(x, 374761393) + Math.imul(y, 668265263);
@@ -20,109 +22,91 @@ export function noise2(x: number, y: number): number {
   return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
 }
 
-function fbm(x: number, y: number): number {
-  let v = 0;
-  let a = 0.5;
-  let f = 1;
-  for (let i = 0; i < 5; i++) {
-    v += a * noise2(x * f, y * f);
-    a *= 0.5;
-    f *= 2.05;
-  }
-  return v;
-}
-
 function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
-function littleHawk(x: number, y: number): number {
-  const nx = x / WORLD_W;
-  const ny = y / WORLD_H;
-  const dx = (nx - 0.5) * 2;
-  const ridge = Math.exp(-dx * dx * 1.45);
-  let h = ny * 0.4 * ridge + ny * ny * 0.36 * ridge;
-  h += Math.exp(-((nx - 0.26) ** 2) * 11) * ny * ny * 0.42;
-  h += Math.exp(-((nx - 0.72) ** 2) * 7.5) * ny * 0.16;
-  h += Math.exp(-((nx - 0.5) ** 2 + (ny - 0.93) ** 2) * 16) * 0.2;
-  h += (fbm(nx * 4.2, ny * 4.6) - 0.48) * 0.1 * (0.25 + ny);
-  h += (noise2(nx * 21, ny * 18) - 0.5) * 0.03 * ny;
-  const village = 1 - clamp01((ny - 0.05) / 0.12);
-  h *= 1 - village * 0.82;
-  return clamp01(h);
-}
+/*
+ * The world is one large real landscape: a heightmap built from a colour-
+ * tinted topographic map (see tools/terrain/build_heightmap.py). Elevation
+ * is returned normalised: 0 = BASE_ELEV_M, 1 = BASE_ELEV_M + VERTICAL_M.
+ */
+const heights: Float32Array = (() => {
+  const packed = base64ToBytes(TERRAIN_DATA);
+  const raw = unzlibSync(packed);
+  const metres = new Uint16Array(raw.buffer, raw.byteOffset, TERRAIN_COLS * TERRAIN_ROWS);
+  const out = new Float32Array(metres.length);
+  for (let i = 0; i < metres.length; i++) out[i] = (metres[i] - BASE_ELEV_M) / VERTICAL_M;
+  return out;
+})();
 
-function cedarRidge(x: number, y: number): number {
-  const nx = x / WORLD_W;
-  const ny = y / WORLD_H;
-  const dx = (nx - 0.48) * 2;
-  const ridge = Math.exp(-dx * dx * 1.15);
-  let h = ny * 0.46 * ridge + ny * ny * 0.44 * ridge;
-  h += Math.exp(-((nx - 0.22) ** 2) * 9) * ny * ny * 0.5;
-  h += Math.exp(-((nx - 0.78) ** 2) * 8) * ny * 0.22;
-  h += Math.exp(-((nx - 0.5) ** 2 + (ny - 0.94) ** 2) * 14) * 0.22;
-  h += (fbm(nx * 5.1 + 4, ny * 4.8) - 0.48) * 0.12 * (0.3 + ny);
-  const village = 1 - clamp01((ny - 0.04) / 0.11);
-  h *= 1 - village * 0.8;
-  return clamp01(h);
-}
-
-function twinPeaks(x: number, y: number): number {
-  const nx = x / WORLD_W;
-  const ny = y / WORLD_H;
-  const left = Math.exp(-((nx - 0.3) ** 2) * 7.5);
-  const right = Math.exp(-((nx - 0.72) ** 2) * 7.5);
-  let h = 0;
-  h += (ny * 0.38 + ny * ny * 0.5) * left;
-  h += (ny * 0.36 + ny * ny * 0.52) * right;
-  h += Math.exp(-((nx - 0.5) ** 2) * 18) * ny * 0.12;
-  h += Math.exp(-((nx - 0.28) ** 2 + (ny - 0.92) ** 2) * 14) * 0.2;
-  h += Math.exp(-((nx - 0.74) ** 2 + (ny - 0.93) ** 2) * 14) * 0.22;
-  h += (fbm(nx * 4.6 + 9, ny * 5.2) - 0.5) * 0.1 * ny;
-  const village = 1 - clamp01((ny - 0.04) / 0.13);
-  h *= 1 - village * 0.78;
-  return clamp01(h);
-}
-
-function rawElevation(x: number, y: number, id: MountainId): number {
-  if (id === 1) return cedarRidge(x, y);
-  if (id === 2) return twinPeaks(x, y);
-  return littleHawk(x, y);
-}
-
-const GW = 160;
-const GH = 205;
-const grids: Float32Array[] = [0, 1, 2].map((id) => {
-  const grid = new Float32Array(GW * GH);
-  for (let gy = 0; gy < GH; gy++) {
-    for (let gx = 0; gx < GW; gx++) {
-      grid[gy * GW + gx] = rawElevation((gx / (GW - 1)) * WORLD_W, (gy / (GH - 1)) * WORLD_H, id as MountainId);
-    }
+function base64ToBytes(b64: string): Uint8Array {
+  const table = new Uint8Array(128);
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let i = 0; i < chars.length; i++) table[chars.charCodeAt(i)] = i;
+  const clean = b64.replace(/=+$/, "");
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let o = 0;
+  for (let i = 0; i < clean.length; i += 4) {
+    const a = table[clean.charCodeAt(i)];
+    const b = table[clean.charCodeAt(i + 1)];
+    const c = table[clean.charCodeAt(i + 2)] ?? 0;
+    const d = table[clean.charCodeAt(i + 3)] ?? 0;
+    const n = (a << 18) | (b << 12) | (c << 6) | d;
+    if (o < out.length) out[o++] = (n >> 16) & 255;
+    if (o < out.length) out[o++] = (n >> 8) & 255;
+    if (o < out.length) out[o++] = n & 255;
   }
-  return grid;
-});
+  return out;
+}
 
-export function elevation(x: number, y: number, id: MountainId = 0): number {
-  const grid = grids[id];
-  const u = (x / WORLD_W) * (GW - 1);
-  const v = (y / WORLD_H) * (GH - 1);
-  const x0 = Math.max(0, Math.min(GW - 2, Math.floor(u)));
-  const y0 = Math.max(0, Math.min(GH - 2, Math.floor(v)));
-  const tx = clamp01(u - x0);
-  const ty = clamp01(v - y0);
-  const a = grid[y0 * GW + x0];
-  const b = grid[y0 * GW + x0 + 1];
-  const c = grid[(y0 + 1) * GW + x0];
-  const d = grid[(y0 + 1) * GW + x0 + 1];
+/** Normalised elevation (0..1) at map position x, y (metres; y is north). */
+export function elevation(x: number, y: number, _id: MountainId = 0): number {
+  const u = clampNum(x / TERRAIN_CELL_M, 0, TERRAIN_COLS - 1.001);
+  const v = clampNum(y / TERRAIN_CELL_M, 0, TERRAIN_ROWS - 1.001);
+  const x0 = Math.floor(u);
+  const y0 = Math.floor(v);
+  const tx = u - x0;
+  const ty = v - y0;
+  const i = y0 * TERRAIN_COLS + x0;
+  const a = heights[i];
+  const b = heights[i + 1];
+  const c = heights[i + TERRAIN_COLS];
+  const d = heights[i + TERRAIN_COLS + 1];
   return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
 }
 
+/** Elevation in metres above sea level. */
+export function elevationM(x: number, y: number): number {
+  return BASE_ELEV_M + elevation(x, y) * VERTICAL_M;
+}
+
+function clampNum(n: number, a: number, b: number): number {
+  return Math.max(a, Math.min(b, n));
+}
+
 export function slopeAt(x: number, y: number, id: MountainId = 0): number {
-  const e = 3;
+  const e = TERRAIN_CELL_M * 0.5;
   const dx = elevation(x + e, y, id) - elevation(x - e, y, id);
   const dy = elevation(x, y + e, id) - elevation(x, y - e, id);
   return Math.hypot(dx, dy) / (2 * e);
 }
+
+/** Fall-line steepness in the same units the trail classifier uses (drop m / run m). */
+export function gradeAt(x: number, y: number, id: MountainId = 0): number {
+  return (slopeAt(x, y, id) * VERTICAL_M) / UNIT_M;
+}
+
+/** Steepest-descent direction (unit vector in map x/y). */
+export function downhill(x: number, y: number): { x: number; y: number } {
+  const e = TERRAIN_CELL_M * 0.5;
+  const gx = elevation(x + e, y) - elevation(x - e, y);
+  const gy = elevation(x, y + e) - elevation(x, y - e);
+  const l = Math.hypot(gx, gy) || 1;
+  return { x: -gx / l, y: -gy / l };
+}
+
+void clamp01;
 
 export function dist2(ax: number, ay: number, bx: number, by: number): number {
   const dx = ax - bx;
