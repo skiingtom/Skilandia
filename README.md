@@ -4,9 +4,9 @@ A ski-resort builder. Fly over Little Hawk Hill, sell tickets, cut runs, build l
 
 ## Play on Windows
 
-1. Get the latest build:
-   - **Releases** page: `Skilandia-Setup-<version>.exe` (installer) or `Skilandia-<version>-portable.exe` (no install, just run it), or
-   - **Actions → Windows build →** latest run **→ Artifacts → Skilandia-windows**.
+Windows builds are paused while the game is being polished. To make one: **Actions → Windows build → Run workflow**, then download **Artifacts → Skilandia-windows** from that run.
+
+1. It contains `Skilandia-Setup-<version>.exe` (installer) and `Skilandia-<version>-portable.exe` (no install, just run it).
 2. Double-click it. Windows SmartScreen may say "Windows protected your PC" because the game isn't code-signed yet: click **More info → Run anyway**.
 
 F11 toggles fullscreen.
@@ -19,7 +19,13 @@ F11 toggles fullscreen.
 | Cedar Ridge | 6,000 skiers | 20 |
 | Twin Peaks | 18,000 skiers | 40 |
 
-How many show up depends on how good the resort is (runs, variety, food, lodging, price) and how long the lift lines are. Fed-up skiers leave long lines and go home.
+Skiers only come when the resort looks like it can handle them. The **Skiers** counter shows `on the hill / comfortable load` (hover it for the breakdown). The comfortable load is the smallest of:
+
+- **Lifts**: what your lifts can keep cycling (riders per second × a full lap: ride up, ski down, walk back). Lifts with no run at the top don't count
+- **Runs**: room on the snow, about one skier per 7 map units of run
+- **The mountain's maximum** above
+
+How much of that you actually draw depends on how appealing the resort is (variety, food, lodging, price, lift lines). "The hill is saying" tells you whether lifts, runs or the mountain itself is holding you back. Fed-up skiers leave long lines and go home.
 
 ## Controls
 

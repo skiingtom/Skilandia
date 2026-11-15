@@ -131,7 +131,11 @@ let lastToastId = 0;
 
 function paintHud(force = false): void {
   moneyEl.textContent = `$${Math.round(game.money).toLocaleString()}`;
-  skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${game.capacity().toLocaleString()}`;
+  const load = game.loadLimits();
+  skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${load.comfortable.toLocaleString()}`;
+  skiersEl.parentElement!.title =
+    `The resort can comfortably handle ${load.comfortable.toLocaleString()} skiers right now ` +
+    `(lifts ${load.lifts.toLocaleString()}, runs ${load.runs.toLocaleString()}, mountain max ${load.cap.toLocaleString()}).`;
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
   earnedEl.textContent = `$${Math.round(game.lifetimeEarned).toLocaleString()}`;

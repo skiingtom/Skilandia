@@ -160,6 +160,9 @@ export class Game {
   private boothTake = 0;
   /** Game seconds since start; orders lift lines. */
   private clock = 0;
+  private loadCache: ReturnType<Game["loadLimits"]> | null = null;
+  private loadCacheT = -1;
+  private loadCacheKey = "";
   private boothT = 0;
   heliTakeToday = 0;
   upkeepToday = 0;
@@ -349,6 +352,44 @@ export class Game {
     return MOUNTAINS[this.currentMountain].capacity;
   }
 
+  /**
+   * How many skiers the resort can comfortably handle right now:
+   * - lifts: each lift's riders/sec × a skier's full lap (ride up, ski a
+   *   run it serves, walk back), kept a little under so lines stay short;
+   * - runs: room on the snow, about one skier per 7 units of run;
+   * - the mountain's hard cap.
+   * The smallest one is the limit. Recomputed a few times a second.
+   */
+  loadLimits(): { lifts: number; runs: number; cap: number; comfortable: number; limitedBy: "lifts" | "runs" | "capacity" } {
+    const key = `${this.currentMountain}:${this.lifts.length}:${this.trails.length}`;
+    if (this.loadCache && this.loadCacheKey === key && this.clock - this.loadCacheT < 0.5) return this.loadCache;
+    let lifts = 0;
+    for (const l of this.lifts) {
+      const spec = LIFT_SPECS[l.type];
+      const served = this.servedBy(l);
+      const bunny = l.type === "carpet" && served.length === 0;
+      if (!served.length && !bunny) continue; // nothing to ski from the top
+      const len = Math.hypot(l.top.x - l.bottom.x, l.top.y - l.bottom.y);
+      const perSec = (spec.seats * spec.speed) / spec.spacing;
+      const runLen = bunny ? len : served.reduce((n, t) => n + t.length, 0) / served.length;
+      const lap = len / spec.speed + runLen / 110 + 18;
+      lifts += perSec * lap * 0.85;
+    }
+    const runs = this.trails.reduce((n, t) => n + t.length / 7, 0);
+    const cap = this.capacity();
+    const comfortable = Math.round(Math.min(lifts, runs, cap));
+    const limitedBy = comfortable === cap ? "capacity" : lifts <= runs ? "lifts" : "runs";
+    this.loadCache = { lifts: Math.round(lifts), runs: Math.round(runs), cap, comfortable, limitedBy };
+    this.loadCacheT = this.clock;
+    this.loadCacheKey = key;
+    return this.loadCache;
+  }
+
+  /** Skiers the resort will draw right now: its comfortable load, scaled by how appealing it is. */
+  demand(): number {
+    return Math.round(this.loadLimits().comfortable * clamp(this.attraction(), 0.25, 1));
+  }
+
   maxLifts(): number {
     return MOUNTAINS[this.currentMountain].maxLifts;
   }
@@ -422,6 +463,12 @@ export class Game {
           break;
         }
       }
+    }
+    const load = this.loadLimits();
+    if (this.skiers.length >= this.demand() * 0.9) {
+      if (load.limitedBy === "lifts") out.push("The lifts are maxed out. Add or upgrade lifts to draw more skiers.");
+      else if (load.limitedBy === "runs") out.push("The runs are crowded. Cut more trails to draw more skiers.");
+      else out.push(`${MOUNTAINS[this.currentMountain].name} is full. Buy the next mountain to grow.`);
     }
     if (!out.length) out.push("The hill feels friendly. Keep an eye on mix and price.");
     return out.slice(0, 3);
@@ -1094,13 +1141,15 @@ export class Game {
         this.heliTakeToday = 0;
         this.toast(`Day ${this.day} on Little Hawk Hill.`);
       }
-      // Arrivals scale with the mountain's size and how appealing it is.
-      // A great, uncrowded resort fills toward capacity; long lines slow it.
-      this.spawnAcc += capped * this.capacity() * 0.0024 * this.attraction();
+      // Skiers only come when it looks like the resort can take them:
+      // arrivals close the gap to demand over about a minute, then stop.
+      const want = this.demand();
+      const gap = want - this.skiers.length;
+      if (gap > 0) this.spawnAcc += capped * Math.min(gap / 45 + 0.05, this.capacity() * 0.003);
       const cap = this.capacity();
       while (this.spawnAcc > 1) {
         this.spawnAcc -= 1;
-        if (this.skiers.length < cap) this.spawnSkier(false);
+        if (this.skiers.length < Math.min(cap, want)) this.spawnSkier(false);
       }
       this.boothT += capped;
       if (this.boothT > 2 && this.boothTake > 0) {

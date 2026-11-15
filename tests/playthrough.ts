@@ -87,6 +87,9 @@ for (let i = 0; i < 36000; i++) {
   ok(Number.isFinite(g.money), `money became ${g.money}`);
   peakSkiers = Math.max(peakSkiers, g.skiers.length);
   ok(g.skiers.length <= g.capacity(), `over capacity: ${g.skiers.length} > ${g.capacity()}`);
+  // Skiers only come when the resort can handle them.
+  ok(g.skiers.length <= g.loadLimits().comfortable + 25, `more skiers (${g.skiers.length}) than the resort can handle (${g.loadLimits().comfortable})`);
+  if (i % 200 === 0) ok(g.liftWait() < 90, `lift lines got long: ${g.liftWait().toFixed(0)}s`);
   if (g.heli.flying && !wasFlying) flightsSeen++;
   wasFlying = g.heli.flying;
   // A lift with people in line must keep boarding them (a long line is fine, a stalled one isn't).
