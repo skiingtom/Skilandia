@@ -44,9 +44,9 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "trail", label: "Trails", items: TRAIL_KINDS.map((k) => `trail:${k}` as Tool) },
   { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
-  { id: "base", label: "Base", items: ["lodge", "restroom", "school", "patrol"] },
-  { id: "food", label: "Food", items: ["shack", "coffee", "sandwich", "restaurant"] },
-  { id: "resort", label: "Resort", items: ["shop", "condo", "hotel", "heli"] },
+  { id: "base", label: "Base", items: ["lodge", "restroom", "rental", "school", "clinic", "patrol"] },
+  { id: "food", label: "Food", items: ["shack", "coffee", "cafeteria", "sandwich", "bar", "restaurant"] },
+  { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "heli"] },
 ];
 
 export function groupOf(tool: Tool): string | null {
@@ -101,7 +101,7 @@ function itemHtml(tool: Tool): string {
   return `<button type="button" class="tool item${exp}" data-tool="${b}">
       <b>${BUILDING_LABEL[b]}</b>
       <small id="cost-${b}"></small>
-      ${exp ? '<em class="lock">Unlocks with the next mountain</em>' : ""}
+      ${exp ? '<em class="lock">Unlocks after your first peak</em>' : ""}
     </button>`;
 }
 

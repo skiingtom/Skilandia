@@ -62,12 +62,51 @@ ok(!!g.canPlaceFeature("jump", BASE.x + 3000, BASE.y - 3000), "off-run jump shou
 
 // Village buildings around the base
 const spots: [string, number, number][] = [
-  ["lodge", 150, 120], ["restroom", -150, 60], ["coffee", 200, -40], ["school", -220, -120], ["heli", 260, 260],
+  ["lodge", 150, 120],
+  ["restroom", -150, 60],
+  ["coffee", 200, -40],
+  ["school", -220, -120],
+  ["rental", -80, 140],
+  ["cafeteria", 80, -160],
+  ["heli", 260, 260],
 ];
 for (const [type, dx, dy] of spots) {
   g.setTool(type as never);
   const r = g.click(BASE.x + dx, BASE.y + dy);
   ok(r === "ok", `${type} in the village failed: ${g.toasts.at(-1)?.text}`);
+}
+// Clinic sits on the mountain, outside the village ring.
+{
+  const tbar = g.lifts[0];
+  const mid = {
+    x: (tbar.bottom.x + tbar.top.x) / 2 + 90,
+    y: (tbar.bottom.y + tbar.top.y) / 2,
+  };
+  g.setTool("clinic");
+  ok(g.click(mid.x, mid.y) === "ok", `clinic on the mountain failed: ${g.toasts.at(-1)?.text}`);
+}
+// Expansion buildings unlock after the first peak; conquer Hollin first, then place a few.
+{
+  const p = SUMMITS.find((s) => s.id === "hollin")!;
+  const dx = BASE.x - p.x;
+  const dy = BASE.y - p.y;
+  const d = Math.hypot(dx, dy);
+  const bottom = { x: p.x + (dx / d) * 2500, y: p.y + (dy / d) * 2500 };
+  const top = { x: p.x + (dx / d) * 40, y: p.y + (dy / d) * 40 };
+  g.setTool("lift:gondola");
+  g.click(bottom.x, bottom.y);
+  ok(g.click(top.x, top.y) === "ok", `early gondola to Hollin failed: ${g.toasts.at(-1)?.text}`);
+  ok(g.conquered.has("hollin"), "Hollin should unlock expansion buildings");
+}
+const expansionSpots: [string, number, number][] = [
+  ["bar", -280, 40],
+  ["hostel", 320, -80],
+  ["spa", -40, 220],
+];
+for (const [type, dx, dy] of expansionSpots) {
+  g.setTool(type as never);
+  const r = g.click(BASE.x + dx, BASE.y + dy);
+  ok(r === "ok", `${type} after first peak failed: ${g.toasts.at(-1)?.text}`);
 }
 g.hire("instructor");
 g.hire("instructor");
@@ -122,8 +161,9 @@ console.log({
 });
 ok(g.totalTickets > 100, "hardly anyone came");
 
-// --- conquer every peak with a gondola from somewhere below it
+// --- conquer every remaining peak with a gondola from somewhere below it
 for (const p of SUMMITS) {
+  if (g.conquered.has(p.id)) continue;
   // Bottom station: out from the summit toward the base, as far as a gondola reaches.
   const dx = BASE.x - p.x;
   const dy = BASE.y - p.y;
