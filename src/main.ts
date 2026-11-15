@@ -129,7 +129,21 @@ startBtn.addEventListener("click", (e) => {
   beginPlay();
 });
 
-world = new World3D(canvas);
+try {
+  world = new World3D(canvas);
+} catch (err) {
+  // Without WebGL there is no mountain, only the HTML UI. Say so instead of
+  // leaving an empty screen.
+  const box = document.createElement("div");
+  box.style.cssText =
+    "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#1b2733;color:#f3ead8;font:16px/1.5 Nunito,sans-serif;padding:24px;text-align:center";
+  box.innerHTML =
+    "<div style='max-width:520px'><h2 style='margin:0 0 12px'>Skilandia can't start 3D graphics</h2>" +
+    "<p>Your graphics card or driver didn't allow WebGL. Updating your graphics driver usually fixes this. " +
+    "If you're on remote desktop or a virtual machine, try running the game directly on the PC.</p></div>";
+  document.body.appendChild(box);
+  throw err;
+}
 // Dev-only handle for poking at the game from the console.
 if ((import.meta as unknown as { env: { DEV: boolean } }).env.DEV) Object.assign(window, { skilandia: { game, world } });
 

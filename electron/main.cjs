@@ -2,6 +2,13 @@
 const { app, BrowserWindow, Menu, shell } = require("electron");
 const path = require("node:path");
 
+// The game is all WebGL. Chromium refuses WebGL on GPUs/drivers it has
+// blocklisted (older laptops, some Intel/AMD drivers, VMs, remote desktop),
+// which leaves only the HTML UI on screen. Use the GPU anyway, and fall back
+// to software rendering (SwiftShader) if there is no usable GPU at all.
+app.commandLine.appendSwitch("ignore-gpu-blocklist");
+app.commandLine.appendSwitch("enable-unsafe-swiftshader");
+
 // One copy of the game at a time; a second launch focuses the first window.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
