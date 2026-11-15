@@ -187,7 +187,9 @@ export const CONQUER_DROP_M = 150;
 export const TIERS: { name: string; peaksNeeded: number; capacity: number; maxLifts: number; villageRadius: number }[] = [
   { name: "Local hill", peaksNeeded: 0, capacity: 2000, maxLifts: 10, villageRadius: 500 },
   { name: "Ski area", peaksNeeded: 1, capacity: 6000, maxLifts: 25, villageRadius: 800 },
-  { name: "Destination resort", peaksNeeded: 4, capacity: 18000, maxLifts: 60, villageRadius: 1200 },
+  { name: "Regional resort", peaksNeeded: 3, capacity: 18000, maxLifts: 40, villageRadius: 1050 },
+  { name: "Destination resort", peaksNeeded: 5, capacity: 54000, maxLifts: 70, villageRadius: 1400 },
+  { name: "World-class resort", peaksNeeded: 7, capacity: 162000, maxLifts: 110, villageRadius: 1800 },
 ];
 
 /**

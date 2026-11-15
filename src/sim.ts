@@ -503,16 +503,24 @@ export class Game {
   goals(): Goal[] {
     const n = this.conquered.size;
     const total = SUMMITS.length;
+    const tierGoals = TIERS.slice(1).map((t, i) => ({
+      id: `tier${i + 1}`,
+      text:
+        t.peaksNeeded === 1
+          ? `Run a lift to your first peak (${t.capacity.toLocaleString()}-skier ${t.name.toLowerCase()})`
+          : `Conquer ${t.peaksNeeded} peaks (${t.capacity.toLocaleString()}-skier ${t.name.toLowerCase()})`,
+      done: n >= t.peaksNeeded,
+    }));
     return [
       { id: "lodge", text: `Build a lodge ($${COSTS.lodge.toLocaleString()})`, done: this.has("lodge") },
       { id: "black", text: "Cut a black-diamond run", done: this.trails.some((t) => t.difficulty >= 2) },
-      { id: "peak1", text: `Run a lift to your first peak (${TIERS[1].capacity.toLocaleString()}-skier ski area)`, done: n >= TIERS[1].peaksNeeded },
+      tierGoals[0],
       {
         id: "patrol",
         text: "Hire ski patrol (needed once you're a ski area)",
         done: !this.staffRequired() ? false : this.staff.patrol > 0,
       },
-      { id: "peak4", text: `Conquer ${TIERS[2].peaksNeeded} peaks (${TIERS[2].capacity.toLocaleString()}-skier destination resort)`, done: n >= TIERS[2].peaksNeeded },
+      ...tierGoals.slice(1),
       { id: "all", text: `Conquer the mountain: lifts to all ${total} peaks (${n}/${total})`, done: n >= total },
     ];
   }

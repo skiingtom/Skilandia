@@ -23,7 +23,9 @@ Conquering peaks grows the resort:
 |---|---|---|---|---|
 | Local hill | 0 | 2,000 skiers | 10 | 500 m |
 | Ski area | 1 | 6,000 skiers | 25 | 800 m |
-| Destination resort | 4 | 18,000 skiers | 60 | 1,200 m |
+| Regional resort | 3 | 18,000 skiers | 40 | 1,050 m |
+| Destination resort | 5 | 54,000 skiers | 70 | 1,400 m |
+| World-class resort | 7 | 162,000 skiers | 110 | 1,800 m |
 
 Becoming a ski area also starts payroll (ski patrol and crew) and unlocks hotels, restaurants, shops, condos and patrol huts.
 

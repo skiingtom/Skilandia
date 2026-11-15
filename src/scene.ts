@@ -1290,7 +1290,7 @@ function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: numb
   return g;
 }
 
-/** Enough for the biggest mountain (Twin Peaks holds 18,000). */
+/** Enough for the world-class resort tier (162,000 skiers). */
 const MAX_SKIERS_DRAWN = 20000;
 
 function makeCrowd(max: number): { group: THREE.Group; body: THREE.InstancedMesh; head: THREE.InstancedMesh; skis: THREE.InstancedMesh } {
