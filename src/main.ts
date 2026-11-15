@@ -1,7 +1,7 @@
-import { AudioBus } from "./audio";
+import { AmbientState, AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
-import { World3D } from "./scene";
+import { World3D, from3 } from "./scene";
 import { EARTH_COST_PER_M3, Game, SUMMITS, TREE_FELL_COST, TREE_PLANT_COST } from "./sim";
 import { MAX_EARTHWORK_M, SculptMode, earthworkAt } from "./height";
 let brushHint = "";
@@ -53,10 +53,72 @@ function beginPlay(): void {
   started = true;
   game.startManaging();
   world?.startPlay();
+  audio.unlock();
   audio.click();
   welcome.classList.add("hidden");
   document.body.classList.remove("welcome-open");
   paintHud(true);
+}
+
+/** Zoom-aware music / cars / lift hum / dig rumble for the audio bus. */
+function ambientSnap(): AmbientState {
+  const look = from3(world.controls.target, game.currentMountain);
+  const camDist = world.camera.position.distanceTo(world.controls.target);
+  const route = game.carRoute();
+  let carDist = 1e9;
+  if (route && route.length) {
+    for (const p of route) {
+      const d = Math.hypot(p.x - look.x, p.y - look.y);
+      if (d < carDist) carDist = d;
+    }
+  }
+  const lots = game.parkingLots().filter((l) => l.connected);
+  for (const l of lots) {
+    const d = Math.hypot(l.x - look.x, l.y - look.y);
+    if (d < carDist) carDist = d;
+  }
+  const skiers = game.skiers.length;
+  const carBusy = route ? Math.min(1, (8 + skiers / 4) / 36) : 0;
+  const lifts: AmbientState["lifts"] = [];
+  for (const L of game.lifts) {
+    lifts.push({ x: L.bottom.x, y: L.bottom.y, type: L.type });
+    lifts.push({ x: L.top.x, y: L.top.y, type: L.type });
+    lifts.push({
+      x: (L.bottom.x + L.top.x) * 0.5,
+      y: (L.bottom.y + L.top.y) * 0.5,
+      type: L.type,
+    });
+  }
+  const pad = game.helipad();
+  const heli =
+    pad && (game.heli.flying || game.heli.wait > 0)
+      ? { x: pad.x, y: pad.y, active: true }
+      : pad
+        ? { x: pad.x, y: pad.y, active: false }
+        : null;
+  const w = game.weather();
+  return {
+    camDist,
+    lookX: look.x,
+    lookY: look.y,
+    cover: w.cover,
+    wind: w.wind,
+    snow: w.snow,
+    carBusy,
+    carDist,
+    lifts,
+    heli,
+    shaping: pointer.held && game.tool === "shape" && game.shapeVolume > 0,
+    paused: game.paused,
+    active: started && game.managing,
+  };
+}
+
+function placeOkSound(): void {
+  const t = String(game.tool);
+  if (t === "select") audio.click();
+  else if (t.startsWith("lift:") || t === "cut" || t === "road" || t === "heli") audio.buildBig();
+  else audio.build();
 }
 
 startBtn.addEventListener("click", (e) => {
@@ -470,6 +532,7 @@ function loop(now: number): void {
     placeHint.classList.add("hidden");
   }
   world.update(game, dt);
+  audio.update(dt, ambientSnap());
   world.render();
   paintFx();
   requestAnimationFrame(loop);
@@ -543,8 +606,7 @@ canvas.addEventListener("pointerup", (e) => {
     void (moneyEl as HTMLElement).offsetWidth;
     moneyEl.classList.add("shake");
   } else if (result === "ok") {
-    if (game.tool === "select") audio.click();
-    else audio.build();
+    placeOkSound();
   }
   paintHud();
 });
@@ -553,7 +615,7 @@ canvas.addEventListener("dblclick", (e) => {
   if (game.tool !== "cut" && game.tool !== "road") return;
   e.preventDefault();
   const result = game.finishTrail();
-  if (result === "ok") audio.build();
+  if (result === "ok") audio.buildBig();
   if (result === "shake") audio.error();
   paintHud();
 });
@@ -616,7 +678,7 @@ document.querySelector("#btn-cancel-cut")!.addEventListener("click", () => {
 
 finishBtn.addEventListener("click", () => {
   const result = game.finishTrail();
-  if (result === "ok") audio.build();
+  if (result === "ok") audio.buildBig();
   if (result === "shake") audio.error();
   paintHud();
 });
@@ -637,7 +699,7 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && (game.tool === "cut" || game.tool === "road")) {
     const result = game.finishTrail();
-    if (result === "ok") audio.build();
+    if (result === "ok") audio.buildBig();
     if (result === "shake") audio.error();
     paintHud();
   }
