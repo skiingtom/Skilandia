@@ -27,6 +27,7 @@ export type FeatureType = "jump" | "rail" | "box" | "halfpipe";
 export type Tool =
   | "select"
   | "cut"
+  | "road"
   | "move"
   | BuildingType
   | `lift:${LiftType}`

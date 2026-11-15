@@ -1,5 +1,6 @@
 import { AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
+import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
 import { World3D } from "./scene";
 import { Game, SUMMITS } from "./sim";
 import {
@@ -175,7 +176,7 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
-    if (tool === "select" || tool === "cut" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
+    if (tool === "select" || tool === "cut" || tool === "road" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -191,16 +192,26 @@ function paintHud(force = false): void {
     btn.classList.toggle("on", Number(btn.dataset.speed) === game.speed && !game.paused);
   });
   document.querySelector("#btn-pause")!.textContent = game.paused ? "Resume" : "Pause";
-  cutBanner.classList.toggle("hidden", game.tool !== "cut");
-  cutText.textContent = `${TRAIL_KIND_SPEC[game.trailKind].label}: click downhill to draw it, then Finish. ${TRAIL_KIND_SPEC[game.trailKind].blurb} Trees in the way get cleared.`;
+  const drafting = game.tool === "cut" || game.tool === "road";
+  cutBanner.classList.toggle("hidden", !drafting);
+  cutText.textContent =
+    game.tool === "road"
+      ? `Road: start on the highway, another road or the parking lot, click along the way, and end on a road or the lot. $${ROAD_COST_PER_M}/m, at most ${Math.round(ROAD_MAX_GRADE * 100)}% grade, so zig-zag up steep ground.`
+      : `${TRAIL_KIND_SPEC[game.trailKind].label}: click downhill to draw it, then Finish. ${TRAIL_KIND_SPEC[game.trailKind].blurb} Trees in the way get cleared.`;
+  finishBtn.textContent = game.tool === "road" ? "Finish road" : "Finish trail";
   const picked = game.selected?.kind === "building" ? game.buildings.find((b) => b.id === game.selected!.id) : undefined;
   moveBtn.classList.toggle("hidden", !picked);
   if (picked) {
     const fee = game.moveFee(picked);
     moveBtn.textContent = `Move this ${BUILDING_LABEL[picked.type].toLowerCase()} (${fee ? `$${fee.toLocaleString()}` : "free"})`;
   }
-  const info = game.draftInfo();
-  if (info) {
+  const info = game.tool === "road" ? null : game.draftInfo();
+  if (game.tool === "road") {
+    const r = game.roadDraftInfo();
+    cutDiff.textContent = game.draft.length ? `${Math.round(r.length)} m · steepest ${Math.round(r.grade * 100)}%` : "Click a road or the lot";
+    cutCost.textContent = `$${r.cost.toLocaleString()}`;
+    finishBtn.disabled = game.draft.length < 2;
+  } else if (info) {
     cutDiff.textContent = info.length < 8 ? "Click downhill" : DIFF[info.difficulty].name;
     cutCost.textContent = `$${info.cost}`;
     finishBtn.disabled = game.draft.length < 2 || info.length < 120;
@@ -215,8 +226,8 @@ function paintHud(force = false): void {
     btn.classList.toggle("open", btn.dataset.group === openGroup);
   });
   removeLiftBtn.classList.toggle("hidden", game.selected?.kind !== "lift" || game.lifts.length <= 1);
-  canvas.classList.toggle("cut", game.tool === "cut");
-  canvas.classList.toggle("place", game.tool !== "select" && game.tool !== "cut");
+  canvas.classList.toggle("cut", drafting);
+  canvas.classList.toggle("place", game.tool !== "select" && !drafting);
   const newest = game.toasts[game.toasts.length - 1];
   if (newest && newest.id !== lastToastId) {
     lastToastId = newest.id;
@@ -330,7 +341,7 @@ function loop(now: number): void {
         pv.error ??
         `Click to set the top · ${Math.round(pv.length * UNIT_M)} m long · ${Math.round(pv.rise)} m rise · $${pv.cost.toLocaleString()}`;
     }
-  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut") {
+  } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road") {
     const hit = world.hitAt(pointer.x, pointer.y);
     const feature = game.featureTool();
     const moving = game.movingBuilding();
@@ -406,7 +417,7 @@ canvas.addEventListener("pointerup", (e) => {
 });
 
 canvas.addEventListener("dblclick", (e) => {
-  if (game.tool !== "cut") return;
+  if (game.tool !== "cut" && game.tool !== "road") return;
   e.preventDefault();
   const result = game.finishTrail();
   if (result === "ok") audio.build();
@@ -488,7 +499,7 @@ window.addEventListener("keydown", (e) => {
     game.cancel();
     paintHud();
   }
-  if (e.key === "Enter" && game.tool === "cut") {
+  if (e.key === "Enter" && (game.tool === "cut" || game.tool === "road")) {
     const result = game.finishTrail();
     if (result === "ok") audio.build();
     if (result === "shake") audio.error();

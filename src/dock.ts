@@ -22,6 +22,7 @@ const svg = (body: string) =>
   `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 const ICONS = {
+  road: svg('<path d="M8 3L4 21"/><path d="M16 3l4 18"/><path d="M12 4v3M12 10v3M12 16v3"/>'),
   look: svg('<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>'),
   trail: svg('<path d="M6 3c5 2 8 4 3 7s-3 6 3 7 6 3 5 4"/><path d="M6 3v5"/><path d="M6 3l4 1.4L6 6"/>'),
   lifts: svg('<path d="M2 5l20 6"/><path d="M12 8v6"/><path d="M8 14h8v3H8z"/><path d="M8 17v3M16 17v3"/>'),
@@ -41,6 +42,7 @@ export interface DockGroup {
 
 export const DOCK_GROUPS: DockGroup[] = [
   { id: "look", label: "Look", tool: "select" },
+  { id: "road", label: "Roads", tool: "road" },
   { id: "trail", label: "Trails", items: TRAIL_KINDS.map((k) => `trail:${k}` as Tool) },
   { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },

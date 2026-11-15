@@ -1,6 +1,6 @@
 import { unzlibSync } from "fflate";
 import { TERRAIN_CELL_M, TERRAIN_COLS, TERRAIN_DATA, TERRAIN_ROWS } from "./terrain-data";
-import { BASE_ELEV_M, MountainId, UNIT_M, VERTICAL_M } from "./types";
+import { BASE, BASE_ELEV_M, MountainId, UNIT_M, VERTICAL_M } from "./types";
 
 function hash2(x: number, y: number): number {
   let n = Math.imul(x, 374761393) + Math.imul(y, 668265263);
@@ -37,8 +37,65 @@ const heights: Float32Array = (() => {
   const metres = new Uint16Array(raw.buffer, raw.byteOffset, TERRAIN_COLS * TERRAIN_ROWS);
   const out = new Float32Array(metres.length);
   for (let i = 0; i < metres.length; i++) out[i] = (metres[i] - BASE_ELEV_M) / VERTICAL_M;
+  roughen(out);
   return out;
 })();
+
+function smoothstepN(a: number, b: number, x: number): number {
+  const t = clamp01((x - a) / (b - a));
+  return t * t * (3 - 2 * t);
+}
+
+/** Sharp crests: 1 on the ridge line, falling off either side. */
+function ridged(x: number, y: number): number {
+  return 1 - Math.abs(2 * noise2(x, y) - 1);
+}
+
+/**
+ * The source map is smoothed, so the slopes read as soft hills. Away from the
+ * base village, add back what the smoothing took out: on steep ground, sharp
+ * ridges and gullies, and in rocky patches, stepped cliff bands (flat-ish
+ * benches with near-vertical risers). Baked in once so the sim and the
+ * picture agree. The valley floor and the gentle ground stay as they were.
+ */
+function roughen(h: Float32Array): void {
+  const src = h.slice();
+  const C = TERRAIN_CELL_M;
+  const at = (i: number, j: number) =>
+    src[Math.min(TERRAIN_ROWS - 1, Math.max(0, j)) * TERRAIN_COLS + Math.min(TERRAIN_COLS - 1, Math.max(0, i))];
+  for (let j = 0; j < TERRAIN_ROWS; j++) {
+    for (let i = 0; i < TERRAIN_COLS; i++) {
+      const x = i * C;
+      const y = j * C;
+      const k = j * TERRAIN_COLS + i;
+      const gx = ((at(i + 1, j) - at(i - 1, j)) * VERTICAL_M) / (2 * C);
+      const gy = ((at(i, j + 1) - at(i, j - 1)) * VERTICAL_M) / (2 * C);
+      const grade = Math.hypot(gx, gy);
+      const keep = smoothstepN(1300, 2300, Math.hypot(x - BASE.x, y - BASE.y));
+      if (keep <= 0) continue;
+      let m = BASE_ELEV_M + src[k] * VERTICAL_M;
+      const steep = smoothstepN(0.1, 0.42, grade);
+      const high = smoothstepN(950, 1500, m);
+      // Ridges and gullies, strongest on steep high ground.
+      const relief = (0.2 + steep * 0.8) * (0.4 + high * 0.6) * keep;
+      m += ((ridged(x / 340, y / 300) - 0.5) * 56 + (ridged(x / 170 + 40, y / 150) - 0.5) * 16) * relief;
+      // Cliff bands: tall terraces in rocky patches on really steep ground,
+      // warped so they don't just trace the contour lines.
+      const rocky =
+        smoothstepN(0.45, 0.62, noise2(x / 1100 + 11, y / 900 + 5)) * smoothstepN(0.28, 0.55, grade) * high * keep;
+      if (rocky > 0) {
+        const step = 70 + noise2(x / 600, y / 600) * 50;
+        const warp = (noise2(x / 230 + 7, y / 230) - 0.5) * step * 0.9;
+        const t = (m + warp) / step;
+        const f = t - Math.floor(t);
+        // 60% of each step is a sloping bench, the last 40% a steep riser.
+        const r = f < 0.6 ? f * (0.3 / 0.6) : 0.3 + smoothstepN(0.6, 1, f) * 0.7;
+        m += ((Math.floor(t) + r) * step - warp - m) * rocky * 0.85;
+      }
+      h[k] = (m - BASE_ELEV_M) / VERTICAL_M;
+    }
+  }
+}
 
 function base64ToBytes(b64: string): Uint8Array {
   const table = new Uint8Array(128);

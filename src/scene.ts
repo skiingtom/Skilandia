@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { elevation, gradeAt, lerp, noise2 } from "./height";
+import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength } from "./height";
+import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { Game } from "./sim";
 import { SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
@@ -62,6 +63,37 @@ export function to3(x: number, y: number, lift = 0, mid: MountainId = 0): THREE.
   );
 }
 
+/**
+ * Height of the drawn terrain mesh (flat triangles between 28 m vertices),
+ * which on rough ground can sit a few metres off the smooth heightfield.
+ */
+function meshElevation(x: number, y: number, mid: MountainId): number {
+  const wx = Math.round(WORLD_W / 28);
+  const wy = Math.round(WORLD_H / 28);
+  const cx = WORLD_W / wx;
+  const cy = WORLD_H / wy;
+  const u = Math.max(0, Math.min(wx - 1e-6, x / cx));
+  const v = Math.max(0, Math.min(wy - 1e-6, y / cy));
+  const i = Math.floor(u);
+  const j = Math.floor(v);
+  const fx = u - i;
+  const fy = v - j;
+  const h = (a: number, b: number) => elevation(a * cx, b * cy, mid);
+  if (fx + fy <= 1) {
+    const ha = h(i, j);
+    return ha + (h(i + 1, j) - ha) * fx + (h(i, j + 1) - ha) * fy;
+  }
+  const hd = h(i + 1, j + 1);
+  return hd + (h(i, j + 1) - hd) * (1 - fx) + (h(i + 1, j) - hd) * (1 - fy);
+}
+
+/** Like to3, but never below the drawn terrain, so flat things don't sink into it. */
+export function onGround(x: number, y: number, lift = 0, mid: MountainId = 0): THREE.Vector3 {
+  const p = to3(x, y, lift, mid);
+  p.y = Math.max(p.y, meshElevation(x, y, mid) * TERRAIN_H[mid] + lift);
+  return p;
+}
+
 export function from3(p: THREE.Vector3, mid: MountainId = 0): { x: number; y: number } {
   const o = MOUNT_OFF[mid];
   return { x: p.x - o.x + WORLD_W / 2, y: p.z - o.z + WORLD_H / 2 };
@@ -90,6 +122,9 @@ export class World3D {
   private rotorSpin = 0;
   private mid: MountainId = 0;
   private trailGroup = new THREE.Group();
+  private roadGroup = new THREE.Group();
+  private roadStamp = -1;
+  private cars = makeCars(MAX_CARS);
   private buildingGroup = new THREE.Group();
   private liftGroup = new THREE.Group();
   private liftVis = new Map<number, LiftVis>();
@@ -155,6 +190,7 @@ export class World3D {
     this.loadMountain(0);
     this.trees = this.makeEmptyTrees();
     this.scene.add(this.trees);
+    this.scene.add(this.roadGroup, this.cars);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -225,6 +261,7 @@ export class World3D {
     this.loadedId = id;
     this.mid = id;
     this.stamp = "";
+    this.roadStamp = -1;
     this.draftKey = "";
     this.liftPreviewKey = "";
     const slope = this.slopeApplied;
@@ -387,6 +424,8 @@ export class World3D {
     const surfaceLift = game.tool === "lift:carpet" || game.tool === "lift:tbar";
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
+    this.syncRoads(game);
+    this.syncCars(game);
     this.syncTrees(game);
     this.syncLift(game);
     this.syncHeli(game, dt);
@@ -511,10 +550,10 @@ export class World3D {
         if (g < 0.25) c.copy(groomed);
         else if (g < 0.45) c.copy(groomed).lerp(packed, (g - 0.25) / 0.2);
         else c.copy(packed).lerp(wind, Math.min(1, (g - 0.45) / 0.25));
-        const rockAmt = smooth(0.75, 1.1, g + (streak - 0.5) * 0.35);
+        const rockAmt = smooth(0.62, 0.98, g + (streak - 0.5) * 0.35);
         if (rockAmt > 0) c.lerp(streak > 0.55 ? rockDark : rock, rockAmt * 0.92);
         // Woods read as a dark tint from far away; real trees are drawn near the camera.
-        const woods = smooth(0.32, 0.62, forestDensity(x, y)) * (1 - rockAmt);
+        const woods = smooth(0.3, 0.6, forestDensity(x, y)) * (1 - rockAmt);
         if (woods > 0) c.lerp(forest, woods * 0.55);
         const shade = (grain - 0.5) * 0.05;
         natural[k * 3] = c.r + shade;
@@ -810,12 +849,28 @@ export class World3D {
   /** Trees are only drawn near where you're looking; farther out the ground is tinted. */
   private treeCentre = { x: -1e9, y: -1e9 };
   private treeVersion = -1;
+  private treeRadius = TREE_RADIUS;
 
+  /**
+   * The drawn forest follows what you're looking at: centred a little past the
+   * look point (where most of the screen is), wider when zoomed out, where it
+   * samples a sparser grid of bigger trees so the count stays bounded.
+   */
   private syncTrees(game: Game): void {
-    const g = from3(this.controls.target, this.mid);
-    const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > 350;
-    if (!moved && this.treeVersion === game.forestVersion) return;
+    const cam = this.camera.position;
+    const tgt = this.controls.target;
+    const dist = cam.distanceTo(tgt);
+    // Snap the radius to a few levels so it doesn't relayout every frame.
+    const want = TREE_RADIUS * Math.pow(1.6, Math.round(Math.log(Math.max(1, dist / 1400)) / Math.log(1.6)));
+    const radius = Math.min(TREE_RADIUS_MAX, Math.max(TREE_RADIUS, want));
+    const ahead = this.tmpV.subVectors(tgt, cam).setY(0);
+    const len = ahead.length();
+    if (len > 1) ahead.multiplyScalar(Math.min(radius * 0.35, len * 0.4) / len);
+    const g = from3(new THREE.Vector3(tgt.x + ahead.x, tgt.y, tgt.z + ahead.z), this.mid);
+    const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > radius * 0.3;
+    if (!moved && radius === this.treeRadius && this.treeVersion === game.forestVersion) return;
     this.treeCentre = g;
+    this.treeRadius = radius;
     this.treeVersion = game.forestVersion;
     this.layoutTrees(game);
   }
@@ -825,15 +880,18 @@ export class World3D {
     const col = new THREE.Color();
     let n = 0;
     const c = this.treeCentre;
-    const r = TREE_RADIUS;
-    const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r);
+    const r = this.treeRadius;
+    const stride = Math.max(1, Math.round(r / TREE_RADIUS));
+    const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r, true, stride);
+    // Sparser samples stand in for more trees, so draw them a bit bigger.
+    const grow = 1 + (stride - 1) * 0.45;
     for (const t of list) {
       if (n >= TREES_DRAWN) break;
       const d = Math.hypot(t.x - c.x, t.y - c.y);
       if (d > r) continue;
       // Thin the trees out toward the edge so the drawn forest blends into the tinted ground.
-      if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.6, r, d)) continue;
-      const sc = 0.7 + noise2(t.x, t.y) * 0.9;
+      if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.7, r, d)) continue;
+      const sc = (0.7 + noise2(t.x, t.y) * 0.9) * grow;
       dummy.position.copy(to3(t.x, t.y, 8 * sc, this.mid));
       dummy.scale.setScalar(sc);
       dummy.rotation.set(0, t.x * 0.1, 0);
@@ -851,6 +909,51 @@ export class World3D {
     // other mountains get frustum-culled.
     this.trees.computeBoundingSphere();
     this.trees.computeBoundingBox();
+  }
+
+  private syncRoads(game: Game): void {
+    if (this.roadStamp === game.roadVersion) return;
+    this.roadStamp = game.roadVersion;
+    for (const c of this.roadGroup.children) if (c instanceof THREE.Mesh) c.geometry.dispose();
+    this.roadGroup.clear();
+    for (const r of game.roads) this.roadGroup.add(makeRoadRibbon(r, this.mid));
+  }
+
+  /**
+   * Cars drive the route from the highway to the parking lot: some coming in,
+   * some heading home. Busier when the hill is busy; none until it's connected.
+   */
+  private syncCars(game: Game): void {
+    const route = game.carRoute();
+    if (!route || route.length < 2) {
+      this.cars.count = 0;
+      return;
+    }
+    const total = polylineLength(route);
+    // Only the last few km matter; beyond that they're specks in the fog.
+    const span = Math.min(total, 3500);
+    const n = Math.min(MAX_CARS, 8 + Math.round(game.skiers.length / 4));
+    const dummy = this.tmp;
+    for (let i = 0; i < n; i++) {
+      const out = i % 2 === 1;
+      const speed = 17 + (i % 5) * 1.5;
+      const along = (game.clock * speed + (i * span) / n * 1.37) % span;
+      // Inbound cars drive toward the lot (the route's last point), outbound away.
+      const d = total - span + (out ? span - along : along);
+      const p = pointOnPolyline(route, d);
+      const dir = out ? -1 : 1;
+      const lane = 2.3;
+      const x = p.x - p.dy * lane * dir;
+      const y = p.y + p.dx * lane * dir;
+      dummy.position.copy(onGround(x, y, 0.9, this.mid));
+      dummy.rotation.set(0, Math.atan2(p.dx * dir, p.dy * dir), 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      this.cars.setMatrixAt(i, dummy.matrix);
+    }
+    this.cars.count = n;
+    this.cars.instanceMatrix.needsUpdate = true;
+    this.cars.computeBoundingSphere();
   }
 
   private layoutTrails(game: Game): void {
@@ -1046,7 +1149,14 @@ export class World3D {
       this.draftKey = key;
       // Colour each leg by its own pitch so you can see where the run gets steep.
       const pts = game.draft.length === 1 ? [last, { x: last.x, y: last.y - 0.5 }] : game.draft;
-      const geo = buildRibbon(pts, this.mid, 5, 1.1, (seg) => {
+      const road = game.tool === "road";
+      const geo = buildRibbon(pts, this.mid, road ? ROAD_WIDTH : 5, 1.1, (seg) => {
+        if (road) {
+          // Grey while it's buildable, amber near the limit.
+          const g = legGrade(pts[seg], pts[seg + 1]);
+          const c = g > ROAD_MAX_GRADE * 0.8 ? ROAD_DRAFT_STEEP : ROAD_DRAFT_OK;
+          return [c, c];
+        }
         const a = pts[seg];
         const b = pts[seg + 1];
         const drop = (elevation(a.x, a.y, this.mid) - elevation(b.x, b.y, this.mid)) * VERTICAL_M;
@@ -1108,7 +1218,7 @@ function buildRibbon(
     const [edge, centre] = colorFor(p.seg);
     for (let c = 0; c < cols.length; c++) {
       const off = cols[c] * width;
-      const v = to3(p.x - dy * off, p.y + dx * off, lift, mid);
+      const v = onGround(p.x - dy * off, p.y + dx * off, lift, mid);
       pos.push(v.x, v.y, v.z);
       const cc = c === 0 || c === 3 ? edge : centre;
       col.push(cc.r, cc.g, cc.b);
@@ -2025,8 +2135,9 @@ function makeHelicopter(): THREE.Group {
 }
 
 /** How far around the view trees are drawn, and the most drawn at once. */
-const TREE_RADIUS = 1100;
-const TREES_DRAWN = 30000;
+const TREE_RADIUS = 1300;
+const TREE_RADIUS_MAX = 5300;
+const TREES_DRAWN = 60000;
 
 /** Peak names stay readable from anywhere on the map (fixed on-screen size). */
 function makePeakLabel(text: string, done: boolean): THREE.Sprite {
@@ -2147,4 +2258,71 @@ function makeSunDisc(): THREE.Sprite {
   sp.scale.set(9000, 9000, 1);
   sp.renderOrder = -1;
   return sp;
+}
+
+const MAX_CARS = 70;
+const ROAD_DRAFT_OK = new THREE.Color("#596069");
+const ROAD_DRAFT_STEEP = new THREE.Color("#d99a2b");
+
+/** Asphalt with snowy shoulders, draped on the terrain. The highway is wider. */
+function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
+  const shoulder = new THREE.Color("#c8cfd6");
+  const asphalt = new THREE.Color(r.highway ? "#3a3e44" : "#454a51");
+  const width = r.highway ? ROAD_WIDTH * 1.4 : ROAD_WIDTH;
+  const geo = buildRibbon(r.points, mid, width, 0.8, () => [shoulder, asphalt], 0.12);
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.92,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3,
+    }),
+  );
+  mesh.receiveShadow = true;
+  mesh.userData = { kind: "road", id: r.id };
+  // Centre line: short dashes along the middle.
+  const samples = geo.userData.samples as { x: number; y: number; along: number }[] | undefined;
+  if (samples && samples.length > 1) {
+    const dashes = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.35, 0.05, 3.2),
+      new THREE.MeshBasicMaterial({ color: r.highway ? "#e2b857" : "#e8ecef" }),
+      Math.ceil(samples[samples.length - 1].along / 9) + 2,
+    );
+    const m = new THREE.Object3D();
+    let n = 0;
+    let next = 0;
+    for (let i = 1; i < samples.length; i++) {
+      const a = samples[i - 1];
+      const b = samples[i];
+      if (b.along < next) continue;
+      next = b.along + 9;
+      m.position.copy(onGround(b.x, b.y, 0.95, mid));
+      m.rotation.set(0, Math.atan2(b.x - a.x, b.y - a.y), 0);
+      m.updateMatrix();
+      dashes.setMatrixAt(n++, m.matrix);
+    }
+    dashes.count = n;
+    dashes.computeBoundingSphere();
+    mesh.add(dashes);
+  }
+  return mesh;
+}
+
+/** Little low-poly cars: body plus cabin, one colour each. */
+function makeCars(max: number): THREE.InstancedMesh {
+  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
+  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
+  cabin.translate(0, 0.8, -0.2);
+  const geo = mergeGeometries([body, cabin])!;
+  const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const palette = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a"];
+  const c = new THREE.Color();
+  for (let i = 0; i < max; i++) mesh.setColorAt(i, c.set(palette[(i * 5) % palette.length]));
+  mesh.castShadow = true;
+  mesh.count = 0;
+  mesh.frustumCulled = false;
+  return mesh;
 }

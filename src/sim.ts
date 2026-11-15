@@ -1,3 +1,4 @@
+import { HIGHWAY, ROAD_COST_PER_M, ROAD_MAX_GRADE, ROAD_MIN_LEG, ROAD_SNAP, ROAD_WIDTH, Road, legGrade, nearestOnRoad, roadLength, routeTo } from "./roads";
 import { elevation, elevationM, gradeAt, lerp, nearSegment, noise2, pointOnPolyline, polylineLength } from "./height";
 import {
   BUILDING_LABEL,
@@ -68,7 +69,7 @@ export const SUMMITS = PEAKS.map((p) => {
 
 /** Forest grid: one possible tree per cell. */
 const TREE_CELL = 12;
-const TREELINE_M = 1800;
+const TREELINE_M = 1950;
 const WALK = 1.8;
 const SKI = 2;
 
@@ -144,6 +145,11 @@ export class Game {
   /** Bottom station picked while placing a lift, and the pointer for the preview. */
   liftStart: Vec2 | null = null;
   liftHover: Vec2 | null = null;
+  /** The highway (always first) and every road the player has built. */
+  roads: Road[] = [{ id: 0, points: HIGHWAY.map((p) => ({ ...p })), highway: true }];
+  /** Bumped whenever the road network changes. */
+  roadVersion = 0;
+  private routeCache: { v: number; route: Vec2[] | null } = { v: -1, route: null };
   buildings: Building[] = [];
   skiers: Skier[] = [];
   features: Feature[] = [];
@@ -170,7 +176,7 @@ export class Game {
   /** Ticket money is shown as one float every couple of seconds, not per skier. */
   private boothTake = 0;
   /** Game seconds since start; orders lift lines. */
-  private clock = 0;
+  clock = 0;
   private loadCache: ReturnType<Game["loadLimits"]> | null = null;
   private loadCacheT = -1;
   private loadCacheKey = "";
@@ -267,15 +273,18 @@ export class Game {
    * features clear it; glades only thin it. Nothing is stored per tree, so
    * the whole 28 km map can be forested.
    */
-  treesIn(x0: number, y0: number, x1: number, y1: number, cleared = true): Vec2[] {
+  treesIn(x0: number, y0: number, x1: number, y1: number, cleared = true, stride = 1): Vec2[] {
     const out: Vec2[] = [];
     const gx0 = Math.max(0, Math.floor(x0 / TREE_CELL));
     const gy0 = Math.max(0, Math.floor(y0 / TREE_CELL));
     const gx1 = Math.min(Math.floor(WORLD_W / TREE_CELL), Math.ceil(x1 / TREE_CELL));
     const gy1 = Math.min(Math.floor(WORLD_H / TREE_CELL), Math.ceil(y1 / TREE_CELL));
     const near = cleared ? this.clearersIn(x0 - 40, y0 - 40, x1 + 40, y1 + 40) : null;
-    for (let gy = gy0; gy <= gy1; gy++) {
-      for (let gx = gx0; gx <= gx1; gx++) {
+    // A stride > 1 samples every n-th cell, for a sparser far-off view.
+    const sx = Math.ceil(gx0 / stride) * stride;
+    const sy = Math.ceil(gy0 / stride) * stride;
+    for (let gy = sy; gy <= gy1; gy += stride) {
+      for (let gx = sx; gx <= gx1; gx += stride) {
         const t = forestCell(gx, gy);
         if (!t) continue;
         if (this.inVillage(t.x, t.y)) continue;
@@ -301,6 +310,7 @@ export class Game {
       lifts: this.lifts.filter((l) => hit(l.bottom.x, l.bottom.y, l.top.x, l.top.y)),
       buildings: this.buildings.filter((b) => hit(b.x, b.y, b.x, b.y)),
       features: this.features.filter((f) => hit(f.x, f.y, f.x, f.y)),
+      roadSegs: this.roadSegsIn(x0, y0, x1, y1),
     };
   }
 
@@ -314,6 +324,7 @@ export class Game {
     for (const l of near.lifts) if (nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, x, y, 16)) return true;
     for (const b of near.buildings) if (Math.hypot(b.x - x, b.y - y) < (b.type === "heli" ? 40 : 22)) return true;
     for (const f of near.features) if (Math.hypot(f.x - x, f.y - y) < (f.type === "halfpipe" ? 40 : 12)) return true;
+    for (const [a, b, w] of near.roadSegs) if (nearSegment(a.x, a.y, b.x, b.y, x, y, w / 2 + 5)) return true;
     return false;
   }
 
@@ -545,6 +556,7 @@ export class Game {
       done: n >= t.peaksNeeded,
     }));
     return [
+      { id: "road", text: "Build a road from the highway to the parking lot", done: this.roadConnected() },
       { id: "lodge", text: `Build a lodge ($${COSTS.lodge.toLocaleString()})`, done: this.has("lodge") },
       { id: "black", text: "Cut a black-diamond run", done: this.trails.some((t) => t.difficulty >= 2) },
       tierGoals[0],
@@ -562,6 +574,7 @@ export class Game {
     const { counts } = this.variety();
     const out: string[] = [];
     const onHill = this.skiers.filter((s) => s.state !== "leaving" && s.state !== "arriving").length;
+    if (!this.roadConnected()) out.push("No road reaches the parking lot. Build one from the highway so skiers can drive in.");
     if (!this.has("lodge")) out.push("A lodge would let you set ticket prices.");
     if (counts[2] === 0 && counts[3] === 0) out.push("Advanced skiers want a black diamond.");
     if (counts[3] === 0 && this.trails.length >= 4) out.push("A few experts keep asking for a double black.");
@@ -613,11 +626,18 @@ export class Game {
 
   startManaging(): void {
     this.managing = true;
+    if (!this.roadConnected()) this.toast("Skiers need a way in: build a road from the highway to your parking lot.");
   }
 
   setTool(tool: Tool): void {
     this.liftStart = null;
     this.moveId = null;
+    if (tool === "road") {
+      this.tool = "road";
+      this.draft = [];
+      this.selected = null;
+      return;
+    }
     if (tool.startsWith("trail:")) {
       this.trailKind = tool.slice(6) as TrailKind;
       this.tool = "cut";
@@ -978,6 +998,134 @@ export class Game {
     return this.inVillage(x, y) && gradeAt(x, y) < 0.25;
   }
 
+  /** The drive in from the highway to the parking lot, or null if there isn't one. */
+  carRoute(): Vec2[] | null {
+    if (this.routeCache.v !== this.roadVersion) {
+      this.routeCache = { v: this.roadVersion, route: routeTo(this.roads, this.exit()) };
+    }
+    return this.routeCache.route;
+  }
+
+  roadConnected(): boolean {
+    return this.carRoute() !== null;
+  }
+
+  nearRoad(x: number, y: number, pad: number): boolean {
+    return this.roadSegsIn(x - pad - 10, y - pad - 10, x + pad + 10, y + pad + 10).some(([a, b, w]) =>
+      nearSegment(a.x, a.y, b.x, b.y, x, y, w / 2 + pad),
+    );
+  }
+
+  /** Road legs touching a box, with their width (the highway is wider). */
+  private roadSegsIn(x0: number, y0: number, x1: number, y1: number): [Vec2, Vec2, number][] {
+    const out: [Vec2, Vec2, number][] = [];
+    for (const r of this.roads) {
+      const w = r.highway ? ROAD_WIDTH * 1.4 : ROAD_WIDTH;
+      for (let i = 1; i < r.points.length; i++) {
+        const a = r.points[i - 1];
+        const b = r.points[i];
+        if (Math.max(a.x, b.x) < x0 || Math.min(a.x, b.x) > x1 || Math.max(a.y, b.y) < y0 || Math.min(a.y, b.y) > y1) continue;
+        out.push([a, b, w]);
+      }
+    }
+    return out;
+  }
+
+  /** Snap a click onto the parking lot or the nearest road, if it's close. */
+  private snapRoad(x: number, y: number): Vec2 | null {
+    const exit = this.exit();
+    if (Math.hypot(x - exit.x, y - exit.y) < ROAD_SNAP * 1.6) return { ...exit };
+    let best: { p: Vec2; d: number } | null = null;
+    for (const r of this.roads) {
+      const n = nearestOnRoad(r.points, x, y);
+      if (n.d < ROAD_SNAP && (!best || n.d < best.d)) best = { p: n.p, d: n.d };
+    }
+    return best ? best.p : null;
+  }
+
+  roadDraftInfo(): { length: number; cost: number; grade: number } {
+    const length = roadLength(this.draft);
+    let grade = 0;
+    for (let i = 1; i < this.draft.length; i++) grade = Math.max(grade, legGrade(this.draft[i - 1], this.draft[i]));
+    return { length, cost: Math.round(length * ROAD_COST_PER_M), grade };
+  }
+
+  private clickRoad(x: number, y: number): "ok" | "shake" | "none" {
+    const snap = this.snapRoad(x, y);
+    if (this.draft.length === 0) {
+      if (!snap) {
+        this.toast("Start the road on the highway, another road or the parking lot.", true);
+        return "shake";
+      }
+      this.draft.push(snap);
+      return "ok";
+    }
+    if (x < 12 || x > WORLD_W - 12 || y < 12 || y > WORLD_H - 12) {
+      this.toast("That's off the map.", true);
+      return "shake";
+    }
+    const p = snap ?? { x, y };
+    const last = this.draft[this.draft.length - 1];
+    if (Math.hypot(p.x - last.x, p.y - last.y) < ROAD_MIN_LEG) return "none";
+    const g = legGrade(last, p);
+    if (g > ROAD_MAX_GRADE) {
+      this.toast(`Too steep for a road (${Math.round(g * 100)}%, max ${Math.round(ROAD_MAX_GRADE * 100)}%). Zig-zag up the slope instead.`, true);
+      return "shake";
+    }
+    this.draft.push(p);
+    // Reaching another road or the parking lot finishes it.
+    if (snap) return this.finishRoad();
+    return "ok";
+  }
+
+  finishRoad(): "ok" | "shake" | "none" {
+    if (this.draft.length < 2) {
+      this.toast("Click along the way you want the road to go.", true);
+      return "shake";
+    }
+    const { length, cost } = this.roadDraftInfo();
+    if (this.money < cost) {
+      this.toast(`Need $${(cost - this.money).toLocaleString()} more for this road.`, true);
+      return "shake";
+    }
+    const wasConnected = this.roadConnected();
+    const points = this.draft.map((p) => ({ ...p }));
+    // Join up: split any road an end of this one lands on, so they share a point.
+    for (const end of [points[0], points[points.length - 1]]) {
+      for (const r of this.roads) {
+        const n = nearestOnRoad(r.points, end.x, end.y);
+        if (n.d > 0.5) continue;
+        const a = r.points[n.seg];
+        const b = r.points[n.seg + 1];
+        if (Math.hypot(a.x - end.x, a.y - end.y) < 0.5) {
+          end.x = a.x;
+          end.y = a.y;
+        } else if (Math.hypot(b.x - end.x, b.y - end.y) < 0.5) {
+          end.x = b.x;
+          end.y = b.y;
+        } else {
+          r.points.splice(n.seg + 1, 0, { x: end.x, y: end.y });
+        }
+        break;
+      }
+    }
+    this.money -= cost;
+    this.roads.push({ id: this.id(), points });
+    this.roadVersion++;
+    this.clearTrees();
+    const tail = points[points.length - 1];
+    this.float(tail.x, tail.y, `-${cost}`, "#d9785f");
+    const now = this.roadConnected();
+    this.toast(
+      now && !wasConnected
+        ? `Road open (${Math.round(length)} m). The parking lot is connected: skiers can drive in!`
+        : `Road built: ${Math.round(length)} m for $${cost.toLocaleString()}.`,
+    );
+    this.draft = [];
+    this.tool = "select";
+    return "ok";
+  }
+
   canPlace(type: BuildingType, x: number, y: number, opts: { ignoreId?: number; cost?: number } = {}): string | null {
     const moving = opts.ignoreId != null;
     const others = this.buildings.filter((b) => b.id !== opts.ignoreId);
@@ -998,6 +1146,7 @@ export class Game {
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
     if (this.nearLift(x, y, 26)) return "Keep clear of the lift line.";
+    if (this.nearRoad(x, y, type === "shack" ? 10 : 18)) return "Keep clear of the road.";
     if (this.money < cost) return `Need $${(cost - this.money).toLocaleString()} more.`;
     return null;
   }
@@ -1005,6 +1154,7 @@ export class Game {
   click(x: number, y: number): "ok" | "shake" | "none" {
     if (!this.managing) return "none";
     if (this.tool === "cut") return this.clickCut(x, y);
+    if (this.tool === "road") return this.clickRoad(x, y);
     if (this.tool === "move") return this.clickMove(x, y);
     const ft = this.featureTool();
     if (ft) return this.clickFeature(ft, x, y);
@@ -1149,6 +1299,7 @@ export class Game {
   }
 
   finishTrail(): "ok" | "shake" | "none" {
+    if (this.tool === "road") return this.finishRoad();
     if (this.draft.length < 2) {
       this.toast("Click a few downhill points first.", true);
       return "shake";
@@ -1243,8 +1394,9 @@ export class Game {
       name: pick(NAMES),
       skill,
       color: pick(JACKETS),
-      x: BASE.x - 260 + Math.random() * 200,
-      y: BASE.y + 140 + Math.random() * 60,
+      // Out of a car in the parking lot.
+      x: this.exit().x - 40 + Math.random() * 80,
+      y: this.exit().y - 20 + Math.random() * 40,
       state: "arriving",
       trailId: null,
       liftId: null,
@@ -1296,7 +1448,8 @@ export class Game {
       // arrivals close the gap to demand over about a minute, then stop.
       const want = this.demand();
       const gap = want - this.skiers.length;
-      if (gap > 0) this.spawnAcc += capped * Math.min(gap / 45 + 0.05, this.capacity() * 0.003);
+      // Nobody can get here until a road reaches the parking lot.
+      if (gap > 0 && this.roadConnected()) this.spawnAcc += capped * Math.min(gap / 45 + 0.05, this.capacity() * 0.003);
       const cap = this.capacity();
       while (this.spawnAcc > 1) {
         this.spawnAcc -= 1;
@@ -2071,7 +2224,7 @@ function treeHash(x: number, y: number): number {
 
 /** How forested a spot is (0..1): patchy, thinning out toward the treeline. */
 export function forestDensity(x: number, y: number): number {
-  const density = noise2(x / 360, y / 300) * 0.75 + noise2(x / 90, y / 110) * 0.35;
+  const density = noise2(x / 360, y / 300) * 0.7 + noise2(x / 90, y / 110) * 0.3 + 0.12;
   const m = elevationM(x, y);
   const treeline = 1 - smoothstep(TREELINE_M - 250, TREELINE_M + 100 + (noise2(x / 500, y / 500) - 0.5) * 200, m);
   return density * treeline;
@@ -2082,7 +2235,7 @@ function forestCell(gx: number, gy: number): Vec2 | null {
   const x = (gx + noise2(gx * 7.13, gy * 3.71)) * TREE_CELL;
   const y = (gy + noise2(gx * 2.91, gy * 6.37)) * TREE_CELL;
   if (x < 4 || y < 4 || x > WORLD_W - 4 || y > WORLD_H - 4) return null;
-  if (forestDensity(x, y) < 0.42) return null;
+  if (forestDensity(x, y) < 0.36) return null;
   if (gradeAt(x, y) > 0.9) return null; // cliffs
   return { x, y };
 }

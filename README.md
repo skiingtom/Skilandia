@@ -13,9 +13,9 @@ F11 toggles fullscreen.
 
 ## The goal: conquer the mountain
 
-The whole game is one big real landscape: a 28 × 17 km valley and the peaks around it, built from a topographic map (1 unit = 1 metre, real elevations from about 500 m to 2,770 m). You start with one small T-bar and two green runs at the base village.
+The whole game is one big real landscape: a 28 × 17 km valley and the peaks around it, built from a topographic map (1 unit = 1 metre, real elevations from about 500 m to 2,780 m). You start with one small T-bar and two green runs at the base village.
 
-Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Hollin Knob (1,910 m) to Kingsfang (2,765 m); conquer them all to win. The **Conquer the mountain** panel lists them; click one to fly there.
+Grow the resort until your lifts reach the high peaks. A peak is **conquered** when a lift's top station reaches its summit (within 350 m, and no more than 150 m below the top). There are 8 peaks, from Hollin Knob (1,916 m) to Kingsfang (2,777 m); conquer them all to win. The **Conquer the mountain** panel lists them; click one to fly there.
 
 Conquering peaks grows the resort:
 
@@ -49,6 +49,12 @@ Run difficulty uses real-world pitches: green under 25%, blue under 40%, black u
 - Right-drag to look, scroll to zoom, WASD to fly (faster the higher you are; Shift to go faster)
 - Press **G** (or "Show steepness") to tint the mountain green / blue / black / red by pitch. It turns on automatically while cutting a trail or placing a carpet / T-bar
 - Build from the icon bar at the bottom: Look, Trails, Park, Lifts, Base, Food and Resort each open a submenu
+
+### Roads
+
+- A highway runs down the valley, but nothing connects it to your parking lot at the start. **No skiers drive in until a road links the highway to the lot**
+- Pick **Roads**, click on the highway (or any road, or the parking lot), click along the way, and end on a road or the lot to finish. Roads cost $6/m, clear the trees in their path, and can't climb steeper than 14%, so zig-zag up steep ground
+- Cars drive the route in and out, busier when the hill is busy
 
 ### Runs
 

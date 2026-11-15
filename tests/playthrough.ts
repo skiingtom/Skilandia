@@ -6,6 +6,7 @@
  * Run with: npm test
  */
 import { elevationM } from "../src/height";
+import { nearestOnRoad } from "../src/roads";
 import { Game, SUMMITS, nearestOnTrail } from "../src/sim";
 import { BASE, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
 
@@ -21,6 +22,23 @@ const ok = (cond: boolean, msg: string) => {
 const tbar = g.lifts[0];
 ok(g.lifts.length === 1 && tbar.type === "tbar", "should start with one T-bar");
 ok(g.trails.length >= 2, "should start with runs beside the T-bar");
+
+// --- the access road: nobody drives in until the parking lot reaches the highway
+ok(!g.roadConnected(), "parking lot should start unconnected");
+const before = g.skiers.length;
+for (let i = 0; i < 600; i++) g.tick(0.05);
+ok(g.skiers.length <= before, "skiers arrived with no road");
+{
+  const exit = g.exit();
+  const hw = nearestOnRoad(g.roads[0].points, exit.x, exit.y).p;
+  g.setTool("road");
+  ok(g.click(hw.x, hw.y) === "ok", "road should start on the highway");
+  // Two legs: halfway, then the parking lot (which finishes it).
+  g.click((hw.x + exit.x) / 2, (hw.y + exit.y) / 2);
+  const r = g.click(exit.x, exit.y);
+  ok(r === "ok" && g.roadConnected(), `access road failed: ${g.toasts.at(-1)?.text}`);
+  console.log("access road:", g.toasts.at(-1)?.text, "route pts", g.carRoute()?.length);
+}
 const lift = { a: tbar.bottom, b: tbar.top };
 const len = Math.hypot(lift.b.x - lift.a.x, lift.b.y - lift.a.y);
 const ux = (lift.b.x - lift.a.x) / len;
