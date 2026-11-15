@@ -19,6 +19,7 @@ import {
   PARKING,
 } from "./types";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
+import { PATH_COST_PER_M, PATH_MAX_GRADE } from "./paths";
 import { BRUSH_R, EARTH_COST_PER_M3, TREE_FELL_COST, TREE_PLANT_COST } from "./sim";
 import { MAX_EARTHWORK_M } from "./height";
 
@@ -54,7 +55,7 @@ export interface DockGroup {
 
 export const DOCK_GROUPS: DockGroup[] = [
   { id: "look", label: "Look", tool: "select" },
-  { id: "road", label: "Roads", items: ["road", "parkingSmall", "parkingLarge", "garage"] },
+  { id: "road", label: "Roads", items: ["road", "path", "parkingSmall", "parkingLarge", "garage"] },
   { id: "trail", label: "Trails", items: TRAIL_KINDS.map((k) => `trail:${k}` as Tool) },
   { id: "park", label: "Park", items: FEATURE_TYPES.map((f) => `feature:${f}` as Tool) },
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
@@ -86,6 +87,13 @@ const LIFT_UNIT: Record<LiftType, string> = {
 };
 
 function itemHtml(tool: Tool): string {
+  if (tool === "path") {
+    return `<button type="button" class="tool item" data-tool="path">
+      <b>Footpath</b>
+      <small>$${PATH_COST_PER_M}/m · ≤${Math.round(PATH_MAX_GRADE * 100)}% grade</small>
+      <em>Paint walkways between buildings, lifts and the lot so people on foot stay out of the snow.</em>
+    </button>`;
+  }
   if (tool === "road") {
     return `<button type="button" class="tool item" data-tool="road">
       <b>Road</b>
@@ -107,7 +115,7 @@ function itemHtml(tool: Tool): string {
     return `<button type="button" class="tool item" data-tool="demolish">
       <b>Demolish</b>
       <small>${Math.round(SALVAGE_SHARE * 100)}% back · roads 25% · runs free</small>
-      <em>Click a building, lift, run, park feature or road to take it down.</em>
+      <em>Click a building, lift, run, park feature, road or path to take it down.</em>
     </button>`;
   }
   if (tool === "shape") {

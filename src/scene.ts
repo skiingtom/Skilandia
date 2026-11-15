@@ -5,6 +5,7 @@ import { HEIGHT_CELL_M, elevation, gradeAt, lerp, noise2, pointOnPolyline, polyl
 import { PostFx, SkyUniforms, TerrainUniforms, gableRoof, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial, rbox } from "./look";
 import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
+import { PATH_MAX_GRADE, PATH_WIDTH, Path } from "./paths";
 import { Game } from "./sim";
 import { SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
@@ -153,6 +154,8 @@ export class World3D {
   private trailGroup = new THREE.Group();
   private roadGroup = new THREE.Group();
   private roadStamp = -1;
+  private pathGroup = new THREE.Group();
+  private pathStamp = -1;
   private cars = new Fleet([...CAR_MODELS, "semi"], MAX_CARS, { dynamic: true });
   private carColor = new THREE.Color();
   private buildingGroup = new THREE.Group();
@@ -231,7 +234,7 @@ export class World3D {
     this.treesHi = this.makeEmptyTrees(true);
     this.treesLo = this.makeEmptyTrees(false);
     this.scene.add(this.treesHi, this.treesLo, this.boulders, this.brushRing);
-    this.scene.add(this.roadGroup, this.cars.group);
+    this.scene.add(this.roadGroup, this.pathGroup, this.cars.group);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -304,6 +307,7 @@ export class World3D {
     this.mid = id;
     this.stamp = "";
     this.roadStamp = -1;
+    this.pathStamp = -1;
     this.draftKey = "";
     this.liftPreviewKey = "";
     const slope = this.slopeApplied;
@@ -471,6 +475,7 @@ export class World3D {
     this.syncTerrain(game);
     this.syncStatic(game);
     this.syncRoads(game);
+    this.syncPaths(game);
     this.syncBrush(game);
     this.syncCars(game);
     this.syncTrees(game);
@@ -660,6 +665,7 @@ export class World3D {
         this.redrapeAt = 0;
         this.redrapeBox = null;
         this.stamp = "";
+        this.pathStamp = -1;
         // Roads are long (the highway is 25 km): only re-drape them when the edit reached one.
         // Dirty boxes are heightmap cells (HEIGHT_CELL_M), not mesh vertices.
         const pad = 60;
@@ -999,6 +1005,14 @@ export class World3D {
     this.brushRing.geometry.computeBoundingSphere();
   }
 
+  private syncPaths(game: Game): void {
+    if (this.pathStamp === game.pathVersion) return;
+    this.pathStamp = game.pathVersion;
+    for (const c of this.pathGroup.children) if (c instanceof THREE.Mesh) c.geometry.dispose();
+    this.pathGroup.clear();
+    for (const p of game.paths) this.pathGroup.add(makePathRibbon(p, this.mid));
+  }
+
   private syncRoads(game: Game): void {
     if (this.roadStamp === game.roadVersion) return;
     this.roadStamp = game.roadVersion;
@@ -1279,7 +1293,13 @@ export class World3D {
       // Colour each leg by its own pitch so you can see where the run gets steep.
       const pts = game.draft.length === 1 ? [last, { x: last.x, y: last.y - 0.5 }] : game.draft;
       const road = game.tool === "road";
-      const geo = buildRibbon(pts, this.mid, road ? ROAD_WIDTH : 5, 1.1, (seg) => {
+      const path = game.tool === "path";
+      const geo = buildRibbon(pts, this.mid, road ? ROAD_WIDTH : path ? PATH_WIDTH : 5, 1.1, (seg) => {
+        if (path) {
+          const g = legGrade(pts[seg], pts[seg + 1]);
+          const c = g > PATH_MAX_GRADE * 0.8 ? ROAD_DRAFT_STEEP : PATH_DRAFT_OK;
+          return [c, c];
+        }
         if (road) {
           // Grey while it's buildable, amber near the limit.
           const g = legGrade(pts[seg], pts[seg + 1]);
@@ -1905,9 +1925,33 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
       }
     }
   }
+  // Stations hold the haul rope low (chairs load at knee height, cabins at
+  // the platform); the line climbs to the first tower.
+  const stationH = STATION_CABLE_H[lift.type];
+  /** Points along the line that carry rope but no tower (the level run through a station). */
+  const noTower = new Set<number>();
+  if (stationH) {
+    tops[0] = ground(0).y + stationH;
+    tops[tops.length - 1] = ground(1).y + stationH;
+    // Keep the rope level through each station so carriers ride in and out
+    // of the building at platform height before climbing to the first tower.
+    const flat = (lift.type === "gondola" ? 26 : 24) / len;
+    if (ts[1] - flat > flat * 0.6) {
+      ts.splice(1, 0, flat);
+      tops.splice(1, 0, ground(0).y + stationH);
+      noTower.add(flat);
+    }
+    const n = ts.length;
+    if (1 - flat - ts[n - 2] > flat * 0.6) {
+      ts.splice(n - 1, 0, 1 - flat);
+      tops.splice(n - 1, 0, ground(1).y + stationH);
+      noTower.add(1 - flat);
+    }
+  }
   const cableY = (t: number) => {
-    const i = Math.min(ts.length - 2, Math.floor(t * nT));
-    const u = (t - ts[i]) / (ts[i + 1] - ts[i]);
+    let i = 0;
+    while (i < ts.length - 2 && t > ts[i + 1]) i++;
+    const u = (t - ts[i]) / (ts[i + 1] - ts[i] || 1);
     return lerp(tops[i], tops[i + 1], Math.max(0, Math.min(1, u)));
   };
   const gauge = look.gauge;
@@ -1922,7 +1966,7 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
     const g = ground(ts[i]);
     const h = tops[i] - g.y;
     const station = i === 0 || i === ts.length - 1;
-    if (station && lift.type !== "tbar") continue;
+    if ((station && lift.type !== "tbar") || noTower.has(ts[i])) continue;
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.75, h + 1, 12), steel);
     pole.position.copy(g).setY(g.y + h / 2);
     pole.castShadow = true;
@@ -1944,7 +1988,7 @@ function buildLift(lift: Lift, mid: MountainId, selected: boolean): LiftVis {
   for (const end of [0, 1]) {
     const g = ground(end);
     const y = tops[end === 0 ? 0 : tops.length - 1];
-    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look));
+    group.add(makeTerminal(lift.type, g, y, heading, end === 0, look, lift.name));
   }
 
   // Carriers.
@@ -1985,6 +2029,79 @@ function highlight(g: THREE.Object3D): void {
   });
 }
 
+/** Haul-rope height at the stations (0 = as tall as a tower). */
+const STATION_CABLE_H: Record<LiftType, number> = { carpet: 0, tbar: 0, double: 5.2, quad: 5.4, six: 5.8, gondola: 9.5 };
+
+/** The lift's name in white capitals for the side of a terminal, the way resorts letter them. */
+function makeNameplate(name: string, width: number, height: number): THREE.Mesh {
+  const S = 2;
+  const text = name.toUpperCase();
+  const c = document.createElement("canvas");
+  const font = "800 64px Nunito, Segoe UI, sans-serif";
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = font;
+  const tw = Math.max(200, m.measureText(text).width + 60);
+  c.width = Math.ceil(tw * S);
+  c.height = Math.ceil(96 * S);
+  const ctx = c.getContext("2d")!;
+  ctx.scale(S, S);
+  ctx.font = font;
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, tw / 2, 50);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  // Keep the letters in proportion: fit the width, or the height if the name is short.
+  const aspect = c.width / c.height;
+  const w = Math.min(width, height * aspect);
+  const plate = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, w / aspect),
+    new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: 0.5, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2 }),
+  );
+  return plate;
+}
+
+/** A rounded-rectangle outline in the x/y plane, for extruding soft-cornered shells. */
+function roundedRect(w: number, d: number, r: number): THREE.Shape {
+  const s = new THREE.Shape();
+  const x = -w / 2;
+  const y = -d / 2;
+  r = Math.min(r, w / 2 - 0.01, d / 2 - 0.01);
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y);
+  s.quadraticCurveTo(x + w, y, x + w, y + r);
+  s.lineTo(x + w, y + d - r);
+  s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
+  s.lineTo(x + r, y + d);
+  s.quadraticCurveTo(x, y + d, x, y + d - r);
+  s.lineTo(x, y + r);
+  s.quadraticCurveTo(x, y, x + r, y);
+  return s;
+}
+
+/**
+ * A soft-edged slab: a rounded rectangle (w across, d along the line) given
+ * height h and rounded top and bottom edges. Sits on y = 0.
+ */
+function shell(w: number, d: number, h: number, corner: number, bevel: number): THREE.BufferGeometry {
+  const b = Math.min(bevel, h / 2 - 0.01, w / 2 - 0.2);
+  const geo = new THREE.ExtrudeGeometry(roundedRect(w - b * 2, d - b * 2, Math.max(0.05, corner - b)), {
+    depth: Math.max(0.01, h - b * 2),
+    bevelEnabled: true,
+    bevelThickness: b,
+    bevelSize: b,
+    bevelSegments: 4,
+    curveSegments: 10,
+  });
+  // Extruded along +z: stand it up so the depth becomes height.
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(0, b, 0);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function makeTerminal(
   type: LiftType,
   g: THREE.Vector3,
@@ -1992,11 +2109,14 @@ function makeTerminal(
   heading: number,
   bottom: boolean,
   look: (typeof LIFT_LOOK)[LiftType],
+  name: string,
 ): THREE.Group {
   const t = new THREE.Group();
   t.position.copy(g);
   t.rotation.y = heading;
   const h = cableY - g.y;
+  // Which way the line runs out of this station (+z from the bottom, -z from the top).
+  const out = bottom ? 1 : -1;
   const snow = std("#f2f5f8", { metalness: 0, roughness: 0.7 });
   const add = <T extends THREE.Object3D>(o: T, x: number, y: number, z: number): T => {
     o.position.set(x, y, z);
@@ -2014,11 +2134,10 @@ function makeTerminal(
     const hg = new THREE.Group();
     const walls = new THREE.Mesh(rbox(w, wallH, d), std(body, { metalness: 0, roughness: 0.85 }));
     walls.position.y = wallH / 2;
-    const win = new THREE.Mesh(rbox(w * 0.5, wallH * 0.32, 0.2), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.8 }));
+    const win = new THREE.Mesh(rbox(w * 0.6, wallH * 0.36, 0.2), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.8 }));
     win.position.set(0, wallH * 0.6, d / 2 + 0.05);
     const roof = gableRoof(d, w + 1.2, THREE.MathUtils.degToRad(34), 0.6, std(roofCol, { metalness: 0, roughness: 0.8 }), snow, true);
     roof.group.position.y = wallH;
-    // Close the gable ends.
     const tri = new THREE.Shape();
     tri.moveTo(-d / 2, 0);
     tri.lineTo(d / 2, 0);
@@ -2042,25 +2161,46 @@ function makeTerminal(
     return t;
   }
   if (type === "gondola") {
-    // A low timber-and-stone station hall with a snowy roof, and the drive
-    // terminal standing on steel columns above it where the cabins turn.
-    const w = look.gauge + 10;
-    const D = 22;
-    const zc = bottom ? -6 : 6;
-    const wallH = Math.max(6, Math.min(8, h - 12));
+    // A station hall the cabins ride into: the rope comes in through a big
+    // portal in the end wall and turns around the bullwheel inside.
+    const R = look.gauge / 2 + 0.3;
+    const w = look.gauge + 11;
+    const D = 30;
+    const back = R + 5;
+    const zc = out * (D / 2 - back);
+    const wallH = h + 4.5;
     const stone = std("#8a8379", { metalness: 0, roughness: 0.95 });
     const plaster = std("#e8dfcf", { metalness: 0, roughness: 0.85 });
     const timber = std("#4a3424", { metalness: 0, roughness: 0.9 });
-    const steel = std(look.steel, { metalness: 0.45, roughness: 0.45 });
-    add(new THREE.Mesh(rbox(w + 1, 2.2, D + 1), stone), 0, 0.8, zc);
-    add(new THREE.Mesh(rbox(w, wallH - 1.9, D), plaster), 0, 1.9 + (wallH - 1.9) / 2, zc);
-    // Big warm-lit windows along both long sides.
-    add(new THREE.Mesh(rbox(w + 0.3, 2.6, D - 4), std("#2a2420", { emissive: "#ffcf8a", emissiveIntensity: 0.55, roughness: 0.3 })), 0, 2.2 + (wallH - 2.2) / 2, zc);
+    const glass = std("#2a3540", { roughness: 0.15, metalness: 0.4, emissive: "#ffcf8a", emissiveIntensity: 0.35 });
+    add(new THREE.Mesh(rbox(w + 1, 2.4, D + 1), stone), 0, 0.9, zc);
+    add(new THREE.Mesh(rbox(w, wallH - 2.1, D), plaster), 0, 2.1 + (wallH - 2.1) / 2, zc);
+    // Long glazed galleries on both sides at platform level.
+    add(new THREE.Mesh(rbox(w + 0.3, 3.4, D - 6), glass), 0, h - 4.6, zc);
+    add(new THREE.Mesh(rbox(w + 0.5, 0.5, D - 5), timber), 0, h - 2.65, zc);
     for (const sx of [-1, 1]) {
-      for (const sz of [-1, 0, 1]) add(new THREE.Mesh(rbox(0.8, wallH - 1.9, 0.8), timber), (sx * w) / 2, 1.9 + (wallH - 1.9) / 2, zc + (sz * D) / 2);
+      for (const sz of [-1, -0.33, 0.33, 1]) add(new THREE.Mesh(rbox(0.8, wallH - 2.1, 0.8), timber), (sx * w) / 2, 2.1 + (wallH - 2.1) / 2, zc + (sz * D) / 2);
       add(new THREE.Mesh(rbox(0.5, 0.5, D + 0.6), timber), (sx * w) / 2 + sx * 0.05, wallH, zc);
     }
-    const roof = gableRoof(w, D + 4, THREE.MathUtils.degToRad(30), 1.8, std(look.color, { metalness: 0.1, roughness: 0.6 }), snow, true);
+    // The portal the cabins sail through: a dark opening wide enough for both
+    // lines, framed in timber, with the lift's name above it.
+    const face = zc + out * (D / 2 + 0.06);
+    const portalW = look.gauge + 5.5;
+    const portalH = 7.5;
+    const portalY = h - 4.6;
+    const portal = new THREE.Mesh(new THREE.PlaneGeometry(portalW, portalH), new THREE.MeshBasicMaterial({ color: "#14181c" }));
+    portal.rotation.y = bottom ? 0 : Math.PI;
+    add(portal, 0, portalY, face);
+    add(new THREE.Mesh(rbox(portalW + 1.6, 0.9, 0.9), timber), 0, portalY + portalH / 2 + 0.4, face);
+    for (const sx of [-1, 1]) add(new THREE.Mesh(rbox(0.9, portalH, 0.9), timber), sx * (portalW / 2 + 0.4), portalY, face);
+    // Name on a painted signboard in the lift's colour above the portal.
+    const plate = makeNameplate(name, w - 5, 1.5);
+    const boardW = (plate.geometry as THREE.PlaneGeometry).parameters.width + 1.6;
+    add(new THREE.Mesh(rbox(boardW, 2.3, 0.4, 0.15), std(look.color === "#d8a031" ? "#2c3a48" : look.color, { metalness: 0.2, roughness: 0.45 })), 0, portalY + portalH / 2 + 2.1, face + out * 0.2);
+    plate.rotation.y = bottom ? 0 : Math.PI;
+    t.add(plate);
+    plate.position.set(0, portalY + portalH / 2 + 2.1, face + out * 0.42);
+    const roof = gableRoof(w, D + 4, THREE.MathUtils.degToRad(28), 1.8, std(look.color, { metalness: 0.1, roughness: 0.6 }), snow, true);
     roof.group.rotation.y = Math.PI / 2;
     add(roof.group, 0, wallH, zc);
     const tri = new THREE.Shape();
@@ -2071,40 +2211,53 @@ function makeTerminal(
     const gableGeo = new THREE.ExtrudeGeometry(tri, { depth: D - 0.2, bevelEnabled: false });
     gableGeo.translate(0, 0, -(D - 0.2) / 2);
     add(new THREE.Mesh(gableGeo, timber), 0, wallH, zc);
-    // Drive terminal: four steel columns, a rounded housing and the bullwheel.
-    const colH = h - 1;
-    const col = new THREE.CylinderGeometry(0.45, 0.65, colH, 12);
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(new THREE.Mesh(col, steel), sx * (look.gauge / 2 - 0.8), colH / 2, sz * 2.6);
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(look.gauge / 2 + 0.3, 0.3, 10, 48), std("#2e3338", { metalness: 0.6, roughness: 0.35 }));
-    rim.rotation.x = Math.PI / 2;
-    add(rim, 0, h, 0);
-    add(new THREE.Mesh(rbox(look.gauge + 2.4, 2.8, 8, 1.2), std(look.color, { metalness: 0.25, roughness: 0.4 })), 0, h + 1.7, bottom ? -1 : 1);
-    add(new THREE.Mesh(rbox(look.gauge + 2.6, 0.35, 8.2, 0.17), std("#e9eef3", { metalness: 0.2, roughness: 0.5 })), 0, h + 0.4, bottom ? -1 : 1);
     return t;
   }
-  // Chairlift terminal: tapered legs, a rounded housing over a spoked bullwheel.
-  const steel = std(look.steel, { metalness: 0.45, roughness: 0.45 });
-  const leg = new THREE.CylinderGeometry(0.42, 0.7, h, 14);
-  for (const sx of [-1, 1]) add(new THREE.Mesh(leg, steel), sx * 1.6, h / 2, bottom ? -3 : 3);
-  add(new THREE.Mesh(rbox(4.4, 0.7, 1.4), steel), 0, h - 0.6, bottom ? -3 : 3);
+  // Detachable chairlift terminal: a long, rounded two-tone shell over the
+  // bullwheel, a band of tinted windows along the top, the lift's name on a
+  // painted band, all held up on one central pedestal. Chairs slow down and
+  // swing out underneath it.
   const R = look.gauge / 2 + 0.3;
-  const wheel = new THREE.Group();
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(R, 0.28, 10, 48), std("#2e3338", { metalness: 0.6, roughness: 0.35 }));
-  rim.rotation.x = Math.PI / 2;
-  wheel.add(rim);
-  for (let k = 0; k < 3; k++) {
-    const spoke = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, R * 2, 6), steel);
-    spoke.rotation.order = "YXZ";
-    spoke.rotation.set(Math.PI / 2, (k * Math.PI) / 3, 0);
-    wheel.add(spoke);
+  const W = look.gauge + 2.8;
+  const L = look.gauge * 2 + 9;
+  const zc = out * (L / 2 - R - 1.6);
+  const band = std(look.color, { metalness: 0.3, roughness: 0.35 });
+  const silver = std("#dde1e5", { metalness: 0.35, roughness: 0.3 });
+  const tint = std("#1f2a35", { metalness: 0.6, roughness: 0.12 });
+  const concrete = std("#a7abb0", { metalness: 0.1, roughness: 0.8 });
+  const bandH = 1.9;
+  const topH = 2.5;
+  const y0 = h - 0.7;
+  add(new THREE.Mesh(shell(W, L, bandH, W * 0.5, 0.35), band), 0, y0, zc);
+  add(new THREE.Mesh(shell(W - 0.25, L - 0.4, topH, W * 0.48, 0.9), silver), 0, y0 + bandH - 0.15, zc);
+  // White trim between the two tones.
+  add(new THREE.Mesh(shell(W + 0.1, L + 0.1, 0.18, W * 0.5, 0.06), std("#eef1f4", { metalness: 0.2, roughness: 0.5 })), 0, y0 + bandH - 0.12, zc);
+  // Tinted windows down both long sides, in panes.
+  const panes = Math.max(3, Math.round((L - W) / 2.6));
+  const run = L - W * 0.7;
+  for (const sx of [-1, 1]) {
+    for (let k = 0; k < panes; k++) {
+      const z = zc - run / 2 + (run * (k + 0.5)) / panes;
+      add(new THREE.Mesh(rbox(0.14, 1.25, run / panes - 0.35, 0.06), tint), sx * ((W - 0.25) / 2 + 0.03), y0 + bandH + 0.95, z);
+    }
+    const plate = makeNameplate(name, L * 0.7, bandH * 0.62);
+    plate.rotation.y = sx * (Math.PI / 2);
+    t.add(plate);
+    plate.position.set(sx * (W / 2 + 0.04), y0 + bandH * 0.48, zc);
   }
-  add(wheel, 0, h, 0);
-  const housing = new THREE.Mesh(rbox(look.gauge + 2, 2.6, 6.4, 1.15), std(look.color, { metalness: 0.25, roughness: 0.4 }));
-  add(housing, 0, h + 1.6, bottom ? -2 : 2);
-  add(new THREE.Mesh(rbox(look.gauge + 2.2, 0.35, 6.6, 0.17), std("#e9eef3", { metalness: 0.2, roughness: 0.5 })), 0, h + 0.4, bottom ? -2 : 2);
-  // Loading ramp / unload hump.
-  add(new THREE.Mesh(rbox(look.gauge + 4, 0.8, 9, 0.38), std("#e9eef3", { metalness: 0 })), 0, 0.4, bottom ? 2 : -2);
-  if (bottom) hut(4.4, 4, 3.4, look.gauge / 2 + 5, 0, "#d6cdbd", "#5a3a26");
+  // The pedestal and a cross-head under the shell.
+  add(new THREE.Mesh(rbox(2.2, y0, 3.6, 0.5), concrete), 0, y0 / 2, zc);
+  add(new THREE.Mesh(rbox(W - 1.2, 0.6, 4.4, 0.25), std("#3a3f45", { metalness: 0.5, roughness: 0.4 })), 0, y0 - 0.25, zc);
+  // Bullwheel just under the back of the shell.
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(R, 0.24, 10, 48), std("#2e3338", { metalness: 0.6, roughness: 0.35 }));
+  rim.rotation.x = Math.PI / 2;
+  add(rim, 0, h, 0);
+  // Loading carpet / unload ramp where the chairs come out from under the shell.
+  add(new THREE.Mesh(rbox(look.gauge + 4, 0.8, 9, 0.38), std("#e9eef3", { metalness: 0 })), 0, 0.4, zc + out * (L / 2 + 1));
+  if (bottom) {
+    add(new THREE.Mesh(rbox(look.gauge + 3, 0.12, 0.5, 0.05), std("#d2343a", { metalness: 0 })), 0, 0.86, zc + out * (L / 2 - 2));
+    hut(4.6, 4.2, 3.4, W / 2 + 4.2, zc + out * (L / 2 - 2), "#d6dbe0", "#3f4a55");
+  }
   return t;
 }
 
@@ -2567,8 +2720,37 @@ function makeSunDisc(): THREE.Sprite {
 const MAX_CARS = 70;
 const ROAD_DRAFT_OK = new THREE.Color("#596069");
 const ROAD_DRAFT_STEEP = new THREE.Color("#d99a2b");
+const PATH_DRAFT_OK = new THREE.Color("#b49a72");
 
 /** Asphalt with snowy shoulders, draped on the terrain. The highway is wider. */
+/** A packed, swept footpath: warm gravel with a darker trodden kerb. */
+function makePathRibbon(p: Path, mid: MountainId): THREE.Mesh {
+  const kerb = new THREE.Color("#8d8170");
+  const gravel = new THREE.Color("#b9ab92");
+  const geo = buildRibbon(p.points, mid, PATH_WIDTH, 0.55, () => [kerb, gravel], 0.18);
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.95,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
+  mesh.receiveShadow = true;
+  mesh.userData = { kind: "path", id: p.id };
+  // Round paved landings where the path starts and ends.
+  const pad = new THREE.CircleGeometry(PATH_WIDTH * 0.75, 20).rotateX(-Math.PI / 2);
+  for (const e of [p.points[0], p.points[p.points.length - 1]]) {
+    const m = new THREE.Mesh(pad, mesh.material);
+    m.position.copy(onGround(e.x, e.y, 0.5, mid));
+    m.receiveShadow = true;
+    mesh.add(m);
+  }
+  return mesh;
+}
+
 function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
   const shoulder = new THREE.Color("#c8cfd6");
   const asphalt = new THREE.Color(r.highway ? "#3a3e44" : "#454a51");

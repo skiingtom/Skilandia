@@ -59,6 +59,7 @@ export type Tool =
   | "select"
   | "cut"
   | "road"
+  | "path"
   | "demolish"
   | "clearTrees"
   | "plantTrees"
@@ -166,6 +167,11 @@ export interface Skier {
   visitType: BuildingType | null;
   bubble: string | null;
   bubbleT: number;
+  /** Footpath waypoints still to walk, and the destination they lead to. */
+  route?: Vec2[];
+  routeFor?: string;
+  /** Walking along a footpath right now. */
+  onPath?: boolean;
 }
 
 export interface Fx {
