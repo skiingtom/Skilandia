@@ -320,7 +320,7 @@ button {
 .cam-hint {
   position: absolute;
   left: 16px;
-  bottom: 252px;
+  bottom: 380px;
   padding: 8px 12px;
   background: var(--glass);
   border: 1px solid var(--line);
@@ -335,6 +335,7 @@ button {
   left: 16px;
   bottom: 168px;
   pointer-events: none;
+  min-width: 150px;
   display: grid;
   gap: 6px;
   padding: 12px 14px;
@@ -600,4 +601,60 @@ body.welcome-open #hud > * {
   .cut-banner {
     width: calc(100% - 32px);
   }
+}
+
+.legend .slope-toggle {
+  pointer-events: auto;
+  margin-top: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+}
+
+.legend .slope-toggle kbd {
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.legend .slope-toggle[aria-pressed="true"] {
+  background: #e2b857;
+  color: #13202c;
+}
+
+.legend .slope-key {
+  display: none;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+}
+
+.legend .slope-key span {
+  height: 8px;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.legend .slope-key span:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.legend .slope-key span:nth-child(4) {
+  border-radius: 0 4px 4px 0;
+}
+
+.legend .slope-key small {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 3px;
+}
+
+.legend.slope-on .slope-key {
+  display: grid;
 }

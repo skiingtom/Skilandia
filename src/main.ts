@@ -365,6 +365,7 @@ window.addEventListener("keydown", (e) => {
     paintHud();
   }
   if (e.key === "1" || e.key === "2" || e.key === "3") game.setSpeed(Number(e.key));
+  if ((e.key === "g" || e.key === "G") && !(e.target instanceof HTMLInputElement)) toggleSlopeView();
 });
 
 function moneyLine(type: keyof typeof COSTS): string {
@@ -375,6 +376,16 @@ function moneyLine(type: keyof typeof COSTS): string {
   const el = document.querySelector(`#cost-${type}`);
   if (el) el.textContent = moneyLine(type);
 });
+
+const slopeBtn = document.querySelector<HTMLButtonElement>("#btn-slope")!;
+function toggleSlopeView(): void {
+  const on = !world.slopeViewOn;
+  world.setSlopeView(on);
+  slopeBtn.setAttribute("aria-pressed", String(on));
+  slopeBtn.firstChild!.textContent = on ? "Hide steepness " : "Show steepness ";
+  document.querySelector(".legend")!.classList.toggle("slope-on", on);
+}
+slopeBtn.addEventListener("click", toggleSlopeView);
 
 window.addEventListener("resize", () => world.resize());
 world.resize();

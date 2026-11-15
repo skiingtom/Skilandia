@@ -97,13 +97,20 @@
           </section>
         </aside>
 
-        <div class="cam-hint">Right-drag look · Scroll zoom · WASD fly · Click another peak to buy it</div>
+        <div class="cam-hint">Right-drag look · Scroll zoom · WASD fly · G steepness</div>
 
         <div class="legend">
           <div><i class="diff green"></i> Green</div>
           <div><i class="diff blue"></i> Blue</div>
           <div><i class="diff black"></i> Black</div>
           <div><i class="diff dblack"></i> Double black</div>
+          <button type="button" id="btn-slope" class="ghost slope-toggle" aria-pressed="false" title="Tint the mountain by steepness (G)">
+            Show steepness <kbd>G</kbd>
+          </button>
+          <div class="slope-key">
+            <span style="--c: #3fb878"></span><span style="--c: #3d84d8"></span><span style="--c: #3a3f47"></span><span style="--c: #b8324b"></span>
+            <small>gentle → extreme</small>
+          </div>
         </div>
 
         <div id="cut-banner" class="cut-banner hidden">

@@ -1,4 +1,4 @@
-import { MountainId, WORLD_H, WORLD_W } from "./types";
+import { MountainId, UNIT_M, VERTICAL_M, WORLD_H, WORLD_W } from "./types";
 
 function hash2(x: number, y: number): number {
   let n = Math.imul(x, 374761393) + Math.imul(y, 668265263);
@@ -36,52 +36,109 @@ function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
+function smooth(a: number, b: number, x: number): number {
+  const t = clamp01((x - a) / (b - a));
+  return t * t * (3 - 2 * t);
+}
+
+/** Ridged noise: sharp spines and gullies, 0..1. */
+function ridged(x: number, y: number): number {
+  let v = 0;
+  let a = 0.5;
+  let f = 1;
+  for (let i = 0; i < 4; i++) {
+    const n = 1 - Math.abs(noise2(x * f, y * f) * 2 - 1);
+    v += a * n * n;
+    a *= 0.5;
+    f *= 2.1;
+  }
+  return v;
+}
+
+/**
+ * Fall-line gullies: noise stretched along the slope so steep faces read as
+ * chutes and rock ribs rather than blobs.
+ */
+function chutes(nx: number, ny: number, seed: number): number {
+  return ridged(nx * 15 + seed, ny * 3.2 + seed * 0.7) - 0.45;
+}
+
+/** Village flat at the bottom of the hill. */
+function finish(h: number, nx: number, ny: number, villageTop: number): number {
+  const village = 1 - smooth(0.04, villageTop, ny);
+  h *= 1 - village * 0.86;
+  // Ease the outer flanks down so the hill sits in the valley instead of
+  // ending in a tall wall.
+  const side = smooth(0, 0.09, nx) * smooth(0, 0.09, 1 - nx);
+  h *= 0.45 + 0.55 * side;
+  return clamp01(h);
+}
+
+function smax(a: number, b: number, k: number): number {
+  const h = clamp01(0.5 + (0.5 * (a - b)) / k);
+  return b + (a - b) * h + k * h * (1 - h);
+}
+
+/*
+ * Each mountain blends a gentle "groomer" profile with a steep "headwall"
+ * profile using a side mask R, so greens, blues and blacks live in visibly
+ * different terrain instead of on one smooth cone. Surface noise is kept
+ * light where R is low so beginner zones stay smooth.
+ */
+
 function littleHawk(x: number, y: number): number {
   const nx = x / WORLD_W;
   const ny = y / WORLD_H;
   const dx = (nx - 0.5) * 2;
-  const ridge = Math.exp(-dx * dx * 1.45);
-  let h = ny * 0.4 * ridge + ny * ny * 0.36 * ridge;
-  h += Math.exp(-((nx - 0.26) ** 2) * 11) * ny * ny * 0.42;
-  h += Math.exp(-((nx - 0.72) ** 2) * 7.5) * ny * 0.16;
-  h += Math.exp(-((nx - 0.5) ** 2 + (ny - 0.93) ** 2) * 16) * 0.2;
-  h += (fbm(nx * 4.2, ny * 4.6) - 0.48) * 0.1 * (0.25 + ny);
-  h += (noise2(nx * 21, ny * 18) - 0.5) * 0.03 * ny;
-  const village = 1 - clamp01((ny - 0.05) / 0.12);
-  h *= 1 - village * 0.82;
-  return clamp01(h);
+  const ridge = Math.exp(-dx * dx * 0.4);
+  // Rolling beginner terrain through the middle and left.
+  const gentle = ny * 0.45 + ny * ny * 0.17 + Math.sin(ny * 17) * 0.01;
+  // Right shoulder: flat run-out, then a sharp headwall, then a cornice lip.
+  const steep = ny * 0.08 + 0.6 * smooth(0.36, 0.58, ny) + 0.16 * smooth(0.68, 0.86, ny);
+  const R = smooth(0.7, 0.86, nx);
+  let h = (gentle + (steep - gentle) * R) * ridge;
+  // Summit cap above the lift: short steep pitch.
+  h += Math.exp(-((nx - 0.5) ** 2 * 10 + (ny - 0.99) ** 2 * 90)) * 0.2;
+  h += (fbm(nx * 3.2, ny * 3.4) - 0.48) * (0.03 + 0.05 * R) * (0.25 + ny);
+  h += chutes(nx, ny, 3) * 0.08 * R * smooth(0.3, 0.6, ny);
+  return finish(h, nx, ny, 0.17);
 }
 
 function cedarRidge(x: number, y: number): number {
   const nx = x / WORLD_W;
   const ny = y / WORLD_H;
-  const dx = (nx - 0.48) * 2;
-  const ridge = Math.exp(-dx * dx * 1.15);
-  let h = ny * 0.46 * ridge + ny * ny * 0.44 * ridge;
-  h += Math.exp(-((nx - 0.22) ** 2) * 9) * ny * ny * 0.5;
-  h += Math.exp(-((nx - 0.78) ** 2) * 8) * ny * 0.22;
-  h += Math.exp(-((nx - 0.5) ** 2 + (ny - 0.94) ** 2) * 14) * 0.22;
-  h += (fbm(nx * 5.1 + 4, ny * 4.8) - 0.48) * 0.12 * (0.3 + ny);
-  const village = 1 - clamp01((ny - 0.04) / 0.11);
-  h *= 1 - village * 0.8;
-  return clamp01(h);
+  const dx = (nx - 0.5) * 2;
+  const ridge = Math.exp(-dx * dx * 0.4);
+  // Right side: long cruisers.
+  const gentle = ny * 0.38 + ny * ny * 0.24;
+  // Left side: a cirque bowl — flat floor, tall cliff-banded headwall.
+  const steep = ny * 0.12 + 0.36 * smooth(0.3, 0.48, ny) + 0.34 * smooth(0.56, 0.74, ny) + 0.1 * smooth(0.8, 0.92, ny);
+  const R = 1 - smooth(0.2, 0.34, nx);
+  let h = (gentle + (steep - gentle) * R) * ridge;
+  h += Math.exp(-((nx - 0.22) ** 2 * 14 + (ny - 0.94) ** 2 * 30)) * 0.18;
+  h += (fbm(nx * 3.6 + 4, ny * 3.4) - 0.48) * (0.03 + 0.06 * R) * (0.3 + ny);
+  h += chutes(nx, ny, 11) * 0.1 * R * smooth(0.25, 0.55, ny);
+  return finish(h, nx, ny, 0.16);
 }
 
 function twinPeaks(x: number, y: number): number {
   const nx = x / WORLD_W;
   const ny = y / WORLD_H;
-  const left = Math.exp(-((nx - 0.3) ** 2) * 7.5);
-  const right = Math.exp(-((nx - 0.72) ** 2) * 7.5);
-  let h = 0;
-  h += (ny * 0.38 + ny * ny * 0.5) * left;
-  h += (ny * 0.36 + ny * ny * 0.52) * right;
-  h += Math.exp(-((nx - 0.5) ** 2) * 18) * ny * 0.12;
-  h += Math.exp(-((nx - 0.28) ** 2 + (ny - 0.92) ** 2) * 14) * 0.2;
-  h += Math.exp(-((nx - 0.74) ** 2 + (ny - 0.93) ** 2) * 14) * 0.22;
-  h += (fbm(nx * 4.6 + 9, ny * 5.2) - 0.5) * 0.1 * ny;
-  const village = 1 - clamp01((ny - 0.04) / 0.13);
-  h *= 1 - village * 0.78;
-  return clamp01(h);
+  const left = Math.exp(-((nx - 0.26) ** 2) * 9);
+  const right = Math.exp(-((nx - 0.74) ** 2) * 5);
+  const saddle = Math.exp(-((nx - 0.5) ** 2) * 2.5);
+  // West peak: sheer north face full of chutes.
+  let west = (ny * 0.14 + 0.36 * smooth(0.34, 0.54, ny) + 0.34 * smooth(0.62, 0.8, ny)) * left;
+  west += Math.exp(-((nx - 0.26) ** 2 * 18 + (ny - 0.93) ** 2 * 26)) * 0.16;
+  west += chutes(nx, ny, 21) * 0.12 * left * smooth(0.3, 0.6, ny);
+  // East peak: steady blue/black pitch.
+  let east = (ny * 0.4 + ny * ny * 0.38) * right;
+  east += chutes(nx, ny, 27) * 0.04 * right * ny;
+  // Saddle: wide gentle beginner valley between them.
+  const mid = (ny * 0.42 + ny * ny * 0.08) * saddle;
+  let h = smax(smax(west, east, 0.08), mid, 0.1);
+  h += (fbm(nx * 3.6 + 9, ny * 3.6) - 0.5) * 0.04 * ny;
+  return finish(h, nx, ny, 0.17);
 }
 
 function rawElevation(x: number, y: number, id: MountainId): number {
@@ -90,8 +147,8 @@ function rawElevation(x: number, y: number, id: MountainId): number {
   return littleHawk(x, y);
 }
 
-const GW = 160;
-const GH = 205;
+const GW = 256;
+const GH = 328;
 const grids: Float32Array[] = [0, 1, 2].map((id) => {
   const grid = new Float32Array(GW * GH);
   for (let gy = 0; gy < GH; gy++) {
@@ -122,6 +179,11 @@ export function slopeAt(x: number, y: number, id: MountainId = 0): number {
   const dx = elevation(x + e, y, id) - elevation(x - e, y, id);
   const dy = elevation(x, y + e, id) - elevation(x, y - e, id);
   return Math.hypot(dx, dy) / (2 * e);
+}
+
+/** Fall-line steepness in the same units the trail classifier uses (drop m / run m). */
+export function gradeAt(x: number, y: number, id: MountainId = 0): number {
+  return (slopeAt(x, y, id) * VERTICAL_M) / UNIT_M;
 }
 
 export function dist2(ax: number, ay: number, bx: number, by: number): number {
