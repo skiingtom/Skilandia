@@ -344,7 +344,32 @@ export class Game {
     const m = Math.floor(minutes % 60);
     const h = ((h24 + 11) % 12) + 1;
     const ap = h24 >= 12 ? "PM" : "AM";
-    return `Day ${this.day} · ${h}:${m.toString().padStart(2, "0")} ${ap}`;
+    const w = this.weather();
+    const sky = w.snow > 0.15 ? "❄ Snowing" : w.cover > 0.45 ? "☁ Cloudy" : w.cover > 0.2 ? "⛅ Sunny spells" : "☀ Clear";
+    return `Day ${this.day} · ${h}:${m.toString().padStart(2, "0")} ${ap} · ${sky}`;
+  }
+
+  /** How far through the open day we are: 0 at 8:30 AM, 1 at 4 PM. */
+  dayFraction(): number {
+    return Math.min(1, Math.max(0, this.dayT / 52));
+  }
+
+  /**
+   * The weather is a slow mix of waves over game time, so storms roll in and
+   * clear over a day or two. Day one opens clear. cover: 0 clear .. 1 overcast;
+   * snow: 0 none .. 1 heavy, only once the cloud is thick enough.
+   */
+  weather(): { cover: number; snow: number; wind: number } {
+    const t = this.day + this.dayT / 52;
+    const tau = Math.PI * 2;
+    let cover =
+      0.46 + 0.3 * Math.sin((tau * t) / 2.3 + 1.0) + 0.17 * Math.sin((tau * t) / 0.9 + 2.1) + 0.08 * Math.sin((tau * t) / 0.37 + 0.4);
+    cover *= Math.min(1, Math.max(0, (t - 1.15) / 0.6));
+    cover = Math.min(1, Math.max(0, cover));
+    const k = Math.min(1, Math.max(0, (cover - 0.62) / 0.25));
+    const snow = k * k * (3 - 2 * k);
+    const wind = 0.5 + 0.5 * Math.sin((tau * t) / 1.7 + 0.8);
+    return { cover, snow, wind };
   }
 
   variety(): { counts: number[]; score: number; kinds: Set<TrailKind> } {
@@ -1251,6 +1276,7 @@ export class Game {
       return;
     }
     if (this.managing) {
+      const snowing = this.weather().snow > 0.15;
       this.dayT += capped;
       if (this.dayT >= 52) {
         this.dayT = 0;
@@ -1264,6 +1290,8 @@ export class Game {
         this.heliTakeToday = 0;
         this.toast(`Day ${this.day} in Skilandia.`);
       }
+      const nowSnowing = this.weather().snow > 0.15;
+      if (nowSnowing !== snowing) this.toast(nowSnowing ? "❄ Snow is falling. Fresh powder on the way!" : "☀ The snow has stopped. The sun is breaking through.");
       // Skiers only come when it looks like the resort can take them:
       // arrivals close the gap to demand over about a minute, then stop.
       const want = this.demand();

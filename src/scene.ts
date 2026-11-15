@@ -104,7 +104,17 @@ export class World3D {
   private slopeView = false;
   private slopeApplied = false;
   private sun!: THREE.DirectionalLight;
+  private hemi!: THREE.HemisphereLight;
+  /** Unit vector pointing at the sun; moves with the game clock. */
+  private sunDir = new THREE.Vector3(0.75, 0.6, 0.3).normalize();
+  private sunDisc = makeSunDisc();
+  private clouds: CloudPuff[] = [];
+  private cloudGroup = new THREE.Group();
+  private cloudDrift = new THREE.Vector2();
+  private weather = { cover: 0, snow: 0, wind: 0.5 };
   private snow: THREE.Points;
+  private snowT = 0;
+  private tmpV = new THREE.Vector3();
   private stamp = "";
   private introT = 0;
   private flying = true;
@@ -157,6 +167,8 @@ export class World3D {
     this.scene.add(this.draft);
     this.snow = this.makeSnow();
     this.scene.add(this.snow);
+    this.makeClouds();
+    this.scene.add(this.cloudGroup, this.sunDisc);
     this.scene.add(this.liftPreview);
     this.helicopter.visible = false;
     this.scene.add(this.helicopter);
@@ -230,7 +242,7 @@ export class World3D {
   private aimSun(_id: MountainId): void {
     const t = this.controls.target;
     this.sun.target.position.copy(t);
-    this.sun.position.set(t.x + 1400, t.y + 1300, t.z + 700);
+    this.sun.position.copy(t).addScaledVector(this.sunDir, 2400);
     this.sun.target.updateMatrixWorld();
   }
 
@@ -381,7 +393,9 @@ export class World3D {
     this.syncSkiers(game);
     this.syncDraft(game);
     this.syncLiftPreview(game);
-    this.tickSnow(dt, game.paused ? 0.15 : game.speed);
+    this.syncSky(game, dt);
+    this.tickClouds(game, dt);
+    this.tickSnow(dt, game.paused ? 0 : game.speed);
   }
 
   render(): void {
@@ -420,6 +434,7 @@ export class World3D {
 
   private addLights(): void {
     const hemi = new THREE.HemisphereLight("#cfe3ff", "#6f7f94", 0.55);
+    this.hemi = hemi;
     this.scene.add(hemi);
     // Low, raking sun so headwalls throw shadow and gentle slopes stay bright.
     const sun = new THREE.DirectionalLight("#fff0d2", 2.3);
@@ -588,30 +603,170 @@ export class World3D {
     return mesh;
   }
 
+  /**
+   * Sun, sky and fog follow the game clock and the weather: a low warm sun in
+   * the morning, highest around 12:15, sinking west toward closing; clouds
+   * dim and cool it, and a snowstorm closes the fog in.
+   */
+  private syncSky(game: Game, dt: number): void {
+    const w = game.weather();
+    // Ease toward the target so a weather change drifts in rather than pops.
+    const k = 1 - Math.exp(-dt * 1.5);
+    this.weather.cover += (w.cover - this.weather.cover) * k;
+    this.weather.snow += (w.snow - this.weather.snow) * k;
+    this.weather.wind = w.wind;
+    const { cover, snow } = this.weather;
+
+    // Title screen: a late-morning sun over the valley.
+    const f = game.managing ? game.dayFraction() : 0.35;
+    // 8:30 AM .. 4:00 PM as an hour angle from solar noon (about 12:15).
+    const hour = 8.5 + f * 7.5;
+    const ha = ((hour - 12.25) / 12) * Math.PI;
+    // Winter sun in the south (+z), rising in the east (+x).
+    const elev = THREE.MathUtils.degToRad(5 + 27 * Math.cos(ha * 1.05));
+    const az = ha * 1.1;
+    this.sunDir.set(-Math.sin(az) * Math.cos(elev), Math.sin(elev), Math.cos(az) * Math.cos(elev)).normalize();
+    this.aimSun(this.mid);
+
+    const low = 1 - THREE.MathUtils.smoothstep(this.sunDir.y, 0.12, 0.45);
+    const sunCol = SUN_HIGH.clone().lerp(SUN_LOW, low);
+    this.sun.color.copy(sunCol).lerp(OVERCAST_LIGHT, cover * 0.6);
+    this.sun.intensity = (2.4 - low * 0.6) * (1 - cover * 0.78);
+    this.hemi.intensity = 0.55 + cover * 0.45;
+    this.hemi.color.copy(HEMI_CLEAR).lerp(HEMI_OVERCAST, cover);
+
+    const sky = SKY_CLEAR.clone().lerp(SKY_LOW, low * 0.45).lerp(SKY_OVERCAST, cover * 0.85).lerp(SKY_SNOW, snow * 0.6);
+    (this.scene.background as THREE.Color).copy(sky);
+    const fog = this.scene.fog as THREE.Fog;
+    fog.color.copy(sky).lerp(FOG_TINT, 0.25 + snow * 0.4);
+    fog.near = 9000 - snow * 4500;
+    fog.far = 60000 - snow * 26000;
+    this.renderer.toneMappingExposure = 0.92 + cover * 0.08;
+
+    // The sun disc sits far out along the sun direction; clouds hide it.
+    this.sunDisc.position.copy(this.camera.position).addScaledVector(this.sunDir, 50000);
+    const discMat = this.sunDisc.material as THREE.SpriteMaterial;
+    discMat.opacity = Math.max(0, 1 - cover * 1.15);
+    discMat.color.copy(sunCol);
+    this.sunDisc.visible = discMat.opacity > 0.01;
+  }
+
+  /** Clusters of soft billboard puffs scattered over the valley at cloud height. */
+  private makeClouds(): void {
+    const tex = makeCloudTexture();
+    const rand = mulberry(7);
+    for (let i = 0; i < CLOUD_COUNT; i++) {
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, opacity: 0, color: "#ffffff" });
+      const group = new THREE.Group();
+      const n = 5 + Math.floor(rand() * 6);
+      const size = 1400 + rand() * 1600;
+      for (let j = 0; j < n; j++) {
+        const sp = new THREE.Sprite(mat);
+        const s = size * (0.55 + rand() * 0.6);
+        sp.scale.set(s * 1.5, s, 1);
+        sp.position.set((rand() - 0.5) * size * 2.2, (rand() - 0.3) * size * 0.25, (rand() - 0.5) * size * 1.2);
+        group.add(sp);
+      }
+      this.cloudGroup.add(group);
+      this.clouds.push({
+        group,
+        mat,
+        home: new THREE.Vector2((rand() - 0.5) * CLOUD_SPAN, (rand() - 0.5) * CLOUD_SPAN),
+        alt: 3500 + rand() * 1300,
+        // Thin clouds show up first; the last ones only in a full overcast.
+        threshold: rand() * 0.85,
+        radius: size * 1.2,
+      });
+    }
+  }
+
+  private tickClouds(game: Game, dt: number): void {
+    const { cover, snow, wind } = this.weather;
+    const move = dt * (game.paused ? 0.2 : Math.min(game.speed, 3)) * (40 + wind * 120);
+    this.cloudDrift.x += move * 0.8;
+    this.cloudDrift.y += move * 0.45;
+    const centre = to3(BASE.x, BASE.y - 2000, 0, this.mid);
+    const cam = this.camera.position;
+    const tgt = this.controls.target;
+    const seg = new THREE.Vector3().subVectors(tgt, cam);
+    const segLen2 = Math.max(1, seg.lengthSq());
+    const p = new THREE.Vector3();
+    const lit = CLOUD_LIT.clone().lerp(CLOUD_LOW, 1 - THREE.MathUtils.smoothstep(this.sunDir.y, 0.12, 0.45));
+    const col = lit.lerp(CLOUD_STORM, cover * 0.55 + snow * 0.3);
+    const half = CLOUD_SPAN / 2;
+    for (const c of this.clouds) {
+      // Wrap the drift so the sky never empties out.
+      const x = ((((c.home.x + this.cloudDrift.x + half) % CLOUD_SPAN) + CLOUD_SPAN) % CLOUD_SPAN) - half;
+      const z = ((((c.home.y + this.cloudDrift.y + half) % CLOUD_SPAN) + CLOUD_SPAN) % CLOUD_SPAN) - half;
+      c.group.position.set(centre.x + x, c.alt, centre.z + z);
+      let a = THREE.MathUtils.smoothstep(cover, c.threshold, c.threshold + 0.15);
+      // Fade out near the edges of the wrap so clouds don't pop across.
+      a *= 1 - THREE.MathUtils.smoothstep(Math.max(Math.abs(x), Math.abs(z)), half * 0.8, half);
+      // Never let a cloud block the view of what you're looking at.
+      const tt = THREE.MathUtils.clamp(p.subVectors(c.group.position, cam).dot(seg) / segLen2, 0, 1);
+      const d = p.copy(cam).addScaledVector(seg, tt).distanceTo(c.group.position);
+      a *= THREE.MathUtils.smoothstep(d, c.radius * 0.8, c.radius * 1.8);
+      c.mat.opacity = a * 0.92;
+      c.mat.color.copy(col);
+      c.group.visible = c.mat.opacity > 0.01;
+    }
+  }
+
+  /**
+   * Snowflakes fill a box between the camera and what it's looking at,
+   * scaled with zoom so it reads the same from close in or high up.
+   */
   private makeSnow(): THREE.Points {
-    const count = 1200;
-    const pos = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      pos[i * 3] = (Math.random() - 0.5) * 1400;
-      pos[i * 3 + 1] = Math.random() * 900;
-      pos[i * 3 + 2] = (Math.random() - 0.5) * 1400;
+    const pos = new Float32Array(SNOW_MAX * 3);
+    for (let i = 0; i < SNOW_MAX; i++) {
+      pos[i * 3] = Math.random() - 0.5;
+      pos[i * 3 + 1] = Math.random() - 0.5;
+      pos[i * 3 + 2] = Math.random() - 0.5;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    return new THREE.Points(geo, new THREE.PointsMaterial({ color: "#ffffff", size: 1.4, transparent: true, opacity: 0.75 }));
+    geo.setDrawRange(0, 0);
+    const pts = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({ color: "#ffffff", size: 1.4, map: makeFlakeTexture(), transparent: true, opacity: 0.9, depthWrite: false }),
+    );
+    pts.frustumCulled = false;
+    return pts;
   }
 
   private tickSnow(dt: number, speed: number): void {
+    const { snow, wind } = this.weather;
+    const n = Math.round(SNOW_MAX * snow);
+    this.snow.geometry.setDrawRange(0, n);
+    this.snow.visible = n > 0;
+    if (!n) return;
     const pos = this.snow.geometry.getAttribute("position") as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      let y = pos.getY(i) - (8 + speed * 10) * dt;
-      if (y < 0) y = 880;
-      pos.setY(i, y);
+    const arr = pos.array as Float32Array;
+    const fall = (0.07 + 0.03 * Math.min(speed, 3)) * dt;
+    const drift = fall * (0.3 + wind * 0.9);
+    this.snowT += dt;
+    for (let i = 0; i < n; i++) {
+      const j = i * 3;
+      let y = arr[j + 1] - fall * (0.75 + (i % 7) * 0.08);
+      let x = arr[j] + drift * 0.8 + Math.sin(this.snowT * 1.3 + i) * fall * 0.3;
+      let z = arr[j + 2] + drift * 0.45;
+      if (y < -0.5) y += 1;
+      if (x > 0.5) x -= 1;
+      if (z > 0.5) z -= 1;
+      arr[j] = x;
+      arr[j + 1] = y;
+      arr[j + 2] = z;
     }
     pos.needsUpdate = true;
-    this.snow.position.set(this.controls.target.x, this.controls.target.y - 300, this.controls.target.z);
-    // Only snow around you when you're close in; from far out it reads as a cloud.
-    this.snow.visible = this.camera.position.distanceTo(this.controls.target) < 1600;
+    const cam = this.camera.position;
+    const dist = cam.distanceTo(this.controls.target);
+    // Kept clear of the lens (even at the box corners) so no flake balloons up.
+    const side = THREE.MathUtils.clamp(dist * 0.6, 150, 6000);
+    this.snow.position.copy(cam).addScaledVector(this.camera.getWorldDirection(this.tmpV), side * 1.08);
+    this.snow.scale.setScalar(side);
+    const mat = this.snow.material as THREE.PointsMaterial;
+    mat.size = side * 0.0055;
+    mat.opacity = 0.55 + snow * 0.4;
   }
 
   private syncStatic(game: Game): void {
@@ -1895,4 +2050,101 @@ function makePeakLabel(text: string, done: boolean): THREE.Sprite {
   sprite.scale.set(0.2, 0.028, 1);
   sprite.renderOrder = 4;
   return sprite;
+}
+
+type CloudPuff = {
+  group: THREE.Group;
+  mat: THREE.SpriteMaterial;
+  home: THREE.Vector2;
+  alt: number;
+  threshold: number;
+  radius: number;
+};
+
+const CLOUD_COUNT = 34;
+const CLOUD_SPAN = 36000;
+const SNOW_MAX = 9000;
+const SUN_HIGH = new THREE.Color("#fff3dc");
+const SUN_LOW = new THREE.Color("#ffb877");
+const OVERCAST_LIGHT = new THREE.Color("#dfe6ee");
+const HEMI_CLEAR = new THREE.Color("#cfe3ff");
+const HEMI_OVERCAST = new THREE.Color("#e4e9ef");
+const SKY_CLEAR = new THREE.Color("#9cc4dc");
+const SKY_LOW = new THREE.Color("#e9c6a6");
+const SKY_OVERCAST = new THREE.Color("#b4bfc8");
+const SKY_SNOW = new THREE.Color("#c9d0d6");
+const FOG_TINT = new THREE.Color("#d5dde4");
+const CLOUD_LIT = new THREE.Color("#ffffff");
+const CLOUD_LOW = new THREE.Color("#ffe2c6");
+const CLOUD_STORM = new THREE.Color("#8c96a2");
+
+/** Small seeded random so the cloud layout is the same every game. */
+function mulberry(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function canvasTexture(size: number, draw: (g: CanvasRenderingContext2D, size: number) => void): THREE.Texture {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  draw(c.getContext("2d")!, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** A lumpy cloud puff: overlapping soft blobs, a little shaded at the bottom. */
+function makeCloudTexture(): THREE.Texture {
+  return canvasTexture(256, (g, n) => {
+    const rand = mulberry(3);
+    for (let i = 0; i < 16; i++) {
+      const x = n * (0.25 + rand() * 0.5);
+      const y = n * (0.35 + rand() * 0.3);
+      const r = n * (0.12 + rand() * 0.16);
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      const shade = Math.round(255 - (y / n) * 40);
+      grad.addColorStop(0, `rgba(${shade},${shade},${Math.min(255, shade + 6)},0.55)`);
+      grad.addColorStop(0.6, `rgba(${shade},${shade},${Math.min(255, shade + 6)},0.25)`);
+      grad.addColorStop(1, `rgba(${shade},${shade},${shade},0)`);
+      g.fillStyle = grad;
+      g.fillRect(0, 0, n, n);
+    }
+  });
+}
+
+function makeFlakeTexture(): THREE.Texture {
+  return canvasTexture(32, (g, n) => {
+    const grad = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.45, "rgba(255,255,255,0.8)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, n, n);
+  });
+}
+
+/** The sun in the sky: a bright core in a soft glow, drawn on top of the fog. */
+function makeSunDisc(): THREE.Sprite {
+  const tex = canvasTexture(256, (g, n) => {
+    const grad = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.09, "rgba(255,255,250,1)");
+    grad.addColorStop(0.13, "rgba(255,245,220,0.55)");
+    grad.addColorStop(0.35, "rgba(255,230,190,0.16)");
+    grad.addColorStop(1, "rgba(255,220,180,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, n, n);
+  });
+  const sp = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending }),
+  );
+  sp.scale.set(9000, 9000, 1);
+  sp.renderOrder = -1;
+  return sp;
 }
