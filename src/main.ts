@@ -2,7 +2,7 @@ import { AmbientState, AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
 import { World3D, from3 } from "./scene";
-import { EARTH_COST_PER_M3, Game, SUMMITS, TREE_FELL_COST } from "./sim";
+import { EARTH_COST_PER_M3, Game, SUMMITS, TREE_FELL_COST, TREE_PLANT_COST } from "./sim";
 import { MAX_EARTHWORK_M, SculptMode, earthworkAt } from "./height";
 let brushHint = "";
 const SHAPE_LABEL: Record<SculptMode, string> = { raise: "Raise", lower: "Lower", flatten: "Flatten", smooth: "Smooth" };
@@ -128,6 +128,8 @@ startBtn.addEventListener("click", (e) => {
 });
 
 world = new World3D(canvas);
+// Dev-only handle for poking at the game from the console.
+if ((import.meta as unknown as { env: { DEV: boolean } }).env.DEV) Object.assign(window, { skilandia: { game, world } });
 
 let last = performance.now();
 let pointer = { x: 0, y: 0, downX: 0, downY: 0, over: false, held: false };
@@ -159,6 +161,8 @@ const ticketValue = document.querySelector("#ticket-value")!;
 const ticketFair = document.querySelector("#ticket-fair")!;
 const shopRate = document.querySelector("#shop-rate")!;
 const shapeBanner = document.querySelector<HTMLElement>("#shape-banner")!;
+const plantBanner = document.querySelector<HTMLElement>("#plant-banner")!;
+const plantText = document.querySelector("#plant-text")!;
 const shapeText = document.querySelector("#shape-text")!;
 const cutBanner = document.querySelector("#cut-banner")!;
 const cutDiff = document.querySelector("#cut-diff")!;
@@ -274,7 +278,7 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
-    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool === "shape" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
+    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool === "plantTrees" || tool === "shape" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -284,7 +288,7 @@ function paintHud(force = false): void {
     }
     const type = tool as BuildingType;
     const atMax = game.count(type) >= BUILDING_MAX[type];
-    btn.disabled = atMax || (btn.classList.contains("expansion") && !expand);
+    btn.disabled = atMax || (btn.classList.contains("expansion") && !expand) || (type === "cabin" && !game.has("cabinOffice"));
   });
   document.querySelectorAll<HTMLButtonElement>(".speed").forEach((btn) => {
     btn.classList.toggle("on", Number(btn.dataset.speed) === game.speed && !game.paused);
@@ -295,6 +299,12 @@ function paintHud(force = false): void {
   pauseBtn.setAttribute("aria-label", game.paused ? "Resume" : "Pause");
   const drafting = game.tool === "cut" || game.tool === "road";
   shapeBanner.classList.toggle("hidden", game.tool !== "shape");
+  plantBanner.classList.toggle("hidden", game.tool !== "plantTrees");
+  plantBanner.querySelectorAll<HTMLButtonElement>(".plant-mode").forEach((b) => b.classList.toggle("on", b.dataset.mode === game.plantMode));
+  plantText.textContent =
+    game.plantMode === "single"
+      ? `Click to plant a tree. ${game.freeTreeClearing ? "Free (see Settings)" : `$${TREE_PLANT_COST} each`}.`
+      : `Click or drag to scatter trees through the brush. ${game.freeTreeClearing ? "Free (see Settings)" : `$${TREE_PLANT_COST} a tree`}.`;
   shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-mode").forEach((b) => b.classList.toggle("on", b.dataset.mode === game.shapeMode));
   shapeBanner.querySelectorAll<HTMLButtonElement>(".shape-size").forEach((b) => b.classList.toggle("on", Number(b.dataset.size) === game.shapeRadius));
   shapeText.textContent = `${SHAPE_HELP[game.shapeMode]} Hold the left button and drag. ${game.freeShaping ? "Free (see Settings)" : `$${EARTH_COST_PER_M3}/m³ of earth moved`}; building pads stay put.`;
@@ -482,6 +492,13 @@ function loop(now: number): void {
     placeHint.classList.remove("hidden");
     placeHint.classList.add("ok");
     placeHint.textContent = `${brushHint} · ${game.treesFelled.toLocaleString()} felled so far`;
+  } else if (pointer.over && game.tool === "plantTrees") {
+    world.hideGhost();
+    const hit = world.hitAt(pointer.x, pointer.y);
+    game.brushHover = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
+    placeHint.classList.remove("hidden");
+    placeHint.classList.add("ok");
+    placeHint.textContent = `${game.plantMode === "single" ? "Single tree" : "Area brush"} · ${game.treesPlanted.toLocaleString()} planted so far`;
   } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road" && game.tool !== "shape") {
     const hit = world.hitAt(pointer.x, pointer.y);
     const feature = game.featureTool();
@@ -531,8 +548,9 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 canvas.addEventListener("pointermove", (e) => {
-  // Drag the tree brush with the left button held.
-  if (game.tool !== "clearTrees" || !(e.buttons & 1)) return;
+  // Drag the tree brushes with the left button held.
+  const brush = game.tool === "clearTrees" || (game.tool === "plantTrees" && game.plantMode === "brush");
+  if (!brush || !(e.buttons & 1)) return;
   const hit = world.hitAt(e.clientX, e.clientY);
   if (hit && hit.mountain === game.currentMountain && game.click(hit.x, hit.y) === "ok") audio.click();
 });
@@ -558,7 +576,17 @@ canvas.addEventListener("pointerup", (e) => {
     paintHud();
     return;
   }
-  if (game.tool === "clearTrees") {
+  if (game.tool === "plantTrees" && game.plantMode === "single") {
+    if (e.button === 0 && Math.hypot(e.clientX - pointer.downX, e.clientY - pointer.downY) <= 6) {
+      const hit = world.hitAt(e.clientX, e.clientY);
+      const r = hit && hit.mountain === game.currentMountain ? game.click(hit.x, hit.y) : "none";
+      if (r === "shake") audio.error();
+      else if (r === "ok") audio.click();
+    }
+    paintHud();
+    return;
+  }
+  if (game.tool === "clearTrees" || game.tool === "plantTrees") {
     if (e.button === 0) {
       const hit = world.hitAt(e.clientX, e.clientY);
       if (hit && hit.mountain === game.currentMountain && game.click(hit.x, hit.y) === "shake") audio.error();
@@ -721,7 +749,11 @@ settingsBtn.addEventListener("click", () => {
 });
 freeTreesOpt.addEventListener("change", () => {
   game.freeTreeClearing = freeTreesOpt.checked;
-  game.toast(game.freeTreeClearing ? "Tree clearing is free." : `Tree clearing costs $${TREE_FELL_COST} a tree.`);
+  game.toast(
+    game.freeTreeClearing
+      ? "Clearing and planting trees is free."
+      : `Felling a tree costs $${TREE_FELL_COST}; planting one costs $${TREE_PLANT_COST}.`,
+  );
   paintHud();
 });
 freeShapingOpt.addEventListener("change", () => {
@@ -760,6 +792,17 @@ document.querySelectorAll<HTMLButtonElement>(".shape-size").forEach((b) =>
     paintHud();
   }),
 );
+document.querySelectorAll<HTMLButtonElement>(".plant-mode").forEach((b) =>
+  b.addEventListener("click", () => {
+    game.plantMode = b.dataset.mode as "single" | "brush";
+    audio.click();
+    paintHud();
+  }),
+);
+document.querySelector("#btn-plant-done")!.addEventListener("click", () => {
+  game.cancel();
+  paintHud();
+});
 document.querySelector("#btn-shape-done")!.addEventListener("click", () => {
   game.cancel();
   paintHud();

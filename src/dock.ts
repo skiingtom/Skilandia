@@ -17,7 +17,7 @@ import {
   PARKING,
 } from "./types";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
-import { BRUSH_R, EARTH_COST_PER_M3, TREE_FELL_COST } from "./sim";
+import { BRUSH_R, EARTH_COST_PER_M3, TREE_FELL_COST, TREE_PLANT_COST } from "./sim";
 import { MAX_EARTHWORK_M } from "./height";
 
 const SALVAGE_SHARE = 0.4;
@@ -55,8 +55,8 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "lifts", label: "Lifts", items: LIFT_TYPES.map((t) => `lift:${t}` as Tool) },
   { id: "base", label: "Base", items: ["lodge", "restroom", "rental", "school", "clinic", "patrol"] },
   { id: "food", label: "Food", items: ["shack", "coffee", "cafeteria", "sandwich", "bar", "restaurant"] },
-  { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "heli"] },
-  { id: "edit", label: "Edit", items: ["shape", "clearTrees", "demolish"] },
+  { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "cabinOffice", "cabin", "heli"] },
+  { id: "edit", label: "Edit", items: ["shape", "clearTrees", "plantTrees", "demolish"] },
 ];
 
 export function groupOf(tool: Tool): string | null {
@@ -112,6 +112,13 @@ function itemHtml(tool: Tool): string {
       <em>Click or drag over the forest to fell it.</em>
     </button>`;
   }
+  if (tool === "plantTrees") {
+    return `<button type="button" class="tool item" data-tool="plantTrees">
+      <b>Plant trees</b>
+      <small>$${TREE_PLANT_COST} a tree · single or ${BRUSH_R * 2} m brush</small>
+      <em>Click for one tree, or drag the brush to plant a stand.</em>
+    </button>`;
+  }
   if (tool.startsWith("trail:")) {
     const k = tool.slice(6) as TrailKind;
     const spec = TRAIL_KIND_SPEC[k];
@@ -145,6 +152,13 @@ function itemHtml(tool: Tool): string {
     </button>`;
   }
   const b = tool as BuildingType;
+  if (b === "cabinOffice" || b === "cabin") {
+    return `<button type="button" class="tool item" data-tool="${b}">
+      <b>${BUILDING_LABEL[b]}</b>
+      <small id="cost-${b}"></small>
+      <em>${b === "cabin" ? "Needs the rental office. Goes on the hillside, right beside a run." : "Village. Unlocks ski-in / ski-out cabins to rent."}</em>
+    </button>`;
+  }
   const exp = EXPANSION_BUILDINGS.includes(b) ? " expansion" : "";
   return `<button type="button" class="tool item${exp}" data-tool="${b}">
       <b>${BUILDING_LABEL[b]}</b>

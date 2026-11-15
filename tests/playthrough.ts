@@ -153,6 +153,36 @@ for (const [type, dx, dy] of spots) {
   g.setTool("clinic");
   ok(g.click(mid.x, mid.y) === "ok", `clinic on the mountain failed: ${g.toasts.at(-1)?.text}`);
 }
+// Cabins: need the rental office, and a run at the door.
+{
+  g.setTool("cabin");
+  ok(g.canPlace("cabin", BASE.x + 3000, BASE.y - 3000)?.includes("office") === true, "cabin should need the rental office first");
+  g.setTool("cabinOffice");
+  ok(g.click(BASE.x + 60, BASE.y - 230) === "ok", `cabin office failed: ${g.toasts.at(-1)?.text}`);
+  // Find a spot beside a run, out of the village.
+  let spot: Vec2 | null = null;
+  for (const t of g.trails) {
+    for (let i = 1; i < t.points.length && !spot; i++) {
+      const a = t.points[i - 1];
+      const b = t.points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      for (const u of [0.2, 0.5, 0.8]) {
+        for (const off of [25, 35, 45, -25, -35, -45]) {
+          const p = { x: a.x + (b.x - a.x) * u - ((b.y - a.y) / len) * off, y: a.y + (b.y - a.y) * u + ((b.x - a.x) / len) * off };
+          if (!spot && g.canPlace("cabin", p.x, p.y) === null) spot = p;
+        }
+      }
+    }
+  }
+  ok(!!spot, "no hillside spot for a cabin");
+  if (spot) {
+    g.setTool("cabin");
+    ok(g.click(spot.x, spot.y) === "ok", `ski-in cabin failed: ${g.toasts.at(-1)?.text}`);
+    ok(g.skiInCabins() === 1, "the cabin should count as ski-in / ski-out");
+  }
+  ok(g.canPlace("cabin", BASE.x + 3000, BASE.y - 3000) !== null, "a cabin far from any run should be refused");
+  g.setTool("select");
+}
 // Expansion buildings unlock after the first peak; conquer Hollin first, then place a few.
 {
   const p = SUMMITS.find((s) => s.id === "hollin")!;
@@ -250,7 +280,37 @@ ok(g.totalTickets > 100, "hardly anyone came");
     ok(g.treesUnderBrush(spot.x, spot.y) === 0, "trees still standing under the brush");
     ok(Math.abs(money - g.money - n * 4) < 1, `brush charged ${money - g.money} for ${n} trees`);
     g.endBrush();
+
+    // Replant the clearing: the area brush scatters saplings, a single click plants one.
+    g.setTool("plantTrees");
+    g.plantMode = "brush";
+    const before = g.money;
+    ok(g.click(spot.x, spot.y) === "ok", `planting brush failed: ${g.toasts.at(-1)?.text}`);
+    const planted = g.treesUnderBrush(spot.x, spot.y);
+    ok(planted > 0, "planting brush planted nothing");
+    ok(Math.abs(before - g.money - planted * 12) < 1, `planting charged ${before - g.money} for ${planted} trees`);
+    g.endBrush();
+    g.plantMode = "single";
+    const free = { x: spot.x + 22, y: spot.y + 22 };
+    const nearBefore = g.treesIn(free.x - 3, free.y - 3, free.x + 3, free.y + 3).length;
+    const single = g.click(free.x, free.y);
+    if (single === "ok") ok(g.treesIn(free.x - 3, free.y - 3, free.x + 3, free.y + 3).length === nearBefore + 1, "single plant should add one tree");
+    // Clearing again digs the planted trees back up.
+    g.setTool("clearTrees");
+    g.click(spot.x, spot.y);
+    g.endBrush();
+    ok(g.treesUnderBrush(spot.x, spot.y) === 0, "planted trees survived the clearing brush");
+    g.setTool("select");
   }
+}
+
+// --- the forest isn't laid out on a grid: tree spacing along a row varies widely
+{
+  const xs = g.treesIn(BASE.x + 2000, BASE.y - 2006, BASE.x + 2600, BASE.y - 1994).map((t) => t.x).sort((a, b) => a - b);
+  const gaps = xs.slice(1).map((x, i) => x - xs[i]);
+  const mean = gaps.reduce((a, b) => a + b, 0) / Math.max(1, gaps.length);
+  const sd = Math.sqrt(gaps.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, gaps.length));
+  ok(gaps.length < 5 || sd / mean > 0.5, `forest looks gridded (spacing sd/mean ${(sd / mean).toFixed(2)})`);
 }
 
 // --- rocks: above the rock line, a run can't be cut straight through an outcrop

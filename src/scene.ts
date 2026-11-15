@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
+import { PostFx, SkyUniforms, TerrainUniforms, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial } from "./look";
+import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { Game } from "./sim";
 import { SUMMITS, classifyGrade, forestDensity } from "./sim";
@@ -118,7 +120,9 @@ export class World3D {
   private loadedId: MountainId | null = null;
   private featureGroup = new THREE.Group();
   private peakGroup = new THREE.Group();
-  private trees: THREE.InstancedMesh;
+  /** Detailed spruces close in; a lighter model when zoomed out over a wide area. */
+  private treesHi!: THREE.InstancedMesh;
+  private treesLo!: THREE.InstancedMesh;
   private boulders = makeBoulders(BOULDERS_DRAWN);
   private brushRing = makeBrushRing();
   private lastTreeLayout = 0;
@@ -131,7 +135,8 @@ export class World3D {
   private trailGroup = new THREE.Group();
   private roadGroup = new THREE.Group();
   private roadStamp = -1;
-  private cars = makeCars(MAX_CARS);
+  private cars = new Fleet([...CAR_MODELS, "semi"], MAX_CARS, { dynamic: true });
+  private carColor = new THREE.Color();
   private buildingGroup = new THREE.Group();
   private liftGroup = new THREE.Group();
   private liftVis = new Map<number, LiftVis>();
@@ -162,6 +167,12 @@ export class World3D {
   private flying = true;
   private tmp = new THREE.Object3D();
   private lastPointer = { x: 0, y: 0 };
+  private post: PostFx;
+  private sky: { mesh: THREE.Mesh; uniforms: SkyUniforms };
+  private terrainUniforms: TerrainUniforms = { uDetail: { value: 1 }, uRock: { value: new THREE.Color("#6d655e") } };
+  private treeTime = { value: 0 };
+  private treeWind = { value: 0.5 };
+  private frameT = performance.now();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -171,12 +182,16 @@ export class World3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.92;
+    this.renderer.toneMappingExposure = EXPOSURE;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 2, 90000);
     this.camera.position.set(0, 3000, 6000);
     this.scene.background = new THREE.Color("#9cc4dc");
-    this.scene.fog = new THREE.Fog("#a9cbe0", 9000, 60000);
+    this.scene.fog = new THREE.FogExp2("#cfdbe3", FOG_DENSITY);
+    this.sky = makeSkyDome();
+    this.scene.add(this.sky.mesh);
+    this.post = new PostFx(this.renderer, this.scene, this.camera);
+    this.post.setSize(innerWidth, innerHeight, postPixelRatio());
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.target.set(0, 400, 0);
@@ -195,9 +210,10 @@ export class World3D {
     this.addLights();
     this.addGround();
     this.loadMountain(0);
-    this.trees = this.makeEmptyTrees();
-    this.scene.add(this.trees, this.boulders, this.brushRing);
-    this.scene.add(this.roadGroup, this.cars);
+    this.treesHi = this.makeEmptyTrees(true);
+    this.treesLo = this.makeEmptyTrees(false);
+    this.scene.add(this.treesHi, this.treesLo, this.boulders, this.brushRing);
+    this.scene.add(this.roadGroup, this.cars.group);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -235,6 +251,7 @@ export class World3D {
   private applySlopeColors(on: boolean): void {
     if (on === this.slopeApplied) return;
     this.slopeApplied = on;
+    this.terrainUniforms.uDetail.value = on ? 0 : 1;
     if (!this.terrain) return;
     for (const tile of this.terrain.children) {
       if (!(tile instanceof THREE.Mesh) || !tile.geometry.userData.natural) continue;
@@ -304,6 +321,7 @@ export class World3D {
     this.camera.updateProjectionMatrix();
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
     this.renderer.setSize(innerWidth, innerHeight, false);
+    this.post.setSize(innerWidth, innerHeight, postPixelRatio());
   }
 
   startPlay(): void {
@@ -449,7 +467,13 @@ export class World3D {
   }
 
   render(): void {
-    this.renderer.render(this.scene, this.camera);
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.frameT) / 1000);
+    this.frameT = now;
+    this.treeTime.value = (this.treeTime.value + dt) % 10000;
+    this.treeWind.value = this.weather.wind;
+    this.sky.mesh.position.copy(this.camera.position);
+    this.post.render(dt);
   }
 
   private flyKeys(dt: number): void {
@@ -483,11 +507,12 @@ export class World3D {
   }
 
   private addLights(): void {
-    const hemi = new THREE.HemisphereLight("#cfe3ff", "#6f7f94", 0.55);
+    // Blue skylight fills the shadows; warm bounce off the snow from below.
+    const hemi = new THREE.HemisphereLight(HEMI_CLEAR, "#b8aea2", 0.7);
     this.hemi = hemi;
     this.scene.add(hemi);
     // Low, raking sun so headwalls throw shadow and gentle slopes stay bright.
-    const sun = new THREE.DirectionalLight("#fff0d2", 2.3);
+    const sun = new THREE.DirectionalLight("#ffe6c0", 2.6);
     sun.castShadow = true;
     sun.shadow.mapSize.set(4096, 4096);
     sun.shadow.camera.near = 40;
@@ -496,11 +521,12 @@ export class World3D {
     sun.shadow.camera.right = 1500;
     sun.shadow.camera.top = 1500;
     sun.shadow.camera.bottom = -1500;
-    sun.shadow.bias = -0.0006;
+    sun.shadow.bias = -0.0005;
     sun.shadow.normalBias = 1.2;
+    sun.shadow.radius = 3;
     this.sun = sun;
     this.scene.add(sun, sun.target);
-    this.scene.add(new THREE.AmbientLight("#b9d4e6", 0.05));
+    this.scene.add(new THREE.AmbientLight("#b9d4e6", 0.04));
   }
 
   private addGround(): void {
@@ -525,7 +551,7 @@ export class World3D {
     const wy = Math.round(WORLD_H / TERRAIN_GRID);
     const group = new THREE.Group();
     group.userData = { kind: "terrain", mountain: id };
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 });
+    const mat = makeTerrainMaterial(this.terrainUniforms);
     const tile = 64;
     for (let tj = 0; tj < wy; tj += tile) {
       for (let ti = 0; ti < wx; ti += tile) {
@@ -636,18 +662,14 @@ export class World3D {
     if (!this.redrapeAt) this.redrapeAt = performance.now() + 250;
   }
 
-  private makeEmptyTrees(): THREE.InstancedMesh {
-    const lower = new THREE.ConeGeometry(3.8, 9, 7);
-    lower.translate(0, -2, 0);
-    const upper = new THREE.ConeGeometry(2.6, 8, 7);
-    upper.translate(0, 3.5, 0);
-    const trunk = new THREE.CylinderGeometry(0.45, 0.6, 3, 5);
-    trunk.translate(0, -7.5, 0);
-    const geo = mergeGeometries([lower, upper, trunk])!;
-    const mat = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+  private makeEmptyTrees(detailed: boolean): THREE.InstancedMesh {
+    const geo = makeSpruceGeometry(detailed);
+    const mat = makeTreeMaterial(this.treeTime, this.treeWind);
     const mesh = new THREE.InstancedMesh(geo, mat, TREES_DRAWN);
+    mesh.customDepthMaterial = makeTreeDepthMaterial(this.treeTime, this.treeWind);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.castShadow = true;
+    mesh.receiveShadow = true;
     mesh.count = 0;
     return mesh;
   }
@@ -680,17 +702,25 @@ export class World3D {
     const low = 1 - THREE.MathUtils.smoothstep(this.sunDir.y, 0.12, 0.45);
     const sunCol = SUN_HIGH.clone().lerp(SUN_LOW, low);
     this.sun.color.copy(sunCol).lerp(OVERCAST_LIGHT, cover * 0.6);
-    this.sun.intensity = (2.4 - low * 0.6) * (1 - cover * 0.78);
-    this.hemi.intensity = 0.55 + cover * 0.45;
+    this.sun.intensity = (2.7 - low * 0.6) * (1 - cover * 0.78);
+    this.hemi.intensity = 1.05 + cover * 0.3;
     this.hemi.color.copy(HEMI_CLEAR).lerp(HEMI_OVERCAST, cover);
 
     const sky = SKY_CLEAR.clone().lerp(SKY_LOW, low * 0.45).lerp(SKY_OVERCAST, cover * 0.85).lerp(SKY_SNOW, snow * 0.6);
     (this.scene.background as THREE.Color).copy(sky);
-    const fog = this.scene.fog as THREE.Fog;
-    fog.color.copy(sky).lerp(FOG_TINT, 0.25 + snow * 0.4);
-    fog.near = 9000 - snow * 4500;
-    fog.far = 60000 - snow * 26000;
-    this.renderer.toneMappingExposure = 0.92 + cover * 0.08;
+    // Hazy horizon the fog fades into, so distant ridges dissolve into the sky.
+    const horizon = HORIZON_CLEAR.clone().lerp(HORIZON_LOW, low * 0.6).lerp(SKY_OVERCAST, cover * 0.8).lerp(SKY_SNOW, snow * 0.7);
+    const fog = this.scene.fog as THREE.FogExp2;
+    fog.color.copy(horizon).lerp(FOG_TINT, snow * 0.4);
+    fog.density = FOG_DENSITY * (1 + cover * 0.4) + snow * 0.00011;
+    const su = this.sky.uniforms;
+    su.uSunDir.value.copy(this.sunDir);
+    su.uZenith.value.copy(ZENITH_CLEAR).lerp(SKY_OVERCAST, cover * 0.85).lerp(SKY_SNOW, snow * 0.7);
+    su.uHorizon.value.copy(horizon);
+    su.uGround.value.copy(fog.color);
+    su.uSunGlow.value.copy(sunCol);
+    su.uGlow.value = Math.max(0, 1 - cover * 1.1) * (0.8 + low * 0.7);
+    this.renderer.toneMappingExposure = EXPOSURE + cover * 0.1;
 
     // The sun disc sits far out along the sun direction; clouds hide it.
     this.sunDisc.position.copy(this.camera.position).addScaledVector(this.sunDir, 50000);
@@ -899,6 +929,9 @@ export class World3D {
     const list = game.treesIn(c.x - r, c.y - r, c.x + r, c.y + r, true, stride);
     // Sparser samples stand in for more trees, so draw them a bit bigger.
     const grow = 1 + (stride - 1) * 0.45;
+    const trees = stride > 1 ? this.treesLo : this.treesHi;
+    const other = stride > 1 ? this.treesHi : this.treesLo;
+    other.count = 0;
     for (const t of list) {
       if (n >= TREES_DRAWN) break;
       const d = Math.hypot(t.x - c.x, t.y - c.y);
@@ -906,29 +939,32 @@ export class World3D {
       // Thin the trees out toward the edge so the drawn forest blends into the tinted ground.
       if (noise2(t.x * 0.37, t.y * 0.37) < smooth(r * 0.7, r, d)) continue;
       const sc = (0.7 + noise2(t.x, t.y) * 0.9) * grow;
-      dummy.position.copy(to3(t.x, t.y, 8 * sc, this.mid));
-      dummy.scale.setScalar(sc);
+      // Some tall and narrow, some squat and broad.
+      const tall = 0.85 + noise2(t.y * 0.53, t.x * 0.41) * 0.4;
+      dummy.position.copy(to3(t.x, t.y, 8 * sc * tall, this.mid));
+      dummy.scale.set(sc / Math.sqrt(tall), sc * tall, sc / Math.sqrt(tall));
       dummy.rotation.set(0, t.x * 0.1, 0);
       dummy.updateMatrix();
-      this.trees.setMatrixAt(n, dummy.matrix);
+      trees.setMatrixAt(n, dummy.matrix);
       const v = noise2(t.x * 0.7, t.y * 0.7);
-      col.setHSL(0.38 + v * 0.06, 0.38 + v * 0.15, 0.17 + v * 0.07);
-      this.trees.setColorAt(n, col);
+      // Mostly spruce green; some bluer firs, some yellower pines.
+      col.setRGB(0.82 + v * 0.22, 0.86 + v * 0.18 - (v > 0.7 ? 0.06 : 0), 0.8 + (1 - v) * 0.2);
+      trees.setColorAt(n, col);
       n++;
     }
-    this.trees.count = n;
+    trees.count = n;
     this.layoutBoulders(c, r, stride);
-    this.trees.instanceMatrix.needsUpdate = true;
-    if (this.trees.instanceColor) this.trees.instanceColor.needsUpdate = true;
+    trees.instanceMatrix.needsUpdate = true;
+    if (trees.instanceColor) trees.instanceColor.needsUpdate = true;
     // Bounds are cached from the first layout; refresh them or trees on the
     // other mountains get frustum-culled.
-    this.trees.computeBoundingSphere();
-    this.trees.computeBoundingBox();
+    trees.computeBoundingSphere();
+    trees.computeBoundingBox();
   }
 
   /** The tree brush outline, draped on the ground under the pointer. */
   private syncBrush(game: Game): void {
-    const h = game.tool === "clearTrees" || game.tool === "shape" ? game.brushHover : null;
+    const h = game.tool === "clearTrees" || game.tool === "plantTrees" || game.tool === "shape" ? game.brushHover : null;
     this.brushRing.visible = !!h;
     if (!h) return;
     const pos = this.brushRing.geometry.getAttribute("position") as THREE.BufferAttribute;
@@ -956,8 +992,9 @@ export class World3D {
    */
   private syncCars(game: Game): void {
     const route = game.carRoute();
+    this.cars.begin();
     if (!route || route.length < 2) {
-      this.cars.count = 0;
+      this.cars.end();
       return;
     }
     const total = polylineLength(route);
@@ -976,15 +1013,15 @@ export class World3D {
       const lane = 2.3;
       const x = p.x - p.dy * lane * dir;
       const y = p.y + p.dx * lane * dir;
-      dummy.position.copy(onGround(x, y, 0.9, this.mid));
+      // Every so often a Semi hauls supplies up; otherwise the family cars.
+      const v: { model: VehicleModel; color: string } = i % 9 === 4 ? { model: "semi", color: "#f4f5f6" } : pickVehicle(i);
+      dummy.position.copy(onGround(x, y, 0.05, this.mid));
       dummy.rotation.set(0, Math.atan2(p.dx * dir, p.dy * dir), 0);
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
-      this.cars.setMatrixAt(i, dummy.matrix);
+      this.cars.add(v.model, dummy.matrix, this.carColor.set(v.color));
     }
-    this.cars.count = n;
-    this.cars.instanceMatrix.needsUpdate = true;
-    this.cars.computeBoundingSphere();
+    this.cars.end();
   }
 
   /** Boulders and outcrops wherever the ground is bare rock, near the view. */
@@ -1557,7 +1594,7 @@ function makeRateSprite(text: string): THREE.Sprite {
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
   if (PARKING[type]) return makeParkingMesh(type, ghost);
-  const g = new THREE.Group();
+  if (type === "cabin") return makeLogCabin(ghost);
   const palette: Record<string, { body: string; roof: string; w: number; d: number; h: number }> = {
     lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
     restroom: { body: "#d9d2c5", roof: "#4a5560", w: 10, d: 8, h: 7 },
@@ -1576,26 +1613,11 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     clinic: { body: "#f2f4f6", roof: "#c45c4a", w: 16, d: 12, h: 8 },
     rental: { body: "#e6dcc8", roof: "#2f5f7a", w: 18, d: 13, h: 8 },
     school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
+    cabinOffice: { body: "#efe4cc", roof: "#5a3a26", w: 16, d: 11, h: 8 },
     heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
   };
   const p = palette[type];
-  const bodyMat = new THREE.MeshStandardMaterial({ color: p.body, roughness: 0.8 });
-  const roofMat = new THREE.MeshStandardMaterial({ color: p.roof, roughness: 0.7 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(p.w, p.h, p.d), bodyMat);
-  body.position.y = p.h / 2;
-  body.castShadow = !ghost;
-  const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(p.w, p.d) * 0.62, type === "hotel" ? 8 : 5, 4), roofMat);
-  roof.position.y = p.h + (type === "hotel" ? 4 : 2.5);
-  roof.rotation.y = Math.PI / 4;
-  roof.castShadow = !ghost;
-  g.add(body, roof);
-  if (type === "lodge" || type === "hotel") {
-    const door = new THREE.Mesh(new THREE.BoxGeometry(4, 6, 0.6), new THREE.MeshStandardMaterial({ color: "#5c3317" }));
-    door.position.set(0, 3, p.d / 2 + 0.2);
-    g.add(door);
-  }
-  g.userData = { kind: "building" };
-  return g;
+  return makeChalet(p, { ghost, tall: p.h > 14, door: true });
 }
 
 /** Ticket booth, parking and the village boundary around the base. */
@@ -1606,16 +1628,23 @@ function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: numb
   hut.position.copy(to3(booth.x, booth.y, 0, mid));
   hut.userData = { kind: "hill" };
   g.add(hut);
-  const colors = ["#8b3a32", "#2e4a72", "#d5d0c4", "#355e3b"];
   const lot = new THREE.Mesh(new THREE.BoxGeometry(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
   lot.position.copy(to3(exit.x, exit.y, 0.2, mid));
   g.add(lot);
+  const fleet = new Fleet(CAR_MODELS, 60);
+  const m = new THREE.Object3D();
+  const c = new THREE.Color();
+  fleet.begin();
   for (let i = 0; i < 60; i++) {
     if (noise2(i * 1.3, 2) < 0.35) continue;
-    const car = new THREE.Mesh(new THREE.BoxGeometry(5, 2.2, 2.6), new THREE.MeshLambertMaterial({ color: colors[i % colors.length] }));
-    car.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 1.1, mid));
-    g.add(car);
+    m.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 0.4, mid));
+    m.rotation.set(0, Math.floor(i / 15) % 2 ? Math.PI : 0, 0);
+    m.updateMatrix();
+    const v = pickVehicle(i);
+    fleet.add(v.model, m.matrix, c.set(v.color));
   }
+  fleet.end();
+  g.add(fleet.group);
   // Village boundary: a dashed line draped on the snow.
   const pts: THREE.Vector3[] = [];
   for (let i = 0; i <= 180; i++) {
@@ -2248,16 +2277,26 @@ type CloudPuff = {
 const CLOUD_COUNT = 34;
 const CLOUD_SPAN = 36000;
 const SNOW_MAX = 9000;
-const SUN_HIGH = new THREE.Color("#fff3dc");
-const SUN_LOW = new THREE.Color("#ffb877");
+const SUN_HIGH = new THREE.Color("#ffe9c8");
+const SUN_LOW = new THREE.Color("#ffbd80");
 const OVERCAST_LIGHT = new THREE.Color("#dfe6ee");
-const HEMI_CLEAR = new THREE.Color("#cfe3ff");
+const HEMI_CLEAR = new THREE.Color("#b4d0f0");
 const HEMI_OVERCAST = new THREE.Color("#e4e9ef");
 const SKY_CLEAR = new THREE.Color("#9cc4dc");
 const SKY_LOW = new THREE.Color("#e9c6a6");
 const SKY_OVERCAST = new THREE.Color("#b4bfc8");
 const SKY_SNOW = new THREE.Color("#c9d0d6");
 const FOG_TINT = new THREE.Color("#d5dde4");
+const ZENITH_CLEAR = new THREE.Color("#3f78b8");
+const HORIZON_CLEAR = new THREE.Color("#d6e2ea");
+const HORIZON_LOW = new THREE.Color("#f0d6b8");
+const FOG_DENSITY = 0.000042;
+const EXPOSURE = 0.95;
+
+/** Post-processing runs at up to 1.5x so high-DPI screens stay smooth. */
+function postPixelRatio(): number {
+  return Math.min(devicePixelRatio || 1, 1.5);
+}
 const CLOUD_LIT = new THREE.Color("#ffffff");
 const CLOUD_LOW = new THREE.Color("#ffe2c6");
 const CLOUD_STORM = new THREE.Color("#8c96a2");
@@ -2383,23 +2422,6 @@ function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
   return mesh;
 }
 
-/** Little low-poly cars: body plus cabin, one colour each. */
-function makeCars(max: number): THREE.InstancedMesh {
-  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
-  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
-  cabin.translate(0, 0.8, -0.2);
-  const geo = mergeGeometries([body, cabin])!;
-  const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
-  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  const palette = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a"];
-  const c = new THREE.Color();
-  for (let i = 0; i < max; i++) mesh.setColorAt(i, c.set(palette[(i * 5) % palette.length]));
-  mesh.castShadow = true;
-  mesh.count = 0;
-  mesh.frustumCulled = false;
-  return mesh;
-}
-
 const BOULDERS_DRAWN = 16000;
 
 /** Faceted rocks: a low-poly dodecahedron, flat shaded, coloured per instance. */
@@ -2426,17 +2448,6 @@ function makeBrushRing(): THREE.LineLoop {
   ring.visible = false;
   return ring;
 }
-
-/** Car body plus cabin, length along z. */
-function carGeometry(): THREE.BufferGeometry {
-  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
-  body.translate(0, 0.45, 0);
-  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
-  cabin.translate(0, 1.25, -0.2);
-  return mergeGeometries([body, cabin])!;
-}
-
-const PARKED_COLORS = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a", "#6b3f78"];
 
 /**
  * Painted stalls in back-to-back rows with aisles between, and parked cars in
@@ -2468,21 +2479,19 @@ function parkingDeck(w: number, d: number, y: number, seed: number, fill: number
   stripes.count = n;
   const out: THREE.Object3D[] = [stripes];
   if (ghost) return out;
-  const cars = new THREE.InstancedMesh(carGeometry(), new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.5 }), spots.length);
+  const fleet = new Fleet(CAR_MODELS, spots.length);
   const c = new THREE.Color();
-  let k = 0;
+  fleet.begin();
   spots.forEach((s, i) => {
     if (noise2(i * 0.77 + seed, seed * 1.3) > fill) return;
     m.position.set(s.x, y, s.z + (noise2(i, seed) - 0.5) * 0.6);
     m.rotation.set(0, i % 2 ? Math.PI : 0, 0);
     m.updateMatrix();
-    cars.setMatrixAt(k, m.matrix);
-    cars.setColorAt(k, c.set(PARKED_COLORS[(i * 7 + seed) % PARKED_COLORS.length]));
-    k++;
+    const v = pickVehicle(i * 3 + seed);
+    fleet.add(v.model, m.matrix, c.set(v.color));
   });
-  cars.count = k;
-  cars.castShadow = true;
-  out.push(cars);
+  fleet.end();
+  out.push(fleet.group);
   return out;
 }
 
@@ -2578,7 +2587,7 @@ const T_PACKED = new THREE.Color("#dbe4ee");
 const T_WIND = new THREE.Color("#c3cfdc");
 const T_ROCK = new THREE.Color("#5f5b58");
 const T_ROCK_DARK = new THREE.Color("#433f3d");
-const T_FOREST = new THREE.Color("#3f5f4c");
+const T_FOREST = new THREE.Color("#2c4636");
 const T_TMP = new THREE.Color();
 
 /**

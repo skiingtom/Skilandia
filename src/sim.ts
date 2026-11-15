@@ -20,6 +20,7 @@ import {
   OPERATING_COST_PER_MIN,
   FeatureType,
   INCOME_PER_MIN,
+  CABIN_REACH,
   MAP_SCALE,
   MOVE_FEE,
   TRAIL_KIND_SPEC,
@@ -156,6 +157,12 @@ export class Game {
   roadVersion = 0;
   /** Circles of forest the player has felled with the tree brush. */
   clearings: { x: number; y: number; r: number }[] = [];
+  /** Trees the player has planted (on top of the procedural forest). */
+  planted: Vec2[] = [];
+  private plantedCells = new Map<number, Vec2[]>();
+  /** Tree planting: one tree per click, or a brush that fills an area. */
+  plantMode: "single" | "brush" = "brush";
+  treesPlanted = 0;
   treesFelled = 0;
   /** Shaping brush: mode, radius (m), and the stroke in progress. */
   shapeMode: SculptMode = "raise";
@@ -305,11 +312,15 @@ export class Game {
     const gx1 = Math.min(Math.floor(WORLD_W / TREE_CELL), Math.ceil(x1 / TREE_CELL));
     const gy1 = Math.min(Math.floor(WORLD_H / TREE_CELL), Math.ceil(y1 / TREE_CELL));
     const near = cleared ? this.clearersIn(x0 - 40, y0 - 40, x1 + 40, y1 + 40) : null;
-    // A stride > 1 samples every n-th cell, for a sparser far-off view.
-    const sx = Math.ceil(gx0 / stride) * stride;
-    const sy = Math.ceil(gy0 / stride) * stride;
-    for (let gy = sy; gy <= gy1; gy += stride) {
-      for (let gx = sx; gx <= gx1; gx += stride) {
+    // A stride > 1 samples one random cell from each stride x stride block,
+    // for a sparser far-off view that still doesn't fall into rows.
+    const sx = Math.floor(gx0 / stride) * stride;
+    const sy = Math.floor(gy0 / stride) * stride;
+    for (let by = sy; by <= gy1; by += stride) {
+      for (let bx = sx; bx <= gx1; bx += stride) {
+        const gx = stride > 1 ? bx + Math.floor(cellHash(bx, by, 7) * stride) : bx;
+        const gy = stride > 1 ? by + Math.floor(cellHash(bx, by, 8) * stride) : by;
+        if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1) continue;
         const t = forestCell(gx, gy);
         if (!t) continue;
         if (this.inVillage(t.x, t.y)) continue;
@@ -317,7 +328,103 @@ export class Game {
         out.push(t);
       }
     }
+    // Planted trees: a random share of them when sampling sparsely.
+    const keep = 1 / (stride * stride);
+    for (let cy = Math.floor(y0 / PLANT_CELL); cy <= Math.floor(y1 / PLANT_CELL); cy++) {
+      for (let cx = Math.floor(x0 / PLANT_CELL); cx <= Math.floor(x1 / PLANT_CELL); cx++) {
+        const list = this.plantedCells.get(cy * 4096 + cx);
+        if (!list) continue;
+        for (const t of list) {
+          if (t.x < x0 || t.x > x1 || t.y < y0 || t.y > y1) continue;
+          if (stride > 1 && treeHash(t.x, t.y) > keep) continue;
+          if (near && this.isCleared(t.x, t.y, near, true)) continue;
+          out.push(t);
+        }
+      }
+    }
     return out;
+  }
+
+  /** Clear a circle of forest: the procedural trees stay cleared, planted ones are dug up. */
+  private addClearing(x: number, y: number, r: number): void {
+    this.clearings.push({ x, y, r });
+    this.removePlanted(x, y, r);
+  }
+
+  private removePlanted(x: number, y: number, r: number): number {
+    let n = 0;
+    for (let cy = Math.floor((y - r) / PLANT_CELL); cy <= Math.floor((y + r) / PLANT_CELL); cy++) {
+      for (let cx = Math.floor((x - r) / PLANT_CELL); cx <= Math.floor((x + r) / PLANT_CELL); cx++) {
+        const key = cy * 4096 + cx;
+        const list = this.plantedCells.get(key);
+        if (!list) continue;
+        const kept = list.filter((t) => Math.hypot(t.x - x, t.y - y) >= r);
+        n += list.length - kept.length;
+        if (kept.length) this.plantedCells.set(key, kept);
+        else this.plantedCells.delete(key);
+      }
+    }
+    if (n) this.planted = [...this.plantedCells.values()].flat();
+    return n;
+  }
+
+  /** Why a tree can't be planted here, or null if it can. */
+  private plantError(x: number, y: number, near: ClearIndex, existing: Vec2[]): string | null {
+    if (x < 6 || y < 6 || x > WORLD_W - 6 || y > WORLD_H - 6) return "That's off the property.";
+    if (isRock(x, y) || rockAt(x, y) > 0.3) return "Nothing grows on bare rock.";
+    if (gradeAt(x, y) > 0.9) return "Too steep for a tree.";
+    if (elevationM(x, y) > TREELINE_M + 150) return "Too high: that's above the treeline.";
+    if (this.isCleared(x, y, near, true)) return "Keep trees off runs, lifts, roads and buildings.";
+    if (existing.some((t) => Math.hypot(t.x - x, t.y - y) < PLANT_GAP)) return "There's already a tree there.";
+    return null;
+  }
+
+  /** Plant one tree, or a brushful scattered around (x, y). */
+  private paintPlanting(x: number, y: number): "ok" | "shake" | "none" {
+    const single = this.plantMode === "single";
+    if (!single && this.lastBrush && Math.hypot(this.lastBrush.x - x, this.lastBrush.y - y) < BRUSH_R * 0.45) return "none";
+    const r = single ? PLANT_GAP : BRUSH_R;
+    const near = this.clearersIn(x - r - 40, y - r - 40, x + r + 40, y + r + 40);
+    const existing = this.treesIn(x - r - PLANT_GAP, y - r - PLANT_GAP, x + r + PLANT_GAP, y + r + PLANT_GAP);
+    const spots: Vec2[] = [];
+    if (single) {
+      const err = this.plantError(x, y, near, existing);
+      if (err) {
+        this.toast(err, true);
+        return "shake";
+      }
+      spots.push({ x, y });
+    } else {
+      for (let k = 0; k < 60 && spots.length < PLANT_PER_STAMP; k++) {
+        const a = Math.random() * Math.PI * 2;
+        const d = Math.sqrt(Math.random()) * BRUSH_R;
+        const p = { x: x + Math.cos(a) * d, y: y + Math.sin(a) * d };
+        if (!this.plantError(p.x, p.y, near, existing)) {
+          spots.push(p);
+          existing.push(p);
+        }
+      }
+      if (!spots.length) return "none";
+    }
+    const cost = this.freeTreeClearing ? 0 : spots.length * TREE_PLANT_COST;
+    if (cost > 0 && this.money < cost) {
+      this.toast(`Need $${(cost - this.money).toLocaleString()} more to plant trees.`, true);
+      return "shake";
+    }
+    this.money -= cost;
+    for (const p of spots) {
+      const key = Math.floor(p.y / PLANT_CELL) * 4096 + Math.floor(p.x / PLANT_CELL);
+      const list = this.plantedCells.get(key);
+      if (list) list.push(p);
+      else this.plantedCells.set(key, [p]);
+      this.planted.push(p);
+    }
+    this.treesPlanted += spots.length;
+    this.lastBrush = { x, y };
+    this.strokeCost += cost;
+    this.clearTrees();
+    if (single) this.endBrush();
+    return "ok";
   }
 
   /**
@@ -329,13 +436,13 @@ export class Game {
     const cell = 64;
     const cells = new Map<number, ClearShape[]>();
     const cols = Math.ceil((x1 - x0) / cell) + 1;
-    const add = (ax: number, ay: number, bx: number, by: number, r: number, glade = false) => {
+    const add = (ax: number, ay: number, bx: number, by: number, r: number, glade = false, brush = false) => {
       const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - x0) / cell));
       const i1 = Math.min(cols - 1, Math.floor((Math.max(ax, bx) + r - x0) / cell));
       const j0 = Math.max(0, Math.floor((Math.min(ay, by) - r - y0) / cell));
       const j1 = Math.floor((Math.min(y1, Math.max(ay, by) + r) - y0) / cell);
       if (i0 > i1 || j0 > j1) return;
-      const shape: ClearShape = { ax, ay, bx, by, r, glade };
+      const shape: ClearShape = { ax, ay, bx, by, r, glade, brush };
       for (let j = j0; j <= j1; j++) {
         for (let i = i0; i <= i1; i++) {
           const k = j * cols + i;
@@ -354,16 +461,18 @@ export class Game {
     for (const b of this.buildings) add(b.x, b.y, b.x, b.y, buildingRadius(b.type));
     for (const f of this.features) add(f.x, f.y, f.x, f.y, f.type === "halfpipe" ? 40 : 12);
     for (const [a, b, w] of this.roadSegsIn(x0, y0, x1, y1)) add(a.x, a.y, b.x, b.y, w / 2 + 5);
-    for (const c of this.clearings) add(c.x, c.y, c.x, c.y, c.r);
+    for (const c of this.clearings) add(c.x, c.y, c.x, c.y, c.r, false, true);
     return { x0, y0, cell, cols, cells };
   }
 
-  private isCleared(x: number, y: number, near: ClearIndex): boolean {
+  /** Is this spot kept clear of trees? Planted trees ignore old brushed clearings (a clearing digs up what was planted before it). */
+  private isCleared(x: number, y: number, near: ClearIndex, planted = false): boolean {
     const i = Math.floor((x - near.x0) / near.cell);
     const j = Math.floor((y - near.y0) / near.cell);
     const list = near.cells.get(j * near.cols + i);
     if (!list) return false;
     for (const c of list) {
+      if (planted && c.brush) continue;
       if (!nearSegment(c.ax, c.ay, c.bx, c.by, x, y, c.r)) continue;
       // Glades are thinned, not cleared: a narrow line down the middle, then every other tree.
       if (!c.glade || nearSegment(c.ax, c.ay, c.bx, c.by, x, y, 2.5) || treeHash(x, y) < 0.5) return true;
@@ -515,6 +624,8 @@ export class Game {
     if (this.has("clinic")) n += 0.1;
     if (this.has("rental")) n += 0.11;
     if (this.has("school")) n += 0.12;
+    // Ski-in / ski-out cabins: a little more appeal for each one, up to ten.
+    n += Math.min(10, this.skiInCabins()) * 0.025;
     if (this.has("heli")) n += 0.15;
     return Math.min(1.65, n);
   }
@@ -737,7 +848,7 @@ export class Game {
   setTool(tool: Tool): void {
     this.liftStart = null;
     this.moveId = null;
-    if (tool === "demolish" || tool === "clearTrees" || tool === "shape") {
+    if (tool === "demolish" || tool === "clearTrees" || tool === "plantTrees" || tool === "shape") {
       this.tool = tool;
       this.draft = [];
       this.selected = null;
@@ -1231,6 +1342,7 @@ export class Game {
 
   /** Brush radius for the current tool (tree brush or shaping). */
   brushRadius(): number {
+    if (this.tool === "plantTrees" && this.plantMode === "single") return 4;
     return this.tool === "shape" ? this.shapeRadius : BRUSH_R;
   }
 
@@ -1259,7 +1371,7 @@ export class Game {
     this.shapeAt = { x, y };
     // Earthworks bulldoze the forest they pass over.
     if (!this.shapeCleared || Math.hypot(this.shapeCleared.x - x, this.shapeCleared.y - y) > this.shapeRadius * 0.4) {
-      this.clearings.push({ x, y, r: this.shapeRadius * 0.85 });
+      this.addClearing(x, y, this.shapeRadius * 0.85);
       this.shapeCleared = { x, y };
     }
     this.terrainEdited(r.box);
@@ -1323,7 +1435,7 @@ export class Game {
       const b = points[Math.min(points.length - 1, i + 1)];
       const len = Math.hypot(b.x - a.x, b.y - a.y);
       const n = Math.max(1, Math.ceil(len / (r * 0.9)));
-      for (let k = 0; k < n; k++) this.clearings.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n, r });
+      for (let k = 0; k < n; k++) this.addClearing(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n, r);
     }
   }
 
@@ -1400,7 +1512,7 @@ export class Game {
       return "shake";
     }
     this.money -= cost;
-    this.clearings.push({ x, y, r: BRUSH_R });
+    this.addClearing(x, y, BRUSH_R);
     this.lastBrush = { x, y };
     this.treesFelled += n;
     this.clearTrees();
@@ -1584,9 +1696,13 @@ export class Game {
     if (!anywhere && !midMountain && !this.villageOk(x, y)) {
       return this.inVillage(x, y) ? "Too steep to build here." : "Build in the base village.";
     }
+    if (type === "cabin" && !this.has("cabinOffice")) return "Open a cabin rental office in the village first.";
     if (midMountain && !anywhere && this.inVillage(x, y)) return "Put this on the mountain, not in the village.";
+    if (type === "cabin" && !this.trails.some((t) => distToTrail(t, x, y) < CABIN_REACH)) {
+      return `Cabins are ski-in / ski-out: put it within ${CABIN_REACH} m of a run.`;
+    }
     if (x < 12 || x > WORLD_W - 12 || y < 24 || y > WORLD_H - 12) return "That's off the property.";
-    const minGap = type === "shack" ? 22 : type === "heli" ? 60 : 38;
+    const minGap = type === "shack" ? 22 : type === "cabin" ? 24 : type === "heli" ? 60 : 38;
     if (others.some((b) => Math.hypot(b.x - x, b.y - y) < minGap)) return "Too close to another building.";
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
@@ -1603,6 +1719,7 @@ export class Game {
     if (this.tool === "road") return this.clickRoad(x, y);
     if (this.tool === "demolish") return this.demolishAt(x, y);
     if (this.tool === "clearTrees") return this.paintClearing(x, y);
+    if (this.tool === "plantTrees") return this.paintPlanting(x, y);
     if (this.tool === "shape") return "none"; // shaping happens while the button is held
     if (this.tool === "move") return this.clickMove(x, y);
     const ft = this.featureTool();
@@ -1693,6 +1810,10 @@ export class Game {
         clinic: "Bandages and ice packs. Can sit on the mountain.",
         rental: "Boots and boards for day-trippers.",
         school: `Lessons for beginners. Needs instructors: ${this.staff.instructor} hired.`,
+        cabinOffice: `Rents out hillside cabins. ${this.count("cabin")} cabin${this.count("cabin") === 1 ? "" : "s"} on the books, ${this.skiInCabins()} ski-in / ski-out.`,
+        cabin: this.cabinOnRun(b)
+          ? "Ski-in / ski-out: guests step out the door onto a run. Fully booked."
+          : `No run within ${CABIN_REACH} m any more, so it rents for a fraction of the price. Cut a run past it.`,
         heli: "",
       };
       if (b.type === "heli") {
@@ -1849,7 +1970,9 @@ export class Game {
     this.float(x, y, `-${COSTS[type]}`, "#d9785f");
     this.tool = "select";
     this.selected = { kind: "building", id: b.id };
-    if (type === "lodge") {
+    if (type === "cabinOffice") {
+      this.toast(`Cabin rental office is open. Build ski-in cabins beside your runs (Resort menu); each earns $${INCOME_PER_MIN.cabin}/min.`);
+    } else if (type === "lodge") {
       this.toast(`Lodge is open. Earns $${INCOME_PER_MIN.lodge}/min and unlocks ticket prices.`);
     } else {
       this.toast(
@@ -2007,7 +2130,7 @@ export class Game {
     if (!this.buildings.length) return 0;
     const busy = clamp(this.skiers.length / 200, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
-    return Math.round(this.buildings.reduce((n, b) => n + INCOME_PER_MIN[b.type] * this.buildingFactor(b.type), 0) * util);
+    return Math.round(this.buildings.reduce((n, b) => n + INCOME_PER_MIN[b.type] * this.buildingEarnFactor(b), 0) * util);
   }
 
   private collectBuildingIncome(dt: number): void {
@@ -2015,7 +2138,7 @@ export class Game {
     const busy = clamp(this.skiers.length / 200, 0, 1);
     const util = (0.35 + 0.65 * busy) * this.staffCoverage();
     for (const b of this.buildings) {
-      const gain = (INCOME_PER_MIN[b.type] / 60) * util * this.buildingFactor(b.type) * dt;
+      const gain = (INCOME_PER_MIN[b.type] / 60) * util * this.buildingEarnFactor(b) * dt;
       if (gain <= 0) continue;
       this.money += gain;
       this.incomeToday += gain;
@@ -2038,9 +2161,28 @@ export class Game {
       const cap = this.parkingCapacity();
       return cap ? clamp(this.skiers.length / cap, 0, 1) : 0;
     }
+    if (type === "cabin") return 1;
     if (type !== "school") return 1;
     const need = Math.max(1, this.staffNeeds().instructor);
     return Math.min(1, this.staff.instructor / need);
+  }
+
+  /** Is a run close enough to ski to and from this cabin's door? */
+  cabinOnRun(b: Vec2): boolean {
+    return this.trails.some((t) => distToTrail(t, b.x, b.y) < CABIN_REACH);
+  }
+
+  /** Cabins that are rentable as ski-in / ski-out (an office open and a run at the door). */
+  skiInCabins(): number {
+    if (!this.has("cabinOffice")) return 0;
+    return this.buildings.filter((b) => b.type === "cabin" && this.cabinOnRun(b)).length;
+  }
+
+  /** Per-building earnings factor (cabins depend on their office and a run nearby). */
+  private buildingEarnFactor(b: Building): number {
+    if (b.type !== "cabin") return this.buildingFactor(b.type);
+    if (!this.has("cabinOffice")) return 0;
+    return this.cabinOnRun(b) ? 1 : 0.3;
   }
 
   /** Running costs for buildings that have them. */
@@ -2741,6 +2883,11 @@ const SALVAGE = 0.4;
 /** Radius of the tree-clearing brush, and what each tree costs to fell. */
 export const BRUSH_R = 30;
 export const TREE_FELL_COST = 4;
+/** What a planted sapling costs, how many one brush stamp plants, and how close trees may stand. */
+export const TREE_PLANT_COST = 12;
+const PLANT_PER_STAMP = 9;
+const PLANT_GAP = 6;
+const PLANT_CELL = 64;
 
 export type DemolishTarget = {
   kind: "building" | "feature" | "lift" | "trail" | "road";
@@ -2749,8 +2896,16 @@ export type DemolishTarget = {
   refund: number;
 };
 
-type ClearShape = { ax: number; ay: number; bx: number; by: number; r: number; glade: boolean };
+type ClearShape = { ax: number; ay: number; bx: number; by: number; r: number; glade: boolean; brush?: boolean };
 type ClearIndex = { x0: number; y0: number; cell: number; cols: number; cells: Map<number, ClearShape[]> };
+
+/** Stable, well-mixed 0..1 value per grid cell (and salt). */
+function cellHash(gx: number, gy: number, salt: number): number {
+  let h = Math.imul(gx | 0, 374761393) ^ Math.imul(gy | 0, 668265263) ^ Math.imul(salt, 2246822519);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
 
 /** Stable 0..1 value per tree position. */
 function treeHash(x: number, y: number): number {
@@ -2769,10 +2924,17 @@ export function forestDensity(x: number, y: number): number {
 
 /** One possible tree per forest cell: where it stands, or null for a clearing. */
 function forestCell(gx: number, gy: number): Vec2 | null {
-  const x = (gx + noise2(gx * 7.13, gy * 3.71)) * TREE_CELL;
-  const y = (gy + noise2(gx * 2.91, gy * 6.37)) * TREE_CELL;
+  // An independent random spot anywhere in (and a little past) the cell, so
+  // neighbours don't line up into rows.
+  const x = (gx + 0.5 + (cellHash(gx, gy, 1) - 0.5) * 1.35) * TREE_CELL;
+  const y = (gy + 0.5 + (cellHash(gx, gy, 2) - 0.5) * 1.35) * TREE_CELL;
   if (x < 4 || y < 4 || x > WORLD_W - 4 || y > WORLD_H - 4) return null;
-  if (forestDensity(x, y) < 0.42) return null;
+  const density = forestDensity(x, y);
+  if (density < 0.42) return null;
+  // Natural gaps and clumps: thinner stands drop more trees, and small
+  // clumping noise keeps even dense forest from looking planted.
+  const clump = noise2(x / 38, y / 38);
+  if (cellHash(gx, gy, 3) > 0.35 + (density - 0.42) * 1.4 + clump * 0.45) return null;
   if (rockAt(x, y) > 0.3) return null;
   if (gradeAt(x, y) > 0.9) return null; // cliffs
   return { x, y };
