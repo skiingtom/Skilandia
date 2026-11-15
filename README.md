@@ -62,6 +62,12 @@ Run difficulty uses real-world pitches: green under 25%, blue under 40%, black u
 - Cutting a run clears the forest in its path. **Glades** are drawn through the trees instead: they're thinned, not cleared, marked with boundary poles, and rate one notch harder
 - Skiers only ski on runs. They never cut through the woods
 - Park features: rails, boxes and halfpipes go inside a terrain park; jumps go on any run
+- Forest covers the mountain up to the treeline (about 1,950 m). Above it, bare rock outcrops take over, more of them the higher you go. Runs can't be cut through rock, so route them down the snow between the outcrops. Lifts can pass over rock
+
+### Edit
+
+- **Clear trees**: click or drag over the forest to fell it ($4 a tree, 60 m brush)
+- **Demolish**: click a building, lift, run, park feature or road to take it down. Buildings, lifts and features give 40% back, roads 25%, runs are free to remove (their park features go with them). The highway can't be removed, and you always keep at least one lift. The ground stays cleared where something stood
 
 ### Lifts
 

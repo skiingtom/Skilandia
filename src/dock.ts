@@ -15,6 +15,9 @@ import {
   UNIT_M,
   liftCost,
 } from "./types";
+import { BRUSH_R, TREE_FELL_COST } from "./sim";
+
+const SALVAGE_SHARE = 0.4;
 
 /** Compact build bar: one icon per category; categories with options open a submenu. */
 
@@ -22,6 +25,7 @@ const svg = (body: string) =>
   `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 const ICONS = {
+  edit: svg('<path d="M14 4l6 6"/><path d="M17 7L7 17"/><path d="M4 20l3-3"/><path d="M12 2l2 2-4 4-2-2z"/>'),
   road: svg('<path d="M8 3L4 21"/><path d="M16 3l4 18"/><path d="M12 4v3M12 10v3M12 16v3"/>'),
   look: svg('<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>'),
   trail: svg('<path d="M6 3c5 2 8 4 3 7s-3 6 3 7 6 3 5 4"/><path d="M6 3v5"/><path d="M6 3l4 1.4L6 6"/>'),
@@ -49,6 +53,7 @@ export const DOCK_GROUPS: DockGroup[] = [
   { id: "base", label: "Base", items: ["lodge", "restroom", "rental", "school", "clinic", "patrol"] },
   { id: "food", label: "Food", items: ["shack", "coffee", "cafeteria", "sandwich", "bar", "restaurant"] },
   { id: "resort", label: "Resort", items: ["shop", "hostel", "condo", "spa", "hotel", "heli"] },
+  { id: "edit", label: "Edit", items: ["clearTrees", "demolish"] },
 ];
 
 export function groupOf(tool: Tool): string | null {
@@ -66,6 +71,20 @@ const LIFT_UNIT: Record<LiftType, string> = {
 };
 
 function itemHtml(tool: Tool): string {
+  if (tool === "demolish") {
+    return `<button type="button" class="tool item" data-tool="demolish">
+      <b>Demolish</b>
+      <small>${Math.round(SALVAGE_SHARE * 100)}% back · roads 25% · runs free</small>
+      <em>Click a building, lift, run, park feature or road to take it down.</em>
+    </button>`;
+  }
+  if (tool === "clearTrees") {
+    return `<button type="button" class="tool item" data-tool="clearTrees">
+      <b>Clear trees</b>
+      <small>$${TREE_FELL_COST} a tree · ${BRUSH_R * 2} m brush</small>
+      <em>Click or drag over the forest to fell it.</em>
+    </button>`;
+  }
   if (tool.startsWith("trail:")) {
     const k = tool.slice(6) as TrailKind;
     const spec = TRAIL_KIND_SPEC[k];
@@ -115,7 +134,7 @@ export function buildDock(dock: HTMLElement, menus: HTMLElement): void {
   ).join("");
   menus.innerHTML = DOCK_GROUPS.filter((g) => g.items)
     .map(
-      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
+      (g) => `<div class="dock-panel hidden${g.id === "lifts" || g.id === "trail" || g.id === "park" || g.id === "edit" ? " wide" : ""}" data-group="${g.id}" role="menu" aria-label="${g.label}">
         ${g.items!.map(itemHtml).join("")}
       </div>`,
     )

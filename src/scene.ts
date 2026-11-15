@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength } from "./height";
+import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt } from "./height";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { Game } from "./sim";
-import { SUMMITS, classifyGrade, forestDensity } from "./sim";
+import { BRUSH_R, SUMMITS, classifyGrade, forestDensity } from "./sim";
 import {
   BuildingType,
   DIFF,
@@ -118,6 +118,9 @@ export class World3D {
   private featureGroup = new THREE.Group();
   private peakGroup = new THREE.Group();
   private trees: THREE.InstancedMesh;
+  private boulders = makeBoulders(BOULDERS_DRAWN);
+  private brushRing = makeBrushRing();
+  private lastTreeLayout = 0;
   private helicopter = makeHelicopter();
   private rotorSpin = 0;
   private mid: MountainId = 0;
@@ -189,7 +192,7 @@ export class World3D {
     this.addGround();
     this.loadMountain(0);
     this.trees = this.makeEmptyTrees();
-    this.scene.add(this.trees);
+    this.scene.add(this.trees, this.boulders, this.brushRing);
     this.scene.add(this.roadGroup, this.cars);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
@@ -425,6 +428,7 @@ export class World3D {
     this.applySlopeColors(this.slopeView || game.tool === "cut" || surfaceLift);
     this.syncStatic(game);
     this.syncRoads(game);
+    this.syncBrush(game);
     this.syncCars(game);
     this.syncTrees(game);
     this.syncLift(game);
@@ -550,7 +554,7 @@ export class World3D {
         if (g < 0.25) c.copy(groomed);
         else if (g < 0.45) c.copy(groomed).lerp(packed, (g - 0.25) / 0.2);
         else c.copy(packed).lerp(wind, Math.min(1, (g - 0.45) / 0.25));
-        const rockAmt = smooth(0.62, 0.98, g + (streak - 0.5) * 0.35);
+        const rockAmt = Math.max(smooth(0.62, 0.98, g + (streak - 0.5) * 0.35), smooth(0.3, 0.7, rockAt(x, y)) * 0.95);
         if (rockAmt > 0) c.lerp(streak > 0.55 ? rockDark : rock, rockAmt * 0.92);
         // Woods read as a dark tint from far away; real trees are drawn near the camera.
         const woods = smooth(0.3, 0.6, forestDensity(x, y)) * (1 - rockAmt);
@@ -809,7 +813,7 @@ export class World3D {
   }
 
   private syncStatic(game: Game): void {
-    const key = `${game.currentMountain}:${game.trails.length}:${game.buildings.map((b) => `${b.id}@${Math.round(b.x)},${Math.round(b.y)}`).join(",")}:${game.forestVersion}:${game.features.length}:${game.selected?.kind}:${game.selected?.id}:${game.conquered.size}:${game.lifts.map((l) => l.id).join(",")}`;
+    const key = `${game.currentMountain}:${game.trails.map((t) => t.id).join(",")}:${game.buildings.map((b) => `${b.id}@${Math.round(b.x)},${Math.round(b.y)}`).join(",")}:${game.forestVersion}:${game.features.map((f) => f.id).join(",")}:${game.selected?.kind}:${game.selected?.id}:${game.conquered.size}:${game.lifts.map((l) => l.id).join(",")}`;
     if (key === this.stamp) return;
     this.stamp = key;
     this.treeVersion = -1;
@@ -869,6 +873,10 @@ export class World3D {
     const g = from3(new THREE.Vector3(tgt.x + ahead.x, tgt.y, tgt.z + ahead.z), this.mid);
     const moved = Math.hypot(g.x - this.treeCentre.x, g.y - this.treeCentre.y) > radius * 0.3;
     if (!moved && radius === this.treeRadius && this.treeVersion === game.forestVersion) return;
+    // While you drag the tree brush, redraw the forest a few times a second, not every stamp.
+    const now = performance.now();
+    if (!moved && radius === this.treeRadius && now - this.lastTreeLayout < 140) return;
+    this.lastTreeLayout = now;
     this.treeCentre = g;
     this.treeRadius = radius;
     this.treeVersion = game.forestVersion;
@@ -903,12 +911,28 @@ export class World3D {
       n++;
     }
     this.trees.count = n;
+    this.layoutBoulders(c, r, stride);
     this.trees.instanceMatrix.needsUpdate = true;
     if (this.trees.instanceColor) this.trees.instanceColor.needsUpdate = true;
     // Bounds are cached from the first layout; refresh them or trees on the
     // other mountains get frustum-culled.
     this.trees.computeBoundingSphere();
     this.trees.computeBoundingBox();
+  }
+
+  /** The tree brush outline, draped on the ground under the pointer. */
+  private syncBrush(game: Game): void {
+    const h = game.tool === "clearTrees" ? game.brushHover : null;
+    this.brushRing.visible = !!h;
+    if (!h) return;
+    const pos = this.brushRing.geometry.getAttribute("position") as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const a = (i / pos.count) * Math.PI * 2;
+      const p = onGround(h.x + Math.cos(a) * BRUSH_R, h.y + Math.sin(a) * BRUSH_R, 1.5, this.mid);
+      pos.setXYZ(i, p.x, p.y, p.z);
+    }
+    pos.needsUpdate = true;
+    this.brushRing.geometry.computeBoundingSphere();
   }
 
   private syncRoads(game: Game): void {
@@ -954,6 +978,43 @@ export class World3D {
     this.cars.count = n;
     this.cars.instanceMatrix.needsUpdate = true;
     this.cars.computeBoundingSphere();
+  }
+
+  /** Boulders and outcrops wherever the ground is bare rock, near the view. */
+  private layoutBoulders(c: { x: number; y: number }, r: number, stride: number): void {
+    const dummy = this.tmp;
+    const col = new THREE.Color();
+    const step = 17 * stride;
+    const grow = 1 + (stride - 1) * 0.5;
+    let n = 0;
+    for (let y = Math.floor((c.y - r) / step) * step; y <= c.y + r && n < BOULDERS_DRAWN; y += step) {
+      for (let x = Math.floor((c.x - r) / step) * step; x <= c.x + r && n < BOULDERS_DRAWN; x += step) {
+        const jx = x + (noise2(x * 0.13, y * 0.29) - 0.5) * step;
+        const jy = y + (noise2(x * 0.31, y * 0.17) - 0.5) * step;
+        if (Math.hypot(jx - c.x, jy - c.y) > r) continue;
+        const h = noise2(jx * 0.71, jy * 0.53);
+        if (h < 0.42) continue;
+        const rock = rockAt(jx, jy);
+        if (rock < 0.5) continue;
+        // Bigger lumps toward the heart of an outcrop, rubble at its edge.
+        // A few big crags among the rubble.
+        const crag = noise2(jx * 0.05 + 9, jy * 0.05) > 0.62 ? 1.9 : 1;
+        const size = (2 + Math.pow(h, 2) * 9 + (rock - 0.5) * 12) * crag * grow;
+        dummy.position.copy(onGround(jx, jy, size * 0.2, this.mid));
+        dummy.scale.set(size * (0.8 + h * 0.6), size * (0.45 + noise2(jx, jy) * 0.5), size * (0.8 + (1 - h) * 0.5));
+        dummy.rotation.set((h - 0.5) * 0.5, jx * 0.37 + jy * 0.11, (noise2(jy, jx) - 0.5) * 0.4);
+        dummy.updateMatrix();
+        this.boulders.setMatrixAt(n, dummy.matrix);
+        const v = noise2(jx * 0.9, jy * 0.9);
+        col.setHSL(0.07 + v * 0.04, 0.05 + v * 0.05, 0.27 + v * 0.14);
+        this.boulders.setColorAt(n, col);
+        n++;
+      }
+    }
+    this.boulders.count = n;
+    this.boulders.instanceMatrix.needsUpdate = true;
+    if (this.boulders.instanceColor) this.boulders.instanceColor.needsUpdate = true;
+    this.boulders.computeBoundingSphere();
   }
 
   private layoutTrails(game: Game): void {
@@ -2325,4 +2386,31 @@ function makeCars(max: number): THREE.InstancedMesh {
   mesh.count = 0;
   mesh.frustumCulled = false;
   return mesh;
+}
+
+const BOULDERS_DRAWN = 16000;
+
+/** Faceted rocks: a low-poly dodecahedron, flat shaded, coloured per instance. */
+function makeBoulders(max: number): THREE.InstancedMesh {
+  const geo = new THREE.DodecahedronGeometry(1, 0);
+  const mesh = new THREE.InstancedMesh(
+    geo,
+    new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.95, flatShading: true }),
+    max,
+  );
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.count = 0;
+  return mesh;
+}
+
+function makeBrushRing(): THREE.LineLoop {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(64 * 3), 3));
+  const ring = new THREE.LineLoop(geo, new THREE.LineBasicMaterial({ color: "#ffd166", depthTest: false, transparent: true }));
+  ring.renderOrder = 10;
+  ring.frustumCulled = false;
+  ring.visible = false;
+  return ring;
 }

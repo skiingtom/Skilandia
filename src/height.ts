@@ -251,3 +251,28 @@ export function nearSegment(
   const t = Math.max(0, Math.min(1, ((x - ax) * abx + (y - ay) * aby) / (abx * abx + aby * aby || 1)));
   return Math.hypot(x - (ax + abx * t), y - (ay + aby * t)) < pad;
 }
+
+/** Above this the forest gives out and bare rock starts to take over. */
+export const TREELINE_M = 1950;
+const ROCK_START_M = 1880;
+const ROCK_FULL_M = 2380;
+
+/**
+ * How rocky a spot is (0..1). None below the rock line; above it, outcrops
+ * cover more and more of the mountain, plus every cliff. Anything over 0.5 is
+ * bare rock: trees don't grow there and runs have to be routed around it.
+ */
+export function rockAt(x: number, y: number): number {
+  const m = elevationM(x, y) + (noise2(x / 600 + 17, y / 600) - 0.5) * 160;
+  if (m < ROCK_START_M) return 0;
+  const alt = smoothstepN(ROCK_START_M, ROCK_FULL_M, m);
+  const n = noise2(x / 240 + 3, y / 200 + 9) * 0.6 + noise2(x / 85, y / 85) * 0.4;
+  const thr = 0.74 - 0.22 * alt;
+  const patch = smoothstepN(thr, thr + 0.06, n) * smoothstepN(0, 0.15, alt);
+  const cliff = smoothstepN(0.8, 1.05, gradeAt(x, y)) * Math.min(1, alt * 3);
+  return Math.max(patch, cliff);
+}
+
+export function isRock(x: number, y: number): boolean {
+  return rockAt(x, y) > 0.5;
+}

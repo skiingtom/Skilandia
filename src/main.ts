@@ -2,7 +2,8 @@ import { AudioBus } from "./audio";
 import { DOCK_GROUPS, buildDock, groupOf } from "./dock";
 import { ROAD_COST_PER_M, ROAD_MAX_GRADE } from "./roads";
 import { World3D } from "./scene";
-import { Game, SUMMITS } from "./sim";
+import { Game, SUMMITS, TREE_FELL_COST } from "./sim";
+let brushHint = "";
 import {
   BUILDING_LABEL,
   BUILDING_MAX,
@@ -176,7 +177,7 @@ function paintHud(force = false): void {
   document.querySelectorAll<HTMLButtonElement>(".tool[data-tool]").forEach((btn) => {
     const tool = btn.dataset.tool as Tool;
     btn.classList.toggle("on", game.tool === tool || (game.tool === "cut" && tool === `trail:${game.trailKind}`));
-    if (tool === "select" || tool === "cut" || tool === "road" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
+    if (tool === "select" || tool === "cut" || tool === "road" || tool === "demolish" || tool === "clearTrees" || tool.startsWith("trail:") || tool.startsWith("feature:")) {
       btn.disabled = false;
       return;
     }
@@ -341,6 +342,27 @@ function loop(now: number): void {
         pv.error ??
         `Click to set the top · ${Math.round(pv.length * UNIT_M)} m long · ${Math.round(pv.rise)} m rise · $${pv.cost.toLocaleString()}`;
     }
+  } else if (pointer.over && game.tool === "demolish") {
+    world.hideGhost();
+    game.brushHover = null;
+    const hit = world.hitAt(pointer.x, pointer.y);
+    const t = hit && hit.mountain === game.currentMountain ? game.demolishTarget(hit.x, hit.y) : null;
+    placeHint.classList.remove("hidden");
+    placeHint.classList.toggle("ok", !!t);
+    placeHint.textContent = t
+      ? `Click to demolish ${t.kind === "trail" ? `the run “${t.label}”` : t.label.toLowerCase() === "road" ? "this road" : t.label}${t.refund ? ` · salvage $${t.refund.toLocaleString()}` : ""}`
+      : "Demolish: point at a building, lift, run, park feature or road.";
+  } else if (pointer.over && game.tool === "clearTrees") {
+    world.hideGhost();
+    const hit = world.hitAt(pointer.x, pointer.y);
+    game.brushHover = hit && hit.mountain === game.currentMountain ? { x: hit.x, y: hit.y } : null;
+    if (hudAcc === 0 || !brushHint) {
+      const n = game.brushHover ? game.treesUnderBrush(game.brushHover.x, game.brushHover.y) : 0;
+      brushHint = n ? `Click or drag to clear ${n} trees · $${(n * TREE_FELL_COST).toLocaleString()}` : "Clear trees: click or drag over the forest.";
+    }
+    placeHint.classList.remove("hidden");
+    placeHint.classList.add("ok");
+    placeHint.textContent = `${brushHint} · ${game.treesFelled.toLocaleString()} felled so far`;
   } else if (pointer.over && game.tool !== "select" && game.tool !== "cut" && game.tool !== "road") {
     const hit = world.hitAt(pointer.x, pointer.y);
     const feature = game.featureTool();
@@ -388,8 +410,16 @@ canvas.addEventListener("pointermove", (e) => {
   if (hit && game.tool === "select") game.moveHover(hit.x, hit.y);
 });
 
+canvas.addEventListener("pointermove", (e) => {
+  // Drag the tree brush with the left button held.
+  if (game.tool !== "clearTrees" || !(e.buttons & 1)) return;
+  const hit = world.hitAt(e.clientX, e.clientY);
+  if (hit && hit.mountain === game.currentMountain && game.click(hit.x, hit.y) === "ok") audio.click();
+});
+
 canvas.addEventListener("pointerleave", () => {
   pointer.over = false;
+  game.brushHover = null;
 });
 
 canvas.addEventListener("pointerdown", (e) => {
@@ -399,6 +429,15 @@ canvas.addEventListener("pointerdown", (e) => {
 
 canvas.addEventListener("pointerup", (e) => {
   if (!game.managing) return;
+  if (game.tool === "clearTrees") {
+    if (e.button === 0) {
+      const hit = world.hitAt(e.clientX, e.clientY);
+      if (hit && hit.mountain === game.currentMountain && game.click(hit.x, hit.y) === "shake") audio.error();
+    }
+    game.endBrush();
+    paintHud();
+    return;
+  }
   if (e.button !== 0) return;
   if (Math.hypot(e.clientX - pointer.downX, e.clientY - pointer.downY) > 6) return;
   const hit = world.hitAt(e.clientX, e.clientY);

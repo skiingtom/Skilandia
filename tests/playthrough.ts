@@ -5,7 +5,7 @@
  *
  * Run with: npm test
  */
-import { elevationM } from "../src/height";
+import { elevationM, isRock } from "../src/height";
 import { nearestOnRoad } from "../src/roads";
 import { Game, SUMMITS, nearestOnTrail } from "../src/sim";
 import { BASE, TIERS, TRAIL_KIND_SPEC, Vec2 } from "../src/types";
@@ -178,6 +178,101 @@ console.log({
   forestVersion: g.forestVersion,
 });
 ok(g.totalTickets > 100, "hardly anyone came");
+
+// --- the tree brush: fells standing trees, charges per tree, and they stay gone
+{
+  let spot: Vec2 | null = null;
+  for (let a = 0; a < 36 && !spot; a++) {
+    for (const d of [700, 900, 1200]) {
+      const p = { x: BASE.x + Math.cos(a / 5.7) * d, y: BASE.y + Math.sin(a / 5.7) * d };
+      if (g.treesUnderBrush(p.x, p.y) > 10) {
+        spot = p;
+        break;
+      }
+    }
+  }
+  ok(!!spot, "no forest to test the brush on");
+  if (spot) {
+    const n = g.treesUnderBrush(spot.x, spot.y);
+    const money = g.money;
+    g.setTool("clearTrees");
+    ok(g.click(spot.x, spot.y) === "ok", "brush should fell trees");
+    ok(g.treesUnderBrush(spot.x, spot.y) === 0, "trees still standing under the brush");
+    ok(Math.abs(money - g.money - n * 4) < 1, `brush charged ${money - g.money} for ${n} trees`);
+    g.endBrush();
+  }
+}
+
+// --- rocks: above the rock line, a run can't be cut straight through an outcrop
+{
+  let found = false;
+  for (let x = 2000; x < 26000 && !found; x += 97) {
+    for (let y = 2000; y < 15000 && !found; y += 89) {
+      if (!isRock(x, y) || elevationM(x, y) < 2100) continue;
+      // Snow above and below the outcrop, along the fall line.
+      const a = { x, y: y - 90 };
+      const b = { x, y: y + 90 };
+      if (isRock(a.x, a.y) || isRock(b.x, b.y)) continue;
+      const [hi, lo] = elevationM(a.x, a.y) > elevationM(b.x, b.y) ? [a, b] : [b, a];
+      if (elevationM(hi.x, hi.y) - elevationM(lo.x, lo.y) < 15) continue;
+      found = true;
+      g.setTool("trail:slope");
+      ok(g.click(hi.x, hi.y) === "ok", "run should start on snow");
+      ok(g.click(lo.x, lo.y) === "shake", "run went straight through rock");
+      g.cancel();
+    }
+  }
+  ok(found, "found no outcrop to test against");
+}
+
+// --- demolish: one of each kind, with salvage, and the hill keeps working
+{
+  const pickOne = <T,>(xs: T[]) => xs[xs.length - 1];
+  const demolish = (x: number, y: number, kind: string) => {
+    g.setTool("demolish");
+    const t = g.demolishTarget(x, y);
+    ok(t?.kind === kind, `demolish at ${kind} found ${t?.kind}`);
+    const money = g.money;
+    const r = g.click(x, y);
+    ok(r === "ok", `demolish ${kind} failed: ${g.toasts.at(-1)?.text}`);
+    ok(g.money - money === (t?.refund ?? 0), `${kind} salvage mismatch`);
+  };
+  const shop = pickOne(g.buildings.filter((b) => b.type !== "heli"));
+  ok(!!shop, "no building to demolish");
+  if (shop) {
+    demolish(shop.x, shop.y, "building");
+    ok(!g.buildings.includes(shop), "building still there");
+  }
+  const jump = g.features.find((f) => f.type === "jump");
+  if (jump) demolish(jump.x, jump.y, "feature");
+  const moguls = g.trails.find((t) => t.kind === "moguls")!;
+  const mid = moguls.points[1];
+  demolish(mid.x, mid.y, "trail");
+  ok(!g.trails.includes(moguls), "trail still there");
+  ok(g.treesIn(mid.x - 5, mid.y - 5, mid.x + 5, mid.y + 5).length === 0, "trees sprang back on a demolished run");
+  const lastLift = g.lifts[g.lifts.length - 1];
+  const lm = { x: (lastLift.bottom.x + lastLift.top.x) / 2, y: (lastLift.bottom.y + lastLift.top.y) / 2 };
+  demolish(lm.x, lm.y, "lift");
+  ok(!g.lifts.includes(lastLift), "lift still there");
+  // The access road: tearing it out cuts off the lot; rebuilding reconnects it.
+  const road = g.roads.find((r) => !r.highway)!;
+  const rp = { x: (road.points[0].x + road.points[1].x) / 2, y: (road.points[0].y + road.points[1].y) / 2 };
+  demolish(rp.x, rp.y, "road");
+  ok(!g.roadConnected(), "lot still connected after its road was demolished");
+  g.setTool("demolish");
+  const hw = g.roads[0].points[5];
+  ok(g.demolishTarget(hw.x, hw.y) === null, "the highway shouldn't be demolishable");
+  const exit = g.exit();
+  const hp = nearestOnRoad(g.roads[0].points, exit.x, exit.y).p;
+  g.setTool("road");
+  g.click(hp.x, hp.y);
+  g.click((hp.x + exit.x) / 2, (hp.y + exit.y) / 2);
+  g.click(exit.x, exit.y);
+  ok(g.roadConnected(), "couldn't reconnect the lot");
+  for (let i = 0; i < 2000; i++) g.tick(0.05);
+  ok(Number.isFinite(g.money), "money broke after demolishing");
+  ok(g.skiers.every((s) => s.trailId === null || s.trailId < 0 || g.trails.some((t) => t.id === s.trailId)), "skier left on a demolished run");
+}
 
 // --- conquer every remaining peak with a gondola from somewhere below it
 for (const p of SUMMITS) {

@@ -28,6 +28,8 @@ export type Tool =
   | "select"
   | "cut"
   | "road"
+  | "demolish"
+  | "clearTrees"
   | "move"
   | BuildingType
   | `lift:${LiftType}`

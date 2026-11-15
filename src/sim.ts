@@ -1,4 +1,5 @@
 import { HIGHWAY, ROAD_COST_PER_M, ROAD_MAX_GRADE, ROAD_MIN_LEG, ROAD_SNAP, ROAD_WIDTH, Road, legGrade, nearestOnRoad, roadLength, routeTo } from "./roads";
+import { TREELINE_M, isRock, rockAt } from "./height";
 import { elevation, elevationM, gradeAt, lerp, nearSegment, noise2, pointOnPolyline, polylineLength } from "./height";
 import {
   BUILDING_LABEL,
@@ -69,7 +70,6 @@ export const SUMMITS = PEAKS.map((p) => {
 
 /** Forest grid: one possible tree per cell. */
 const TREE_CELL = 12;
-const TREELINE_M = 1950;
 const WALK = 1.8;
 const SKI = 2;
 
@@ -149,6 +149,11 @@ export class Game {
   roads: Road[] = [{ id: 0, points: HIGHWAY.map((p) => ({ ...p })), highway: true }];
   /** Bumped whenever the road network changes. */
   roadVersion = 0;
+  /** Circles of forest the player has felled with the tree brush. */
+  clearings: { x: number; y: number; r: number }[] = [];
+  treesFelled = 0;
+  /** Where the tree brush is hovering (for its outline). */
+  brushHover: Vec2 | null = null;
   private routeCache: { v: number; route: Vec2[] | null } = { v: -1, route: null };
   buildings: Building[] = [];
   skiers: Skier[] = [];
@@ -295,36 +300,54 @@ export class Game {
     return out;
   }
 
-  /** Runs, lifts, buildings and features near a box (to keep clearing checks cheap). */
-  private clearersIn(x0: number, y0: number, x1: number, y1: number) {
-    const hit = (ax: number, ay: number, bx: number, by: number) =>
-      Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1;
-    return {
-      trails: this.trails.filter((t) => {
-        let mx = Infinity, my = Infinity, Mx = -Infinity, My = -Infinity;
-        for (const p of t.points) {
-          mx = Math.min(mx, p.x); my = Math.min(my, p.y); Mx = Math.max(Mx, p.x); My = Math.max(My, p.y);
+  /**
+   * Everything that keeps trees off the ground (runs, lifts, roads, buildings,
+   * features, brushed clearings) as capsules, bucketed into a coarse grid over
+   * a box so each tree only checks what's near it.
+   */
+  private clearersIn(x0: number, y0: number, x1: number, y1: number): ClearIndex {
+    const cell = 64;
+    const cells = new Map<number, ClearShape[]>();
+    const cols = Math.ceil((x1 - x0) / cell) + 1;
+    const add = (ax: number, ay: number, bx: number, by: number, r: number, glade = false) => {
+      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - x0) / cell));
+      const i1 = Math.min(cols - 1, Math.floor((Math.max(ax, bx) + r - x0) / cell));
+      const j0 = Math.max(0, Math.floor((Math.min(ay, by) - r - y0) / cell));
+      const j1 = Math.floor((Math.min(y1, Math.max(ay, by) + r) - y0) / cell);
+      if (i0 > i1 || j0 > j1) return;
+      const shape: ClearShape = { ax, ay, bx, by, r, glade };
+      for (let j = j0; j <= j1; j++) {
+        for (let i = i0; i <= i1; i++) {
+          const k = j * cols + i;
+          const list = cells.get(k);
+          if (list) list.push(shape);
+          else cells.set(k, [shape]);
         }
-        return hit(mx, my, Mx, My);
-      }),
-      lifts: this.lifts.filter((l) => hit(l.bottom.x, l.bottom.y, l.top.x, l.top.y)),
-      buildings: this.buildings.filter((b) => hit(b.x, b.y, b.x, b.y)),
-      features: this.features.filter((f) => hit(f.x, f.y, f.x, f.y)),
-      roadSegs: this.roadSegsIn(x0, y0, x1, y1),
+      }
     };
+    for (const t of this.trails) {
+      const glade = t.kind === "glades";
+      const r = TRAIL_KIND_SPEC[t.kind].width / 2 + (glade ? 0 : 9);
+      for (let i = 1; i < t.points.length; i++) add(t.points[i - 1].x, t.points[i - 1].y, t.points[i].x, t.points[i].y, r, glade);
+    }
+    for (const l of this.lifts) add(l.bottom.x, l.bottom.y, l.top.x, l.top.y, 16);
+    for (const b of this.buildings) add(b.x, b.y, b.x, b.y, b.type === "heli" ? 40 : 22);
+    for (const f of this.features) add(f.x, f.y, f.x, f.y, f.type === "halfpipe" ? 40 : 12);
+    for (const [a, b, w] of this.roadSegsIn(x0, y0, x1, y1)) add(a.x, a.y, b.x, b.y, w / 2 + 5);
+    for (const c of this.clearings) add(c.x, c.y, c.x, c.y, c.r);
+    return { x0, y0, cell, cols, cells };
   }
 
-  private isCleared(x: number, y: number, near: ReturnType<Game["clearersIn"]>): boolean {
-    for (const tr of near.trails) {
-      const d = distToTrail(tr, x, y);
-      if (tr.kind === "glades") {
-        if (d < TRAIL_KIND_SPEC.glades.width / 2 && (d < 2.5 || treeHash(x, y) < 0.5)) return true;
-      } else if (d < TRAIL_KIND_SPEC[tr.kind].width / 2 + 9) return true;
+  private isCleared(x: number, y: number, near: ClearIndex): boolean {
+    const i = Math.floor((x - near.x0) / near.cell);
+    const j = Math.floor((y - near.y0) / near.cell);
+    const list = near.cells.get(j * near.cols + i);
+    if (!list) return false;
+    for (const c of list) {
+      if (!nearSegment(c.ax, c.ay, c.bx, c.by, x, y, c.r)) continue;
+      // Glades are thinned, not cleared: a narrow line down the middle, then every other tree.
+      if (!c.glade || nearSegment(c.ax, c.ay, c.bx, c.by, x, y, 2.5) || treeHash(x, y) < 0.5) return true;
     }
-    for (const l of near.lifts) if (nearSegment(l.bottom.x, l.bottom.y, l.top.x, l.top.y, x, y, 16)) return true;
-    for (const b of near.buildings) if (Math.hypot(b.x - x, b.y - y) < (b.type === "heli" ? 40 : 22)) return true;
-    for (const f of near.features) if (Math.hypot(f.x - x, f.y - y) < (f.type === "halfpipe" ? 40 : 12)) return true;
-    for (const [a, b, w] of near.roadSegs) if (nearSegment(a.x, a.y, b.x, b.y, x, y, w / 2 + 5)) return true;
     return false;
   }
 
@@ -493,7 +516,7 @@ export class Game {
    * The smallest one is the limit. Recomputed a few times a second.
    */
   loadLimits(): { lifts: number; runs: number; cap: number; comfortable: number; limitedBy: "lifts" | "runs" | "capacity" } {
-    const key = `${this.currentMountain}:${this.lifts.length}:${this.trails.length}`;
+    const key = `${this.currentMountain}:${this.lifts.map((l) => l.id).join(",")}:${this.trails.map((t) => t.id).join(",")}`;
     if (this.loadCache && this.loadCacheKey === key && this.clock - this.loadCacheT < 0.5) return this.loadCache;
     let lifts = 0;
     for (const l of this.lifts) {
@@ -632,6 +655,13 @@ export class Game {
   setTool(tool: Tool): void {
     this.liftStart = null;
     this.moveId = null;
+    if (tool === "demolish" || tool === "clearTrees") {
+      this.tool = tool;
+      this.draft = [];
+      this.selected = null;
+      this.lastBrush = null;
+      return;
+    }
     if (tool === "road") {
       this.tool = "road";
       this.draft = [];
@@ -998,6 +1028,145 @@ export class Game {
     return this.inVillage(x, y) && gradeAt(x, y) < 0.25;
   }
 
+  /** What a demolish click at this spot would take down (closest thing wins). */
+  demolishTarget(x: number, y: number): DemolishTarget | null {
+    let best: DemolishTarget | null = null;
+    let bestD = Infinity;
+    const offer = (t: DemolishTarget, d: number) => {
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
+    };
+    for (const b of this.buildings) {
+      const d = Math.hypot(b.x - x, b.y - y);
+      // Buildings win ties: they sit on top of everything else.
+      if (d < (b.type === "heli" ? 34 : 24)) offer({ kind: "building", id: b.id, label: BUILDING_LABEL[b.type], refund: Math.round(COSTS[b.type] * SALVAGE) }, d - 8);
+    }
+    for (const f of this.features) {
+      const d = Math.hypot(f.x - x, f.y - y);
+      if (d < 14) offer({ kind: "feature", id: f.id, label: FEATURE_SPEC[f.type].label, refund: Math.round(FEATURE_SPEC[f.type].cost * SALVAGE) }, d - 4);
+    }
+    for (const l of this.lifts) {
+      const d = nearestOnRoad([l.bottom, l.top], x, y).d;
+      if (d < 18) {
+        const refund = Math.round(liftCost(l.type, Math.hypot(l.top.x - l.bottom.x, l.top.y - l.bottom.y)) * SALVAGE);
+        offer({ kind: "lift", id: l.id, label: l.name, refund }, d);
+      }
+    }
+    for (const t of this.trails) {
+      const d = distToTrail(t, x, y);
+      if (d < TRAIL_KIND_SPEC[t.kind].width / 2 + 4) offer({ kind: "trail", id: t.id, label: t.name, refund: 0 }, d + 2);
+    }
+    for (const r of this.roads) {
+      if (r.highway) continue;
+      const d = nearestOnRoad(r.points, x, y).d;
+      if (d < ROAD_WIDTH / 2 + 6) offer({ kind: "road", id: r.id, label: "Road", refund: Math.round(roadLength(r.points) * ROAD_COST_PER_M * 0.25) }, d);
+    }
+    return best;
+  }
+
+  /** Leave the ground a demolished thing stood on cleared (the forest doesn't spring back). */
+  private stampClearing(points: Vec2[], r: number): void {
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[Math.min(points.length - 1, i + 1)];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const n = Math.max(1, Math.ceil(len / (r * 0.9)));
+      for (let k = 0; k < n; k++) this.clearings.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n, r });
+    }
+  }
+
+  private demolishAt(x: number, y: number): "ok" | "shake" | "none" {
+    const t = this.demolishTarget(x, y) as DemolishTarget | null;
+    if (!t) {
+      this.toast("Nothing to demolish there. Click a building, lift, run, park feature or road.", true);
+      return "shake";
+    }
+    if (t.kind === "lift" && this.lifts.length <= 1) {
+      this.toast("Keep at least one lift running.", true);
+      return "shake";
+    }
+    if (t.kind === "building") {
+      const b = this.buildings.find((q) => q.id === t.id)!;
+      this.stampClearing([b], b.type === "heli" ? 40 : 22);
+      this.buildings = this.buildings.filter((q) => q !== b);
+    } else if (t.kind === "feature") {
+      const f = this.features.find((q) => q.id === t.id)!;
+      this.stampClearing([f], f.type === "halfpipe" ? 40 : 12);
+      this.features = this.features.filter((q) => q !== f);
+    } else if (t.kind === "lift") {
+      const l = this.lifts.find((q) => q.id === t.id)!;
+      this.stampClearing([l.bottom, l.top], 16);
+      this.lifts = this.lifts.filter((q) => q !== l);
+      for (const s of this.skiers) {
+        if (s.liftId !== l.id) continue;
+        s.liftId = null;
+        if (s.state === "riding" || s.state === "queue") {
+          s.state = "toTrail";
+          s.trailId = null;
+        }
+      }
+    } else if (t.kind === "trail") {
+      const tr = this.trails.find((q) => q.id === t.id)!;
+      if (tr.kind !== "glades") this.stampClearing(tr.points, TRAIL_KIND_SPEC[tr.kind].width / 2 + 9);
+      this.trails = this.trails.filter((q) => q !== tr);
+      // Park features go with the run they were built on.
+      this.features = this.features.filter((f) => f.trailId !== tr.id);
+      for (const s of this.skiers) if (s.trailId === tr.id) s.trailId = null;
+    } else {
+      const r = this.roads.find((q) => q.id === t.id)!;
+      this.stampClearing(r.points, ROAD_WIDTH / 2 + 5);
+      this.roads = this.roads.filter((q) => q !== r);
+      this.roadVersion++;
+    }
+    this.money += t.refund;
+    this.selected = null;
+    this.clearTrees();
+    this.float(x, y, t.refund ? `+$${t.refund.toLocaleString()}` : "Gone");
+    this.toast(
+      `Demolished ${t.kind === "trail" ? `“${t.label}”` : t.label}.${t.refund ? ` Salvage +$${t.refund.toLocaleString()}.` : ""}` +
+        (t.kind === "road" && !this.roadConnected() ? " The parking lot is cut off: no new skiers until it's reconnected." : ""),
+      t.kind === "road" && !this.roadConnected(),
+    );
+    return "ok";
+  }
+
+  /** Trees the brush would fell at this spot. */
+  treesUnderBrush(x: number, y: number): number {
+    return this.treesIn(x - BRUSH_R, y - BRUSH_R, x + BRUSH_R, y + BRUSH_R).filter((t) => Math.hypot(t.x - x, t.y - y) < BRUSH_R).length;
+  }
+
+  private lastBrush: Vec2 | null = null;
+
+  /** Fell the trees in a circle (click or drag). */
+  private paintClearing(x: number, y: number): "ok" | "shake" | "none" {
+    if (this.lastBrush && Math.hypot(this.lastBrush.x - x, this.lastBrush.y - y) < BRUSH_R * 0.45) return "none";
+    const n = this.treesUnderBrush(x, y);
+    if (!n) return "none";
+    const cost = n * TREE_FELL_COST;
+    if (this.money < cost) {
+      this.toast(`Need $${(cost - this.money).toLocaleString()} more to clear these trees.`, true);
+      return "shake";
+    }
+    this.money -= cost;
+    this.clearings.push({ x, y, r: BRUSH_R });
+    this.lastBrush = { x, y };
+    this.treesFelled += n;
+    this.clearTrees();
+    this.strokeCost += cost;
+    return "ok";
+  }
+
+  private strokeCost = 0;
+
+  /** Lift the brush: show what the stroke cost, and start the next one fresh. */
+  endBrush(): void {
+    if (this.lastBrush && this.strokeCost) this.float(this.lastBrush.x, this.lastBrush.y, `-$${this.strokeCost.toLocaleString()}`, "#d9785f");
+    this.strokeCost = 0;
+    this.lastBrush = null;
+  }
+
   /** The drive in from the highway to the parking lot, or null if there isn't one. */
   carRoute(): Vec2[] | null {
     if (this.routeCache.v !== this.roadVersion) {
@@ -1146,6 +1315,7 @@ export class Game {
     if (type !== "shack" && this.trails.some((t) => distToTrail(t, x, y) < 18)) return "Don't plant a building on a run.";
     if (type === "shack" && this.trails.some((t) => distToTrail(t, x, y) < 8)) return "Keep the shack beside the run, not in the fall line.";
     if (this.nearLift(x, y, 26)) return "Keep clear of the lift line.";
+    if (isRock(x, y)) return "That's bare rock.";
     if (this.nearRoad(x, y, type === "shack" ? 10 : 18)) return "Keep clear of the road.";
     if (this.money < cost) return `Need $${(cost - this.money).toLocaleString()} more.`;
     return null;
@@ -1155,6 +1325,8 @@ export class Game {
     if (!this.managing) return "none";
     if (this.tool === "cut") return this.clickCut(x, y);
     if (this.tool === "road") return this.clickRoad(x, y);
+    if (this.tool === "demolish") return this.demolishAt(x, y);
+    if (this.tool === "clearTrees") return this.paintClearing(x, y);
     if (this.tool === "move") return this.clickMove(x, y);
     const ft = this.featureTool();
     if (ft) return this.clickFeature(ft, x, y);
@@ -1277,10 +1449,31 @@ export class Game {
     };
   }
 
+  /** First rocky spot on a run leg (centre and both sides), or null if it's clear. */
+  rockOnLeg(a: Vec2, b: Vec2, width: number): Vec2 | null {
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const n = Math.max(1, Math.ceil(len / 7));
+    const ux = (b.x - a.x) / (len || 1);
+    const uy = (b.y - a.y) / (len || 1);
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      for (const side of [0, -0.35, 0.35]) {
+        const x = a.x + (b.x - a.x) * t - uy * width * side;
+        const y = a.y + (b.y - a.y) * t + ux * width * side;
+        if (isRock(x, y)) return { x, y };
+      }
+    }
+    return null;
+  }
+
   private clickCut(x: number, y: number): "ok" | "shake" | "none" {
     if (this.draft.length === 0) {
       if (elevationM(x, y) < elevationM(BASE.x, BASE.y) + 40) {
         this.toast("Start the cut higher on the mountain.", true);
+        return "shake";
+      }
+      if (isRock(x, y)) {
+        this.toast("That's bare rock. Start the run on snow.", true);
         return "shake";
       }
       this.draft.push({ x, y });
@@ -1292,6 +1485,10 @@ export class Game {
     const up = elevation(x, y, this.currentMountain) - elevation(last.x, last.y, this.currentMountain);
     if (up > 0.018) {
       this.toast("Runs have to go downhill.", true);
+      return "shake";
+    }
+    if (this.rockOnLeg(last, { x, y }, TRAIL_KIND_SPEC[this.trailKind].width)) {
+      this.toast("Rocks in the way. Route the run around the outcrop.", true);
       return "shake";
     }
     this.draft.push({ x, y });
@@ -2216,6 +2413,22 @@ export function nearestOnTrail(t: Trail, x: number, y: number): { along: number;
   return best;
 }
 
+/** Share of the price you get back when you demolish something. */
+const SALVAGE = 0.4;
+/** Radius of the tree-clearing brush, and what each tree costs to fell. */
+export const BRUSH_R = 30;
+export const TREE_FELL_COST = 4;
+
+export type DemolishTarget = {
+  kind: "building" | "feature" | "lift" | "trail" | "road";
+  id: number;
+  label: string;
+  refund: number;
+};
+
+type ClearShape = { ax: number; ay: number; bx: number; by: number; r: number; glade: boolean };
+type ClearIndex = { x0: number; y0: number; cell: number; cols: number; cells: Map<number, ClearShape[]> };
+
 /** Stable 0..1 value per tree position. */
 function treeHash(x: number, y: number): number {
   const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
@@ -2224,7 +2437,8 @@ function treeHash(x: number, y: number): number {
 
 /** How forested a spot is (0..1): patchy, thinning out toward the treeline. */
 export function forestDensity(x: number, y: number): number {
-  const density = noise2(x / 360, y / 300) * 0.7 + noise2(x / 90, y / 110) * 0.3 + 0.12;
+  // Nearly unbroken forest, with the odd small meadow.
+  const density = 0.52 + noise2(x / 360, y / 300) * 0.5 + (noise2(x / 90, y / 110) - 0.5) * 0.3;
   const m = elevationM(x, y);
   const treeline = 1 - smoothstep(TREELINE_M - 250, TREELINE_M + 100 + (noise2(x / 500, y / 500) - 0.5) * 200, m);
   return density * treeline;
@@ -2235,7 +2449,8 @@ function forestCell(gx: number, gy: number): Vec2 | null {
   const x = (gx + noise2(gx * 7.13, gy * 3.71)) * TREE_CELL;
   const y = (gy + noise2(gx * 2.91, gy * 6.37)) * TREE_CELL;
   if (x < 4 || y < 4 || x > WORLD_W - 4 || y > WORLD_H - 4) return null;
-  if (forestDensity(x, y) < 0.36) return null;
+  if (forestDensity(x, y) < 0.42) return null;
+  if (rockAt(x, y) > 0.3) return null;
   if (gradeAt(x, y) > 0.9) return null; // cliffs
   return { x, y };
 }
