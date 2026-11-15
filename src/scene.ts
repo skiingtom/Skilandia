@@ -2,7 +2,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { elevation, gradeAt, lerp, noise2, pointOnPolyline, polylineLength, rockAt, takeTerrainDirty, terrainVersion } from "./height";
-import { PostFx, SkyUniforms, TerrainUniforms, makeChalet, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial } from "./look";
+import { PostFx, SkyUniforms, TerrainUniforms, makeChalet, makeLogCabin, makeSkyDome, makeSpruceGeometry, makeTerrainMaterial, makeTreeDepthMaterial, makeTreeMaterial } from "./look";
+import { CAR_MODELS, Fleet, VehicleModel, pickVehicle } from "./vehicles";
 import { ROAD_MAX_GRADE, ROAD_WIDTH, Road, legGrade } from "./roads";
 import { Game } from "./sim";
 import { SUMMITS, classifyGrade, forestDensity } from "./sim";
@@ -134,7 +135,8 @@ export class World3D {
   private trailGroup = new THREE.Group();
   private roadGroup = new THREE.Group();
   private roadStamp = -1;
-  private cars = makeCars(MAX_CARS);
+  private cars = new Fleet([...CAR_MODELS, "semi"], MAX_CARS, { dynamic: true });
+  private carColor = new THREE.Color();
   private buildingGroup = new THREE.Group();
   private liftGroup = new THREE.Group();
   private liftVis = new Map<number, LiftVis>();
@@ -211,7 +213,7 @@ export class World3D {
     this.treesHi = this.makeEmptyTrees(true);
     this.treesLo = this.makeEmptyTrees(false);
     this.scene.add(this.treesHi, this.treesLo, this.boulders, this.brushRing);
-    this.scene.add(this.roadGroup, this.cars);
+    this.scene.add(this.roadGroup, this.cars.group);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup, this.peakGroup);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
@@ -962,7 +964,7 @@ export class World3D {
 
   /** The tree brush outline, draped on the ground under the pointer. */
   private syncBrush(game: Game): void {
-    const h = game.tool === "clearTrees" || game.tool === "shape" ? game.brushHover : null;
+    const h = game.tool === "clearTrees" || game.tool === "plantTrees" || game.tool === "shape" ? game.brushHover : null;
     this.brushRing.visible = !!h;
     if (!h) return;
     const pos = this.brushRing.geometry.getAttribute("position") as THREE.BufferAttribute;
@@ -990,8 +992,9 @@ export class World3D {
    */
   private syncCars(game: Game): void {
     const route = game.carRoute();
+    this.cars.begin();
     if (!route || route.length < 2) {
-      this.cars.count = 0;
+      this.cars.end();
       return;
     }
     const total = polylineLength(route);
@@ -1010,15 +1013,15 @@ export class World3D {
       const lane = 2.3;
       const x = p.x - p.dy * lane * dir;
       const y = p.y + p.dx * lane * dir;
-      dummy.position.copy(onGround(x, y, 0.9, this.mid));
+      // Every so often a Semi hauls supplies up; otherwise the family cars.
+      const v: { model: VehicleModel; color: string } = i % 9 === 4 ? { model: "semi", color: "#f4f5f6" } : pickVehicle(i);
+      dummy.position.copy(onGround(x, y, 0.05, this.mid));
       dummy.rotation.set(0, Math.atan2(p.dx * dir, p.dy * dir), 0);
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
-      this.cars.setMatrixAt(i, dummy.matrix);
+      this.cars.add(v.model, dummy.matrix, this.carColor.set(v.color));
     }
-    this.cars.count = n;
-    this.cars.instanceMatrix.needsUpdate = true;
-    this.cars.computeBoundingSphere();
+    this.cars.end();
   }
 
   /** Boulders and outcrops wherever the ground is bare rock, near the view. */
@@ -1591,6 +1594,7 @@ function makeRateSprite(text: string): THREE.Sprite {
 function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
   if (type === "heli") return makeHelipad(ghost);
   if (PARKING[type]) return makeParkingMesh(type, ghost);
+  if (type === "cabin") return makeLogCabin(ghost);
   const palette: Record<string, { body: string; roof: string; w: number; d: number; h: number }> = {
     lodge: { body: "#d8cbb6", roof: "#8b3a32", w: 28, d: 20, h: 12 },
     restroom: { body: "#d9d2c5", roof: "#4a5560", w: 10, d: 8, h: 7 },
@@ -1609,6 +1613,7 @@ function makeBuildingMesh(type: BuildingType, ghost: boolean): THREE.Group {
     clinic: { body: "#f2f4f6", roof: "#c45c4a", w: 16, d: 12, h: 8 },
     rental: { body: "#e6dcc8", roof: "#2f5f7a", w: 18, d: 13, h: 8 },
     school: { body: "#f1e7d6", roof: "#2f6fb0", w: 22, d: 14, h: 9 },
+    cabinOffice: { body: "#efe4cc", roof: "#5a3a26", w: 16, d: 11, h: 8 },
     heli: { body: "#c9cdd2", roof: "#3a434d", w: 24, d: 16, h: 9 },
   };
   const p = palette[type];
@@ -1623,16 +1628,23 @@ function makeVillageProps(mid: MountainId, booth: Vec2, exit: Vec2, radius: numb
   hut.position.copy(to3(booth.x, booth.y, 0, mid));
   hut.userData = { kind: "hill" };
   g.add(hut);
-  const colors = ["#8b3a32", "#2e4a72", "#d5d0c4", "#355e3b"];
   const lot = new THREE.Mesh(new THREE.BoxGeometry(150, 0.4, 70), new THREE.MeshLambertMaterial({ color: "#5c6570" }));
   lot.position.copy(to3(exit.x, exit.y, 0.2, mid));
   g.add(lot);
+  const fleet = new Fleet(CAR_MODELS, 60);
+  const m = new THREE.Object3D();
+  const c = new THREE.Color();
+  fleet.begin();
   for (let i = 0; i < 60; i++) {
     if (noise2(i * 1.3, 2) < 0.35) continue;
-    const car = new THREE.Mesh(new THREE.BoxGeometry(5, 2.2, 2.6), new THREE.MeshLambertMaterial({ color: colors[i % colors.length] }));
-    car.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 1.1, mid));
-    g.add(car);
+    m.position.copy(to3(exit.x - 66 + (i % 15) * 9.4, exit.y - 24 + Math.floor(i / 15) * 14, 0.4, mid));
+    m.rotation.set(0, Math.floor(i / 15) % 2 ? Math.PI : 0, 0);
+    m.updateMatrix();
+    const v = pickVehicle(i);
+    fleet.add(v.model, m.matrix, c.set(v.color));
   }
+  fleet.end();
+  g.add(fleet.group);
   // Village boundary: a dashed line draped on the snow.
   const pts: THREE.Vector3[] = [];
   for (let i = 0; i <= 180; i++) {
@@ -2410,23 +2422,6 @@ function makeRoadRibbon(r: Road, mid: MountainId): THREE.Mesh {
   return mesh;
 }
 
-/** Little low-poly cars: body plus cabin, one colour each. */
-function makeCars(max: number): THREE.InstancedMesh {
-  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
-  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
-  cabin.translate(0, 0.8, -0.2);
-  const geo = mergeGeometries([body, cabin])!;
-  const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: "#ffffff" }), max);
-  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  const palette = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a"];
-  const c = new THREE.Color();
-  for (let i = 0; i < max; i++) mesh.setColorAt(i, c.set(palette[(i * 5) % palette.length]));
-  mesh.castShadow = true;
-  mesh.count = 0;
-  mesh.frustumCulled = false;
-  return mesh;
-}
-
 const BOULDERS_DRAWN = 16000;
 
 /** Faceted rocks: a low-poly dodecahedron, flat shaded, coloured per instance. */
@@ -2453,17 +2448,6 @@ function makeBrushRing(): THREE.LineLoop {
   ring.visible = false;
   return ring;
 }
-
-/** Car body plus cabin, length along z. */
-function carGeometry(): THREE.BufferGeometry {
-  const body = new THREE.BoxGeometry(1.9, 0.9, 4.2);
-  body.translate(0, 0.45, 0);
-  const cabin = new THREE.BoxGeometry(1.7, 0.7, 2.2);
-  cabin.translate(0, 1.25, -0.2);
-  return mergeGeometries([body, cabin])!;
-}
-
-const PARKED_COLORS = ["#b8433a", "#2f5f99", "#e8e8e8", "#2a2d31", "#8a8f96", "#3d7a4f", "#d7a43a", "#6b3f78"];
 
 /**
  * Painted stalls in back-to-back rows with aisles between, and parked cars in
@@ -2495,21 +2479,19 @@ function parkingDeck(w: number, d: number, y: number, seed: number, fill: number
   stripes.count = n;
   const out: THREE.Object3D[] = [stripes];
   if (ghost) return out;
-  const cars = new THREE.InstancedMesh(carGeometry(), new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.5 }), spots.length);
+  const fleet = new Fleet(CAR_MODELS, spots.length);
   const c = new THREE.Color();
-  let k = 0;
+  fleet.begin();
   spots.forEach((s, i) => {
     if (noise2(i * 0.77 + seed, seed * 1.3) > fill) return;
     m.position.set(s.x, y, s.z + (noise2(i, seed) - 0.5) * 0.6);
     m.rotation.set(0, i % 2 ? Math.PI : 0, 0);
     m.updateMatrix();
-    cars.setMatrixAt(k, m.matrix);
-    cars.setColorAt(k, c.set(PARKED_COLORS[(i * 7 + seed) % PARKED_COLORS.length]));
-    k++;
+    const v = pickVehicle(i * 3 + seed);
+    fleet.add(v.model, m.matrix, c.set(v.color));
   });
-  cars.count = k;
-  cars.castShadow = true;
-  out.push(cars);
+  fleet.end();
+  out.push(fleet.group);
   return out;
 }
 

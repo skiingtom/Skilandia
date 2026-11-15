@@ -53,7 +53,7 @@
               </label>
               <label class="switch">
                 <input type="checkbox" id="opt-free-trees" />
-                <span>Free tree clearing <small>(no $4 per tree)</small></span>
+                <span>Free tree clearing and planting <small>(no $4 to fell or $12 to plant a tree)</small></span>
               </label>
               <label class="switch">
                 <input type="checkbox" id="opt-free-shaping" />
@@ -168,6 +168,17 @@
           <div class="cut-actions">
             <button type="button" id="btn-finish-trail" disabled>Finish trail</button>
             <button type="button" id="btn-cancel-cut" class="ghost">Cancel</button>
+          </div>
+        </div>
+
+        <div id="plant-banner" class="cut-banner shape-banner hidden">
+          <p id="plant-text">Plant trees: click to plant, or drag the brush over the ground.</p>
+          <div class="seg" role="group" aria-label="Planting">
+            <button type="button" class="ghost plant-mode" data-mode="single" title="One tree where you click">Single tree</button>
+            <button type="button" class="ghost plant-mode on" data-mode="brush" title="Scatter trees through a 60 m brush">Area brush</button>
+          </div>
+          <div class="cut-actions">
+            <button type="button" id="btn-plant-done" class="ghost">Done</button>
           </div>
         </div>
 

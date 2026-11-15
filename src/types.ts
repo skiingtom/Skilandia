@@ -23,6 +23,8 @@ export type BuildingType =
   | "clinic"
   | "rental"
   | "school"
+  | "cabinOffice"
+  | "cabin"
   | "heli";
 export type LiftType = "carpet" | "tbar" | "double" | "quad" | "six" | "gondola";
 export type TrailKind = "slope" | "slalom" | "moguls" | "park" | "glades";
@@ -33,6 +35,7 @@ export type Tool =
   | "road"
   | "demolish"
   | "clearTrees"
+  | "plantTrees"
   | "shape"
   | "move"
   | BuildingType
@@ -239,6 +242,8 @@ export const COSTS: Record<BuildingType, number> = {
   clinic: 2100,
   rental: 2400,
   school: 3800,
+  cabinOffice: 3400,
+  cabin: 1500,
   heli: 45000,
 };
 
@@ -264,11 +269,13 @@ export const INCOME_PER_MIN: Record<BuildingType, number> = {
   condo: 200,
   hotel: 220,
   school: 150,
+  cabinOffice: 60,
+  cabin: 75,
   heli: 0,
 };
 
 export const PLACE_ANYWHERE: BuildingType[] = ["shack"];
-export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol", "clinic"];
+export const PLACE_MOUNTAIN: BuildingType[] = ["shack", "patrol", "clinic", "cabin"];
 
 export const BUILDING_MAX: Record<BuildingType, number> = {
   parkingSmall: 20,
@@ -291,6 +298,8 @@ export const BUILDING_MAX: Record<BuildingType, number> = {
   clinic: 2,
   rental: 2,
   school: 1,
+  cabinOffice: 1,
+  cabin: 30,
   heli: 1,
 };
 
@@ -310,14 +319,17 @@ export const STARTER_LOT_SKIERS = 400;
 
 /** How far around a building trees are cleared and other things kept off. */
 export function buildingRadius(type: BuildingType): number {
-  return PARKING[type]?.radius ?? (type === "heli" ? 40 : 22);
+  return PARKING[type]?.radius ?? (type === "heli" ? 40 : type === "cabin" ? 24 : 22);
 }
 
 /** Places skiers visit when hungry. */
 export const FOOD_BUILDINGS: BuildingType[] = ["coffee", "sandwich", "shack", "cafeteria", "bar", "restaurant"];
 
 /** Overnight / lodging stock that drives delivery staffing. */
-export const LODGING_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "shop", "spa"];
+export const LODGING_BUILDINGS: BuildingType[] = ["hotel", "condo", "hostel", "shop", "spa", "cabin"];
+
+/** A cabin is ski-in / ski-out when a run passes this close (m). */
+export const CABIN_REACH = 60;
 
 export const EXPANSION_BUILDINGS: BuildingType[] = [
   "garage",
@@ -382,6 +394,8 @@ export const BUILDING_LABEL: Record<BuildingType, string> = {
   clinic: "First-aid clinic",
   rental: "Ski rental",
   school: "Ski school",
+  cabinOffice: "Cabin rental office",
+  cabin: "Ski-in cabin",
   heli: "Heli-ski base",
 };
 

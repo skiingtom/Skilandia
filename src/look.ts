@@ -591,3 +591,103 @@ export function makeChalet(p: ChaletSpec, opts: { ghost: boolean; tall?: boolean
   g.userData = { kind: "building" };
   return g;
 }
+
+/**
+ * A hillside log cabin: stacked round logs, a steep A-frame roof that comes
+ * nearly to the snow, a covered porch facing the run, a stone chimney and a
+ * warm window.
+ */
+export function makeLogCabin(ghost: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const shadow = !ghost;
+  const mat = (color: string, extra: THREE.MeshStandardMaterialParameters = {}) =>
+    new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0, ...extra });
+  const logMat = mat("#7a5232");
+  const logEnd = mat("#b88a5c");
+  const roofMat = mat("#4a2f22");
+  const snowMat = mat(SNOW_ROOF, { roughness: 0.7 });
+  const stone = mat(STONE, { roughness: 0.95 });
+  const glass = mat("#2a2420", { emissive: GLASS, emissiveIntensity: 1.1, roughness: 0.3 });
+  const add = (m: THREE.Mesh) => {
+    m.castShadow = shadow;
+    m.receiveShadow = true;
+    g.add(m);
+    return m;
+  };
+  const W = 9;
+  const D = 7;
+  const wallH = 3.2;
+  const r = 0.28;
+  // Stone footing.
+  const foot = add(new THREE.Mesh(new THREE.BoxGeometry(W + 0.6, 0.9, D + 0.6), stone));
+  foot.position.y = 0.15;
+  // Log courses, crossing at the corners with the ends sticking out.
+  const logX = new THREE.CylinderGeometry(r, r, W + 1, 7);
+  logX.rotateZ(Math.PI / 2);
+  const logZ = new THREE.CylinderGeometry(r, r, D + 1, 7);
+  logZ.rotateX(Math.PI / 2);
+  const courses = Math.round(wallH / (r * 2));
+  for (let c = 0; c < courses; c++) {
+    const y = 0.6 + r + c * r * 2;
+    for (const s of [-1, 1]) {
+      const a = add(new THREE.Mesh(logX, logMat));
+      a.position.set(0, y + (c % 2 ? r : 0), (s * D) / 2);
+      const b = add(new THREE.Mesh(logZ, logMat));
+      b.position.set((s * W) / 2, y + (c % 2 ? 0 : r), 0);
+    }
+  }
+  // Fill behind the logs so there are no gaps.
+  const core = add(new THREE.Mesh(new THREE.BoxGeometry(W - 0.2, wallH, D - 0.2), logEnd));
+  core.position.y = 0.6 + wallH / 2;
+  const top = 0.6 + wallH;
+  // Steep A-frame roof over the length (ridge along z), eaves wide.
+  const eave = 1.2;
+  const half = W / 2 + eave;
+  const pitch = THREE.MathUtils.degToRad(52);
+  const rise = (W / 2) * Math.tan(pitch);
+  const slabLen = half / Math.cos(pitch);
+  const len = D + 3.2;
+  for (const sx of [-1, 1]) {
+    const slab = add(new THREE.Mesh(new THREE.BoxGeometry(slabLen, 0.5, len), roofMat));
+    slab.rotation.z = -sx * pitch;
+    slab.position.set((sx * Math.cos(pitch) * slabLen) / 2, top + rise - (Math.sin(pitch) * slabLen) / 2 + 0.2, 0.8);
+    const snow = add(new THREE.Mesh(new THREE.BoxGeometry(slabLen - 0.3, 0.45, len - 0.3), snowMat));
+    snow.rotation.z = -sx * pitch;
+    const nrm = new THREE.Vector3(sx * Math.sin(pitch), Math.cos(pitch), 0);
+    snow.position.copy(slab.position).addScaledVector(nrm, 0.45);
+  }
+  // Gable ends in logs-coloured boards, with a big window in the front one.
+  const gable = new THREE.Shape();
+  gable.moveTo(-W / 2, 0);
+  gable.lineTo(W / 2, 0);
+  gable.lineTo(0, rise);
+  gable.closePath();
+  const gableGeo = new THREE.ExtrudeGeometry(gable, { depth: 0.3, bevelEnabled: false });
+  for (const sz of [-1, 1]) {
+    const m = add(new THREE.Mesh(gableGeo, logMat));
+    m.position.set(0, top, sz > 0 ? D / 2 - 0.1 : -D / 2 - 0.2);
+  }
+  const win = add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.4, 0.2), glass));
+  win.position.set(0, top + rise * 0.35, D / 2 + 0.25);
+  const win2 = add(new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.3, 0.2), glass));
+  win2.position.set(-W / 4, 0.6 + wallH * 0.55, D / 2 + 0.35);
+  const door = add(new THREE.Mesh(new THREE.BoxGeometry(1.3, 2.3, 0.2), mat("#4a2f1c")));
+  door.position.set(W / 4, 0.6 + 1.15, D / 2 + 0.35);
+  // Porch deck and posts under the roof overhang.
+  const deck = add(new THREE.Mesh(new THREE.BoxGeometry(W + 0.6, 0.3, 2.6), mat("#8a6440")));
+  deck.position.set(0, 0.6, D / 2 + 1.4);
+  for (const sx of [-1, 1]) {
+    const post = add(new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, wallH, 6), logMat));
+    post.position.set(sx * (W / 2 - 0.2), 0.6 + wallH / 2, D / 2 + 2.5);
+  }
+  // Stone chimney poking through the roof.
+  const ch = add(new THREE.Mesh(new THREE.BoxGeometry(1.3, rise + 2.5, 1.3), stone));
+  ch.position.set(W * 0.2, top + (rise + 2.5) / 2 - 0.5, -D * 0.25);
+  const cap = add(new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.3, 1.5), snowMat));
+  cap.position.set(W * 0.2, top + rise + 1.9, -D * 0.25);
+  // Firewood stacked by the door.
+  const wood = add(new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.1, 0.8), logEnd));
+  wood.position.set(W / 2 + 0.9, 1.1, D / 2 - 0.6);
+  g.userData = { kind: "building" };
+  return g;
+}
