@@ -818,3 +818,69 @@ body.welcome-open #hud > * {
 .stats dd {
   white-space: nowrap;
 }
+
+.loading {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 22, 32, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.loading-card {
+  text-align: center;
+  color: var(--paper);
+}
+
+.loading-card h2 {
+  margin: 4px 0 14px;
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 34px;
+}
+
+.loading-bar {
+  width: 220px;
+  height: 4px;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(243, 239, 228, 0.15);
+}
+
+.loading-bar span {
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--gold);
+  animation: loading-slide 0.9s ease-in-out infinite;
+}
+
+@keyframes loading-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* Keep the clock controls on screen: stats shrink before buttons get pushed out. */
+.stats {
+  gap: 14px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.stats div {
+  min-width: 0;
+}
+
+.stats dd {
+  font-size: 18px;
+}
+
+.clock-controls {
+  flex-shrink: 0;
+}

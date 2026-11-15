@@ -13,6 +13,8 @@ F11 toggles fullscreen.
 
 ## Mountains
 
+Each mountain is its own area. Only the one you're managing is loaded; buy or travel to another from the **Mountains** panel and it loads behind a short loading screen. Mountains you've left keep earning from their buildings while you're away.
+
 | Mountain | Holds at once | Lifts allowed |
 |---|---|---|
 | Little Hawk Hill | 2,000 skiers | 10 |

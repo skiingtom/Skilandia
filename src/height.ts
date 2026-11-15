@@ -149,18 +149,25 @@ function rawElevation(x: number, y: number, id: MountainId): number {
 
 const GW = 256;
 const GH = 328;
-const grids: Float32Array[] = [0, 1, 2].map((id) => {
-  const grid = new Float32Array(GW * GH);
-  for (let gy = 0; gy < GH; gy++) {
-    for (let gx = 0; gx < GW; gx++) {
-      grid[gy * GW + gx] = rawElevation((gx / (GW - 1)) * WORLD_W, (gy / (GH - 1)) * WORLD_H, id as MountainId);
+/** Heightfields, built the first time each mountain is visited. */
+const grids: (Float32Array | undefined)[] = [];
+
+function gridFor(id: MountainId): Float32Array {
+  let grid = grids[id];
+  if (!grid) {
+    grid = new Float32Array(GW * GH);
+    for (let gy = 0; gy < GH; gy++) {
+      for (let gx = 0; gx < GW; gx++) {
+        grid[gy * GW + gx] = rawElevation((gx / (GW - 1)) * WORLD_W, (gy / (GH - 1)) * WORLD_H, id);
+      }
     }
+    grids[id] = grid;
   }
   return grid;
-});
+}
 
 export function elevation(x: number, y: number, id: MountainId = 0): number {
-  const grid = grids[id];
+  const grid = gridFor(id);
   const u = (x / WORLD_W) * (GW - 1);
   const v = (y / WORLD_H) * (GH - 1);
   const x0 = Math.max(0, Math.min(GW - 2, Math.floor(u)));

@@ -41,10 +41,15 @@ const BAND_COLORS = ["#3fb878", "#3d84d8", "#3a3f47", "#b8324b"].map((c) => new 
 
 const K = MAP_SCALE;
 
+/**
+ * Each mountain is its own area, loaded on its own and centred in the scene,
+ * so there are no offsets between them. (Kept so world <-> map maths stays
+ * in one place if areas ever need positions again.)
+ */
 export const MOUNT_OFF = [
   { x: 0, z: 0 },
-  { x: 980 * MAP_SCALE, z: 70 * MAP_SCALE },
-  { x: 2080 * MAP_SCALE, z: 30 * MAP_SCALE },
+  { x: 0, z: 0 },
+  { x: 0, z: 0 },
 ];
 
 export function to3(x: number, y: number, lift = 0, mid: MountainId = 0): THREE.Vector3 {
@@ -72,8 +77,11 @@ export class World3D {
   private raycaster = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
   private keys = new Set<string>();
-  private terrains: THREE.Mesh[] = [];
-  private pickProxies: THREE.Mesh[] = [];
+  /** Only the mountain being managed is loaded. */
+  private terrain: THREE.Mesh | null = null;
+  private pickProxy: THREE.Mesh | null = null;
+  private backdrop: THREE.Group | null = null;
+  private loadedId: MountainId | null = null;
   private featureGroup = new THREE.Group();
   private trees: THREE.InstancedMesh;
   private helicopter = makeHelicopter();
@@ -131,11 +139,7 @@ export class World3D {
 
     this.addLights();
     this.addGround();
-    for (const id of [0, 1, 2] as MountainId[]) {
-      const mesh = this.makeTerrain(id);
-      this.terrains.push(mesh);
-      this.scene.add(mesh);
-    }
+    this.loadMountain(0);
     this.trees = this.makeEmptyTrees();
     this.scene.add(this.trees);
     this.scene.add(this.trailGroup, this.buildingGroup, this.liftGroup, this.featureGroup);
@@ -173,11 +177,44 @@ export class World3D {
   private applySlopeColors(on: boolean): void {
     if (on === this.slopeApplied) return;
     this.slopeApplied = on;
-    for (const mesh of this.terrains) {
-      const geo = mesh.geometry;
-      const src = (on ? geo.userData.overlay : geo.userData.natural) as THREE.Float32BufferAttribute;
-      geo.setAttribute("color", src);
+    if (!this.terrain) return;
+    const geo = this.terrain.geometry;
+    const src = (on ? geo.userData.overlay : geo.userData.natural) as THREE.Float32BufferAttribute;
+    geo.setAttribute("color", src);
+  }
+
+  /**
+   * Unload the current mountain and load another: terrain, picking mesh and
+   * the distant range around it. Everything on the mountain (trees, runs,
+   * lifts, buildings) is rebuilt from the game state on the next update.
+   */
+  loadMountain(id: MountainId): void {
+    if (this.loadedId === id) return;
+    for (const old of [this.terrain, this.pickProxy, this.backdrop]) {
+      if (!old) continue;
+      this.scene.remove(old);
+      old.traverse((o) => {
+        if (o instanceof THREE.Mesh) {
+          o.geometry.dispose();
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => m.dispose());
+        }
+      });
     }
+    this.terrain = this.makeTerrain(id);
+    this.scene.add(this.terrain);
+    this.backdrop = makeBackdrop(id);
+    this.scene.add(this.backdrop);
+    this.loadedId = id;
+    this.mid = id;
+    this.stamp = "";
+    this.draftKey = "";
+    this.liftPreviewKey = "";
+    const slope = this.slopeApplied;
+    this.slopeApplied = false;
+    this.applySlopeColors(slope);
+    this.aimSun(id);
+    if (!this.flying) this.focusMountain(id);
   }
 
   get slopeViewOn(): boolean {
@@ -215,7 +252,7 @@ export class World3D {
     this.ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.ndc, this.camera);
     const objs: THREE.Object3D[] = [
-      ...this.pickProxies,
+      ...(this.pickProxy ? [this.pickProxy] : []),
       this.buildingGroup,
       this.trailGroup,
       this.liftGroup,
@@ -308,12 +345,7 @@ export class World3D {
   }
 
   update(game: Game, dt: number): void {
-    if (game.currentMountain !== this.mid) {
-      this.mid = game.currentMountain;
-      this.stamp = "";
-      if (!this.flying) this.focusMountain(this.mid);
-      else this.aimSun(this.mid);
-    }
+    if (game.currentMountain !== this.loadedId) this.loadMountain(game.currentMountain);
     if (this.flying) {
       this.introT += dt * 0.1;
       const a = -0.55 + this.introT;
@@ -393,13 +425,12 @@ export class World3D {
       new THREE.PlaneGeometry(9000 * K, 6000 * K),
       new THREE.MeshLambertMaterial({ color: "#dfe8ef" }),
     );
-    g.position.x = 1000 * K;
+    g.position.x = 0;
     g.rotation.x = -Math.PI / 2;
     g.position.y = -2;
     g.receiveShadow = true;
     this.scene.add(g);
     this.scene.add(this.makeFarTrees());
-    this.scene.add(makeBackdrop());
   }
 
   private makeTerrain(id: MountainId): THREE.Mesh {
@@ -479,7 +510,7 @@ export class World3D {
     // Low-poly stand-in used only for mouse picking (refined against the heightfield).
     const proxy = new THREE.Mesh(makeProxyGeometry(id), new THREE.MeshBasicMaterial({ visible: false }));
     proxy.userData = { kind: "terrain", mountain: id };
-    this.pickProxies.push(proxy);
+    this.pickProxy = proxy;
     this.scene.add(proxy);
     return mesh;
   }
@@ -558,14 +589,6 @@ export class World3D {
     this.layoutBuildings(game);
     this.layoutLift(game);
     this.layoutFeatures(game);
-    this.terrains.forEach((mesh, i) => {
-      const owned = game.owned.includes(i as MountainId);
-      const mat = mesh.material as THREE.MeshStandardMaterial;
-      mat.emissive = new THREE.Color(owned ? "#000000" : "#1a2430");
-      mat.emissiveIntensity = owned ? 0 : 0.12;
-      mat.opacity = owned ? 1 : 0.72;
-      mat.transparent = !owned;
-    });
   }
 
   private layoutFeatures(game: Game): void {
@@ -1045,17 +1068,18 @@ function makeSkirt(id: MountainId): THREE.Mesh {
 }
 
 /** Distant snowy range so the horizon isn't empty. */
-function makeBackdrop(): THREE.Group {
+/** Distant range around one mountain area; each mountain gets its own skyline. */
+function makeBackdrop(id: MountainId): THREE.Group {
   const g = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
   const snow = new THREE.Color("#eef3f8");
   const rockC = new THREE.Color("#7d8794");
   for (let i = 0; i < 26; i++) {
-    const a = (i / 26) * Math.PI * 2 + noise2(i * 1.7, 4) * 0.2;
-    const r = (2300 + noise2(i * 0.9, 7) * 900) * K;
-    const x = 1040 * K + Math.cos(a) * r * 1.35;
+    const a = (i / 26) * Math.PI * 2 + noise2(i * 1.7 + id * 31, 4) * 0.2;
+    const r = (1900 + noise2(i * 0.9 + id * 17, 7) * 900) * K;
+    const x = Math.cos(a) * r * 1.1;
     const z = Math.sin(a) * r;
-    const height = (380 + noise2(i * 2.3, 11) * 520) * K;
+    const height = (380 + noise2(i * 2.3 + id * 13, 11) * 520 + id * 90) * K;
     const geo = new THREE.ConeGeometry(height * 1.25, height, 7, 3);
     const p = geo.getAttribute("position") as THREE.BufferAttribute;
     const colors: number[] = [];

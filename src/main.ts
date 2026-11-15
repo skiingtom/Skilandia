@@ -84,6 +84,8 @@ const cutCost = document.querySelector("#cut-cost")!;
 const finishBtn = document.querySelector<HTMLButtonElement>("#btn-finish-trail")!;
 const toastsEl = document.querySelector("#toasts")!;
 const placeHint = document.querySelector("#place-hint")!;
+const loadingEl = document.querySelector<HTMLElement>("#loading")!;
+const loadingName = document.querySelector("#loading-name")!;
 const cutText = document.querySelector("#cut-text")!;
 const moveBtn = document.querySelector<HTMLButtonElement>("#btn-move-building")!;
 const settingsBtn = document.querySelector<HTMLButtonElement>("#btn-settings")!;
@@ -129,8 +131,16 @@ function moodWord(n: number): string {
 let hudAcc = 0;
 let lastToastId = 0;
 
+/** Top-bar money: exact below a million, then $1.92M style so it fits. */
+function shortMoney(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const a = Math.abs(n);
+  if (a < 1e6) return `${sign}$${Math.round(a).toLocaleString()}`;
+  return `${sign}$${(a / 1e6).toFixed(a < 1e7 ? 2 : 1)}M`;
+}
+
 function paintHud(force = false): void {
-  moneyEl.textContent = `$${Math.round(game.money).toLocaleString()}`;
+  moneyEl.textContent = shortMoney(game.money);
   const load = game.loadLimits();
   skiersEl.textContent = `${game.skiers.length.toLocaleString()} / ${load.comfortable.toLocaleString()}`;
   skiersEl.parentElement!.title =
@@ -138,7 +148,7 @@ function paintHud(force = false): void {
     `(lifts ${load.lifts.toLocaleString()}, runs ${load.runs.toLocaleString()}, mountain max ${load.cap.toLocaleString()}).`;
   moodEl.textContent = moodWord(game.mood);
   ticketsEl.textContent = String(game.ticketsToday);
-  earnedEl.textContent = `$${Math.round(game.lifetimeEarned).toLocaleString()}`;
+  earnedEl.textContent = shortMoney(game.lifetimeEarned);
   dayEl.textContent = game.clockLabel();
   paintMountains();
   paintStaff();
@@ -220,11 +230,37 @@ function paintHud(force = false): void {
   }
 }
 
+/**
+ * Mountains are separate areas: going to another one shows a loading
+ * screen while its terrain is built and the old one is unloaded.
+ */
+function travelTo(id: 0 | 1 | 2): void {
+  if (id === game.currentMountain) return;
+  const owned = game.owned.includes(id);
+  if (!owned && !game.mountainStatus(id).canBuy) {
+    game.buyMountain(id); // explains what's missing
+    paintHud();
+    return;
+  }
+  loadingName.textContent = MOUNTAINS[id].name;
+  loadingEl.classList.remove("hidden");
+  // Let the loading screen paint before the heavy work.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (owned) game.switchMountain(id);
+      else game.buyMountain(id);
+      world.loadMountain(game.currentMountain);
+      paintHud(true);
+      requestAnimationFrame(() => loadingEl.classList.add("hidden"));
+    }),
+  );
+}
+
 function paintMountains(): void {
   mountainsEl.innerHTML = MOUNTAINS.map((m) => {
     const st = game.mountainStatus(m.id);
     let note = m.blurb;
-    if (st.owned) note = m.id === game.currentMountain ? "Managing this hill" : "Owned · click to fly over";
+    if (st.owned) note = m.id === game.currentMountain ? "Managing this hill" : "Owned · click to travel there";
     else if (!st.canUnlock) note = `Earn $${st.missing.toLocaleString()} more to list it`;
     else note = `For sale · $${m.buyCost.toLocaleString()}`;
     return `<button type="button" class="mtn${st.owned && m.id === game.currentMountain ? " on" : ""}" data-mountain="${m.id}">
@@ -233,9 +269,7 @@ function paintMountains(): void {
   mountainsEl.querySelectorAll<HTMLButtonElement>(".mtn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = Number(btn.dataset.mountain) as 0 | 1 | 2;
-      if (game.owned.includes(id)) game.switchMountain(id);
-      else game.buyMountain(id);
-      paintHud();
+      travelTo(id);
     });
   });
 }
@@ -378,12 +412,6 @@ canvas.addEventListener("pointerup", (e) => {
   if (Math.hypot(e.clientX - pointer.downX, e.clientY - pointer.downY) > 6) return;
   const hit = world.hitAt(e.clientX, e.clientY);
   if (!hit) return;
-  if (hit.mountain !== game.currentMountain) {
-    if (game.owned.includes(hit.mountain)) game.switchMountain(hit.mountain);
-    else game.buyMountain(hit.mountain);
-    paintHud();
-    return;
-  }
   const result = game.click(hit.x, hit.y);
   if (result === "shake") {
     audio.error();
